@@ -162,6 +162,18 @@ export class SessionManager extends EventEmitter {
     return session.summary;
   }
 
+  /** Records the outcome of the project's own checks against this lane. Emits a status change so
+   * subscribers re-render: a verification result is part of how a lane reads, not a side note. */
+  setVerification(sessionId: string, verification: SessionSummary['verification']) {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    session.summary.verification = verification;
+    session.summary.updatedAt = new Date().toISOString();
+    this.queuePersist();
+    this.emit('status', session.summary.id, session.summary);
+    return session.summary;
+  }
+
   async diff(sessionId: string) {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);

@@ -24,6 +24,21 @@ export type SessionSummary = {
   worktreePath?: string;
   prepareMs?: number;
   warmedPaths?: string[];
+  verification?: VerificationStatus;
+};
+
+export type VerificationStatus = 'running' | 'passed' | 'failed' | 'unavailable';
+export type VerificationResult = {
+  sessionId: string;
+  status: VerificationStatus;
+  command?: string;
+  source?: 'configured' | 'package.json' | 'cargo' | 'go' | 'makefile';
+  exitCode?: number | null;
+  startedAt: string;
+  durationMs: number;
+  warnings: string[];
+  output: string;
+  detail?: string;
 };
 
 export type SessionSnapshot = SessionSummary & {output: string};
@@ -125,6 +140,8 @@ export const api = {
   stop: (sessionId: string) => daemonRequest<SessionSummary>('sessions.stop', {sessionId}),
   removeWorktree: (sessionId: string) => daemonRequest<SessionSummary>('sessions.removeWorktree', {sessionId}),
   sessionDiff: (sessionId: string) => daemonRequest<SessionDiff>('sessions.diff', {sessionId}),
+  verifySession: (sessionId: string, force = true) => daemonRequest<VerificationResult>('sessions.verify', {sessionId, force}),
+  setVerifyCommand: (project: string, command?: string) => daemonRequest<{command?: string}>('verification.setCommand', {project, command}),
   resize: (sessionId: string, cols: number, rows: number) => daemonRequest<{resized: boolean}>('sessions.resize', {sessionId, cols, rows}),
   hardwareSnapshot: () => daemonRequest<HardwareSnapshot>('hardware.snapshot'),
   softwareSnapshot: () => daemonRequest<SoftwareSnapshot>('software.snapshot'),

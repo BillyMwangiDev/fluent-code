@@ -210,6 +210,12 @@ main {
 .pill.status-running, .pill.status-starting { color: var(--success); border-color: var(--success); }
 .pill.status-failed, .pill.status-error { color: var(--error); border-color: var(--error); }
 .pill.status-default { color: var(--coral); border-color: var(--coral); }
+/* Verification reads against the project's own checks, not the agent's report of its own work —
+   so `failing` is an anomaly and takes Coral, per the brand's reserved use of it. */
+.pill.verify-passed { color: var(--success); border-color: var(--success); }
+.pill.verify-failed { color: var(--coral); border-color: var(--coral); }
+.pill.verify-running { color: var(--fg-muted); border-color: var(--line-strong); }
+.pill.verify-unavailable { color: var(--fg-faint); border-color: var(--line); }
 
 h1.section-title {
   font-family: var(--font-display);

@@ -26,6 +26,9 @@ export type SessionSummary = {
   /** Ignored cache directories reference-cloned into the worktree, empty when the filesystem
    * cannot reflink — so a slow lane start is explainable rather than mysterious. */
   warmedPaths?: string[];
+  /** Outcome of the project's own checks in this lane. Deliberately separate from `status`: a lane
+   * can be running and verified, or exited and failing, and collapsing the two loses that. */
+  verification?: VerificationStatus;
 };
 
 export type SessionSnapshot = SessionSummary & {
@@ -72,6 +75,26 @@ export type ProviderHealth = {
   version?: string;
 };
 
+/** Where the check fluentd ran came from — surfaced so a lane's green says what it actually ran. */
+export type VerificationSource = 'configured' | 'package.json' | 'cargo' | 'go' | 'makefile';
+export type VerificationStatus = 'running' | 'passed' | 'failed' | 'unavailable';
+export type VerificationResult = {
+  sessionId: string;
+  status: VerificationStatus;
+  command?: string;
+  source?: VerificationSource;
+  exitCode?: number | null;
+  startedAt: string;
+  durationMs: number;
+  /** Reasons to read a pass sceptically — chiefly that the lane changed the tests it just passed. */
+  warnings: string[];
+  output: string;
+  detail?: string;
+  /** Identity of the exact tree this result was produced from; a result is reused only for the
+   * identical tree. */
+  treeId?: string;
+};
+
 export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
 /**
  * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
@@ -102,6 +125,9 @@ export type RpcRequest =
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
   | {id: string; method: 'sessions.removeWorktree'; params: {sessionId: string}}
   | {id: string; method: 'sessions.diff'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.verify'; params: {sessionId: string; force?: boolean}}
+  | {id: string; method: 'verification.list'}
+  | {id: string; method: 'verification.setCommand'; params: {project: string; command?: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
@@ -153,7 +179,8 @@ export type RpcEvent =
   | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string}
   /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes
    * from the orchestration column without a visible reason (spec §2 principle 3). */
-  | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>};
+  | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>}
+  | {event: 'sessions.verification'; sessionId: string; result: VerificationResult};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

@@ -16,7 +16,9 @@ import {
   type PriceOverride,
   type ProviderId,
   type SessionSummary,
-  type SpendModelBucket
+  type SpendModelBucket,
+  type VerificationResult,
+  type VerificationStatus
 } from './api';
 
 const root = document.getElementById('app')!;
@@ -111,6 +113,14 @@ function h<K extends keyof HTMLElementTagNameMap>(
   }
   for (const child of children) element.append(child);
   return element;
+}
+
+/** A lane's state against the project's own checks, kept visually distinct from its process
+ * status: a lane can be running and green, or exited and red, and one pill cannot say both. */
+function verificationPill(status?: VerificationStatus) {
+  if (!status) return h('span', {class: 'meta'}, ['—']);
+  const label = {running: 'checking', passed: 'verified', failed: 'failing', unavailable: 'no checks'}[status];
+  return h('span', {class: `pill verify-${status}`}, [label]);
 }
 
 /** Lane-ready latency, shown per session rather than averaged away: this is the number the
@@ -1108,7 +1118,7 @@ async function renderSessions(main: HTMLElement) {
 
   const table = h('table', {class: 'sessions'});
   table.append(
-    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checkout', 'ready in', 'last active'].map(label => h('th', {}, [label])))])
+    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checks', 'checkout', 'ready in', 'last active'].map(label => h('th', {}, [label])))])
   );
   const tbody = h('tbody');
   for (const session of sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
@@ -1118,6 +1128,7 @@ async function renderSessions(main: HTMLElement) {
       h('td', {}, [session.provider]),
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
+      h('td', {}, [verificationPill(session.verification)]),
       h('td', {}, [session.worktreePath ? 'isolated' : 'shared']),
       h('td', {}, [laneReady(session)]),
       h('td', {}, [relativeTime(session.updatedAt)])
@@ -1270,15 +1281,48 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
       }
     });
+    const runChecks = h('button', {class: 'btn'}, ['run checks']);
+    runChecks.addEventListener('click', async () => {
+      review.innerHTML = '';
+      runChecks.disabled = true;
+      try {
+        showVerification(await api.verifySession(sessionId));
+      } catch (error) {
+        review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
+      } finally {
+        runChecks.disabled = false;
+      }
+    });
     header.append(
       h('div', {class: 'meta'}, [
         h('span', {class: 'pill status-default'}, [summary.provider]),
         h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
         h('span', {class: `pill status-${summary.status}`}, [summary.status]),
+        verificationPill(summary.verification),
         h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
       ]),
-      h('div', {class: 'actions'}, [reviewChanges, removeWorktree, stopButton])
+      h('div', {class: 'actions'}, [runChecks, reviewChanges, removeWorktree, stopButton])
     );
+  }
+
+  /** Shows what ran, not just whether it was green — including the reasons to read a pass
+   * sceptically, which is the part a reviewer cannot reconstruct from a pill. */
+  function showVerification(result: VerificationResult) {
+    review.innerHTML = '';
+    const heading = {running: 'checks running', passed: 'checks passed', failed: 'checks failed', unavailable: 'no checks to run'}[result.status];
+    const close = h('button', {class: 'btn'}, ['close']);
+    close.addEventListener('click', () => { review.innerHTML = ''; });
+    review.append(h('div', {class: 'card'}, [
+      h('div', {class: 'toolbar'}, [
+        h('div', {}, [
+          h('h3', {}, [heading]),
+          h('p', {class: 'section-sub'}, [result.command ? `${result.command} · ${result.source} · ${(result.durationMs / 1000).toFixed(1)}s` : result.detail ?? ''])
+        ]),
+        close
+      ]),
+      ...result.warnings.map(warning => h('p', {class: 'error'}, [warning])),
+      result.output ? h('pre', {class: 'diff'}, [result.output]) : h('p', {class: 'section-sub'}, ['The check produced no output.'])
+    ]));
   }
 
   function showBanner(message: string, onSwitch?: () => void) {

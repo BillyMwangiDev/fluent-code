@@ -13,6 +13,7 @@ import {ResourceMonitorClient} from './resource-monitor-client.js';
 import {SpendTracker} from './spend-tracker.js';
 import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
+import {VerificationRunner} from './verification.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -26,6 +27,7 @@ const resources = new ResourceMonitorClient();
 const spend = new SpendTracker();
 const openDesign = new OpenDesignManager();
 const designTools = new DesignToolManager();
+const verification = new VerificationRunner();
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -68,6 +70,13 @@ manager.on('status', (sessionId: string, summary) => {
   if (summary.status === 'exited' || summary.status === 'stopped' || summary.status === 'failed') {
     void coordination.releaseSession(sessionId).catch(error => console.error(`fluentd could not release claims for ${sessionId}: ${error.message}`));
   }
+  // An isolated lane that exited is done, and its worktree is the thing being judged — so gate it
+  // on the project's own checks without waiting to be asked. A session sharing the user's own
+  // checkout is deliberately left alone: running their suite unprompted in their working tree is
+  // intrusive in a way it is not in a lane opened for one task.
+  if (summary.status === 'exited' && summary.worktreePath && summary.verification !== 'running') {
+    void verifySession(sessionId).catch(error => console.error(`fluentd could not verify ${sessionId}: ${error.message}`));
+  }
 });
 broker.on('switched', (provider, accountId, reason) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
@@ -75,6 +84,24 @@ broker.on('switched', (provider, accountId, reason) => {
 broker.on('notice', (provider, message, resetAt) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.notice', provider, message, resetAt});
 });
+
+/**
+ * Runs the lane's project against its own checks and records the result on the session, so what
+ * the session list shows is a check that ran rather than the agent's account of its own work.
+ */
+async function verifySession(sessionId: string, force = false) {
+  const session = manager.get(sessionId);
+  manager.setVerification(sessionId, 'running');
+  const result = await verification.verify({
+    sessionId,
+    directory: session.directory,
+    project: session.projectDirectory ?? session.directory,
+    force
+  });
+  manager.setVerification(sessionId, result.status);
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.verification', sessionId, result});
+  return result;
+}
 
 /**
  * Renews the claims of every live lane and drops the ones whose lease lapsed — the safety net for
@@ -122,6 +149,9 @@ async function dispatch(request: RpcRequest) {
     case 'sessions.stop': return manager.stop(request.params.sessionId);
     case 'sessions.removeWorktree': return manager.removeWorktree(request.params.sessionId);
     case 'sessions.diff': return manager.diff(request.params.sessionId);
+    case 'sessions.verify': return verifySession(request.params.sessionId, request.params.force ?? true);
+    case 'verification.list': return verification.list();
+    case 'verification.setCommand': return {command: await verification.setCommand(request.params.project, request.params.command)};
     case 'sessions.resize': manager.resize(request.params.sessionId, request.params.cols, request.params.rows); return {resized: true};
     case 'hardware.snapshot': return hardware.snapshot();
     case 'software.snapshot': return software.snapshot();
@@ -169,6 +199,7 @@ async function main() {
   await usage.restore();
   await spend.restore();
   await openDesign.restore();
+  await verification.restore();
   resources.start(process.pid);
   hardware.start();
   // Half the lease, so a live lane is always renewed well before its claims could lapse.
