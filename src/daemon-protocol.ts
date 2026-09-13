@@ -157,6 +157,31 @@ export type AdmissionVerdict = {
   reasons: string[];
 };
 
+/**
+ * One scored eval case. Evals answer what tests cannot: a test proves `fluent-coord` works, an eval
+ * measures whether an agent actually *uses* it. `delta` is what the skill was worth on this case
+ * under with/without ablation.
+ */
+export type EvalCaseResult = {name: string; score: number; passRate: number; runs: number; costUsd: number; delta?: number; notes?: string};
+export type EvalRun = {
+  schemaVersion: number;
+  claudeVersion?: string;
+  startedAt: string;
+  durationSeconds: number;
+  costUsd: number;
+  /** True when a cost ceiling or interrupt cut the run short — the scores below are incomplete. */
+  partial: boolean;
+  ablation?: string;
+  threshold: number;
+  casesTotal: number;
+  casesPassed: number;
+  overallScore: number;
+  overallPassRate: number;
+  cases: EvalCaseResult[];
+  /** Local path to the self-contained HTML report, never published on the user's behalf. */
+  reportPath?: string;
+};
+
 export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
 /**
  * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
@@ -217,6 +242,8 @@ export type RpcRequest =
   | {id: string; method: 'agent.inbox'; params: {cwd: string; peek?: boolean}}
   | {id: string; method: 'skills.status'}
   | {id: string; method: 'skills.install'}
+  | {id: string; method: 'evals.latest'}
+  | {id: string; method: 'evals.run'; params: {maxCostUsd?: number; caseGlob?: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
@@ -280,7 +307,8 @@ export type RpcEvent =
   /** Pushed when a lane starts with no headroom — a warning after the fact, never a refusal. */
   | {event: 'admission.warning'; sessionId: string; verdict: AdmissionVerdict}
   /** A lane sent another lane a message — surfaced so cross-lane traffic is never invisible. */
-  | {event: 'coordination.message'; project: string; message: LaneMessage};
+  | {event: 'coordination.message'; project: string; message: LaneMessage}
+  | {event: 'evals.finished'; run: EvalRun};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

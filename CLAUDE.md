@@ -38,6 +38,11 @@ out of scope; see the spec's Non-goals section.
   direction flag ([`src/agent-briefing.ts`](./src/agent-briefing.ts)), and the `fluent-collab`
   skill ([`src/collab-skill.ts`](./src/collab-skill.ts)) installed into *both* providers' user
   skill directories, which is what lets a Codex lane and a Claude lane collaborate as peers.
+- [`plugin/fluent-collab/evals/`](./plugin/fluent-collab/evals/) — the eval suite for the
+  collaboration skill, run by [`src/eval-runner.ts`](./src/eval-runner.ts) through Claude Code's
+  built-in `claude plugin eval`. Tests prove `fluent-coord` works; evals measure whether an agent
+  actually *uses* it, scored with and without the skill. `pnpm evals:check` validates the suite for
+  $0 (CI-safe); `pnpm evals` runs it for real and costs money on your own credential.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
   prototype (spec §7.4) — port their RPC wiring to the Tauri frontend, not their JSX.

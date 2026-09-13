@@ -21,6 +21,7 @@ import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type
 import {AdmissionAdvisor} from './admission.js';
 import {renderInbox} from './agent-view.js';
 import {installSkill, skillStatus} from './collab-skill.js';
+import {EvalRunner} from './eval-runner.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -40,6 +41,7 @@ const merges = new MergeQueue(verification);
 /** One structured control channel per running Codex lane, alongside its PTY (R1). */
 const codexChannels = new Map<string, CodexAppServer>();
 const admission = new AdmissionAdvisor();
+const evals = new EvalRunner();
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -418,6 +420,13 @@ async function dispatch(request: RpcRequest) {
     }
     case 'skills.status': return skillStatus();
     case 'skills.install': return installSkill();
+    case 'evals.latest': return {run: evals.last(), running: evals.isRunning()};
+    case 'evals.run': {
+      // Never automatic: every case spawns real agent runs on the user's own credential.
+      const result = await evals.run({maxCostUsd: request.params.maxCostUsd, caseGlob: request.params.caseGlob});
+      for (const socket of streamingSockets) pushEvent(socket, {event: 'evals.finished', run: result});
+      return result;
+    }
     case 'agent.handoff': {
       const {session, project} = laneFor(request.params.cwd);
       const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
@@ -479,6 +488,7 @@ async function main() {
   await spend.restore();
   await openDesign.restore();
   await verification.restore();
+  await evals.restore();
   resources.start(process.pid);
   hardware.start();
   // Half the lease, so a live lane is always renewed well before its claims could lapse.

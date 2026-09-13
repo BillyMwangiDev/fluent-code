@@ -638,6 +638,7 @@ async function renderOrchestration(main: HTMLElement) {
   const state = await api.coordination(project);
   const conflicts = await api.conflicts(project);
   const skills = await api.skillStatus().catch(() => []);
+  const evals = await api.latestEvals().catch(() => ({run: undefined, running: false}));
   const live = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
   const taskInput = h('input', {type: 'text', placeholder: 'add a shared task'});
   const addTask = h('button', {class: 'btn primary'}, ['add task']);
@@ -743,9 +744,48 @@ async function renderOrchestration(main: HTMLElement) {
     }
   });
 
+  // Tests prove `fluent-coord` works. Only an eval can show whether an agent actually *uses* it —
+  // a skill is a prompt, and a prompt's effect is measured, not asserted.
+  const evalRun = evals.run;
+  const evalRows = evalRun
+    ? evalRun.cases.map(result => h('div', {class: 'option-row'}, [
+        h('span', {class: 'label'}, [result.name]),
+        h('span', {class: result.score >= evalRun.threshold ? 'meta' : 'error'}, [
+          `${Math.round(result.score * 100)}% · ${result.runs} runs${result.delta === undefined ? '' : ` · Δ ${result.delta >= 0 ? '+' : ''}${Math.round(result.delta * 100)}`}`
+        ])
+      ]))
+    : [h('p', {class: 'section-sub'}, ['No eval run yet. Evals measure whether agents actually use the coordination surface — the tests cannot tell you that.'])];
+
+  const evalSummary = h('p', {class: 'section-sub'}, [
+    evalRun
+      ? `${evalRun.casesPassed}/${evalRun.casesTotal} cases passed · ${Math.round(evalRun.overallScore * 100)}% overall · $${evalRun.costUsd.toFixed(2)} · ${relativeTime(evalRun.startedAt)}${evalRun.partial ? ' · partial run' : ''}${evalRun.ablation === 'with-without' ? ' · Δ is the skill\'s contribution' : ''}`
+      : 'Each case runs with and without the skill, so the score separates the skill from the model.'
+  ]);
+  const evalButton = h('button', {class: 'btn'}, [evals.running ? 'eval running…' : 'run evals']);
+  evalButton.disabled = evals.running;
+  const evalNotice = h('p', {class: 'section-sub'}, [
+    evalRun?.reportPath ? `Report: ${evalRun.reportPath}` : 'Runs on this machine, on your own credential — nothing is published.'
+  ]);
+  evalButton.addEventListener('click', async () => {
+    // Real agent runs on the user's credential: this spends money and quota, so it is never
+    // started without being asked for.
+    if (!confirm('Run the eval suite? Each case runs with and without the skill using real agent runs on your own credential, up to a $2 ceiling.')) return;
+    evalButton.disabled = true;
+    evalButton.textContent = 'eval running…';
+    try {
+      await api.runEvals(2);
+    } catch (error) {
+      evalNotice.textContent = error instanceof Error ? error.message : String(error);
+      evalNotice.className = 'error';
+    } finally {
+      void render();
+    }
+  });
+
   main.append(h('div', {class: 'cards-row'}, [
     h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows]),
-    h('div', {class: 'card'}, [h('h3', {}, ['collaboration skill']), installNotice, h('div', {class: 'field'}, [installButton])])
+    h('div', {class: 'card'}, [h('h3', {}, ['collaboration skill']), installNotice, h('div', {class: 'field'}, [installButton])]),
+    h('div', {class: 'card'}, [h('h3', {}, ['eval suite']), evalSummary, ...evalRows, evalNotice, h('div', {class: 'field'}, [evalButton])])
   ]));
 }
 

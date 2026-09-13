@@ -87,6 +87,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("coordination.message") => {
             let _ = app.emit("coordination-message", event);
         }
+        Some("evals.finished") => {
+            let _ = app.emit("evals-finished", event);
+        }
         _ => {}
     }
 }

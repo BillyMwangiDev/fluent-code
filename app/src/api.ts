@@ -132,6 +132,23 @@ export type CoordinationState = {
   messages: LaneMessage[];
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
 };
+export type EvalCaseResult = {name: string; score: number; passRate: number; runs: number; costUsd: number; delta?: number; notes?: string};
+export type EvalRun = {
+  schemaVersion: number;
+  claudeVersion?: string;
+  startedAt: string;
+  durationSeconds: number;
+  costUsd: number;
+  partial: boolean;
+  ablation?: string;
+  threshold: number;
+  casesTotal: number;
+  casesPassed: number;
+  overallScore: number;
+  overallPassRate: number;
+  cases: EvalCaseResult[];
+  reportPath?: string;
+};
 export type LaneMessage = {id: string; from: string; to: string; body: string; createdAt: string; readAt?: string};
 export type SkillInstallState = {provider: ProviderId; path: string; installed: boolean; current: boolean};
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
@@ -213,6 +230,8 @@ export const api = {
   messages: (project: string) => daemonRequest<LaneMessage[]>('coordination.messages', {project}),
   skillStatus: () => daemonRequest<SkillInstallState[]>('skills.status'),
   installSkill: () => daemonRequest<SkillInstallState[]>('skills.install'),
+  latestEvals: () => daemonRequest<{run?: EvalRun; running: boolean}>('evals.latest'),
+  runEvals: (maxCostUsd: number) => daemonRequest<EvalRun>('evals.run', {maxCostUsd}),
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),
   acceptHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.accept', {project, handoffId}),
@@ -279,6 +298,10 @@ export function onAdmissionWarning(handler: (event: {sessionId: string; verdict:
 
 export function onMergeOutcome(handler: (event: {outcome: MergeOutcome}) => void) {
   return listen<{outcome: MergeOutcome}>('merge-outcome', event => handler(event.payload));
+}
+
+export function onEvalsFinished(handler: (event: {run: EvalRun}) => void) {
+  return listen<{run: EvalRun}>('evals-finished', event => handler(event.payload));
 }
 
 export function onCoordinationMessage(handler: (event: {project: string; message: LaneMessage}) => void) {

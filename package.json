@@ -17,6 +17,8 @@
     "start": "tsx src/index.tsx",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "evals": "tsx scripts/run-evals.mts",
+    "evals:check": "tsx scripts/run-evals.mts --validate-only",
     "check:frontend": "tsc --noEmit -p app/tsconfig.json",
     "build:frontend": "esbuild app/src/main.ts --bundle --outdir=app/dist --format=esm --platform=browser --target=es2022 --loader:.woff=file --loader:.woff2=file",
     "tauri": "tauri"
