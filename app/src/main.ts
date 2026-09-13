@@ -183,6 +183,7 @@ async function render() {
   root.innerHTML = '';
   const main = h('main');
   if (route.name === 'splash') {
+    main.classList.add('splash-main');
     root.append(main);
   } else {
     // The shell is deliberately stable while routes change. It keeps project, target, and the
@@ -736,11 +737,17 @@ function pluginRow(plugin: CatalogPlugin, onInstall: () => void): HTMLElement {
   const installButton = h('button', {class: `btn${plugin.installed ? '' : ' primary'}`}, [plugin.installed ? 'installed' : 'install']);
   installButton.toggleAttribute('disabled', plugin.installed);
   if (!plugin.installed) installButton.addEventListener('click', onInstall);
+  // Neither CLI's own listing flags a source as vendor-published, so this is the one place the
+  // trust boundary is visible at all — quiet by default (no badge) for the provider's own
+  // marketplace, and named rather than hidden for everything else (README's "trusted-source
+  // policy" gap).
+  const trustBadge = plugin.officialSource ? null : h('span', {class: 'pill'}, ['third-party']);
   return h('div', {class: 'option-row'}, [
     h('div', {}, [
       h('div', {class: 'label'}, [plugin.name]),
       h('div', {class: 'meta'}, [plugin.description ? `${plugin.description} — ${meta}` : meta])
     ]),
+    ...(trustBadge ? [trustBadge] : []),
     installButton
   ]);
 }
@@ -826,7 +833,10 @@ async function renderCatalog(main: HTMLElement) {
       for (const plugin of shown) {
         pluginList.append(
         pluginRow(plugin, async () => {
-            if (!confirm(`Install ${plugin.name} from ${plugin.marketplace} for ${providerLabel[plugin.target]}? This runs the provider CLI and may add third-party code.`)) return;
+            const sourceNotice = plugin.officialSource
+              ? `${plugin.marketplace} is ${providerLabel[plugin.target]}'s own marketplace.`
+              : `${plugin.marketplace} is a third-party marketplace, not published by ${providerLabel[plugin.target]} — review it before installing.`;
+            if (!confirm(`Install ${plugin.name} for ${providerLabel[plugin.target]}? ${sourceNotice} This runs the provider CLI and may add third-party code.`)) return;
             const result = await api.installCatalogPlugin(plugin.target, plugin.id);
             if (result.ok) {
               plugin.installed = true;
