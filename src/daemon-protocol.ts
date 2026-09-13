@@ -95,6 +95,30 @@ export type VerificationResult = {
   treeId?: string;
 };
 
+/** What integrating one lane would do, computed without touching any working tree. */
+export type MergePlan = {
+  sessionId: string;
+  /** Branch in the project checkout the lane would merge into. */
+  base: string;
+  baseHead: string;
+  laneHead: string;
+  uncommittedFiles: number;
+  ahead: number;
+  /** Files git predicts would conflict, from `merge-tree` — no tree is modified to find them. */
+  conflicts: string[];
+  /** Reasons integration cannot proceed right now, in plain language. */
+  blockers: string[];
+};
+
+export type MergeOutcome = {
+  sessionId: string;
+  status: 'merged' | 'blocked' | 'conflicted' | 'unverified' | 'failed';
+  plan: MergePlan;
+  verification?: VerificationResult;
+  detail: string;
+  mergeCommit?: string;
+};
+
 export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
 /**
  * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
@@ -131,6 +155,9 @@ export type RpcRequest =
   | {id: string; method: 'sessions.verify'; params: {sessionId: string; force?: boolean}}
   | {id: string; method: 'verification.list'}
   | {id: string; method: 'verification.setCommand'; params: {project: string; command?: string}}
+  | {id: string; method: 'merge.plan'; params: {sessionId: string}}
+  | {id: string; method: 'merge.integrate'; params: {sessionId: string}}
+  | {id: string; method: 'merge.pending'; params: {project: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
@@ -187,7 +214,8 @@ export type RpcEvent =
   | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>}
   | {event: 'sessions.verification'; sessionId: string; result: VerificationResult}
   /** Pushed when the set of overlaps in a project changes — a quiet sweep stays quiet. */
-  | {event: 'coordination.conflicts'; project: string; conflicts: RankedConflict[]};
+  | {event: 'coordination.conflicts'; project: string; conflicts: RankedConflict[]}
+  | {event: 'merge.outcome'; outcome: MergeOutcome};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

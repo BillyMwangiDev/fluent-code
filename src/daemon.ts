@@ -15,6 +15,7 @@ import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
 import {VerificationRunner} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
+import {MergeQueue} from './merge-queue.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -30,6 +31,7 @@ const openDesign = new OpenDesignManager();
 const designTools = new DesignToolManager();
 const verification = new VerificationRunner();
 const claimObserver = new ClaimObserver(coordination);
+const merges = new MergeQueue(verification);
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -104,6 +106,18 @@ async function verifySession(sessionId: string, force = false) {
   manager.setVerification(sessionId, result.status);
   for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.verification', sessionId, result});
   return result;
+}
+
+/**
+ * Queues a lane for integration and re-broadcasts the outcome. The lane is re-read when its turn
+ * comes rather than captured now: by then an earlier lane may have merged, moving the base it will
+ * be planned against.
+ */
+async function integrateSession(sessionId: string) {
+  const outcome = await merges.integrate(manager.get(sessionId), id => manager.get(id));
+  if (outcome.status === 'merged') manager.setVerification(sessionId, outcome.verification?.status);
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'merge.outcome', outcome});
+  return outcome;
 }
 
 /**
@@ -185,6 +199,9 @@ async function dispatch(request: RpcRequest) {
     case 'sessions.verify': return verifySession(request.params.sessionId, request.params.force ?? true);
     case 'verification.list': return verification.list();
     case 'verification.setCommand': return {command: await verification.setCommand(request.params.project, request.params.command)};
+    case 'merge.plan': return merges.plan(manager.get(request.params.sessionId));
+    case 'merge.integrate': return integrateSession(request.params.sessionId);
+    case 'merge.pending': return merges.pending(request.params.project);
     case 'sessions.resize': manager.resize(request.params.sessionId, request.params.cols, request.params.rows); return {resized: true};
     case 'hardware.snapshot': return hardware.snapshot();
     case 'software.snapshot': return software.snapshot();

@@ -35,6 +35,25 @@ export type FallbackGuidance = {
   detail: string;
 };
 
+export type MergePlan = {
+  sessionId: string;
+  base: string;
+  baseHead: string;
+  laneHead: string;
+  uncommittedFiles: number;
+  ahead: number;
+  conflicts: string[];
+  blockers: string[];
+};
+export type MergeOutcome = {
+  sessionId: string;
+  status: 'merged' | 'blocked' | 'conflicted' | 'unverified' | 'failed';
+  plan: MergePlan;
+  verification?: VerificationResult;
+  detail: string;
+  mergeCommit?: string;
+};
+
 export type VerificationStatus = 'running' | 'passed' | 'failed' | 'unavailable';
 export type VerificationResult = {
   sessionId: string;
@@ -150,6 +169,9 @@ export const api = {
   removeWorktree: (sessionId: string) => daemonRequest<SessionSummary>('sessions.removeWorktree', {sessionId}),
   sessionDiff: (sessionId: string) => daemonRequest<SessionDiff>('sessions.diff', {sessionId}),
   verifySession: (sessionId: string, force = true) => daemonRequest<VerificationResult>('sessions.verify', {sessionId, force}),
+  mergePlan: (sessionId: string) => daemonRequest<MergePlan>('merge.plan', {sessionId}),
+  mergeIntegrate: (sessionId: string) => daemonRequest<MergeOutcome>('merge.integrate', {sessionId}),
+  mergePending: (project: string) => daemonRequest<string[]>('merge.pending', {project}),
   setVerifyCommand: (project: string, command?: string) => daemonRequest<{command?: string}>('verification.setCommand', {project, command}),
   resize: (sessionId: string, cols: number, rows: number) => daemonRequest<{resized: boolean}>('sessions.resize', {sessionId, cols, rows}),
   hardwareSnapshot: () => daemonRequest<HardwareSnapshot>('hardware.snapshot'),
@@ -225,6 +247,10 @@ export function onCredentialSwitched(handler: (event: {provider: ProviderId; acc
 
 export function onCredentialNotice(handler: (event: {provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}) => void) {
   return listen<{provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}>('credential-notice', event => handler(event.payload));
+}
+
+export function onMergeOutcome(handler: (event: {outcome: MergeOutcome}) => void) {
+  return listen<{outcome: MergeOutcome}>('merge-outcome', event => handler(event.payload));
 }
 
 export function onConflicts(handler: (event: {project: string; conflicts: RankedConflict[]}) => void) {

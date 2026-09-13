@@ -78,6 +78,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("coordination.conflicts") => {
             let _ = app.emit("coordination-conflicts", event);
         }
+        Some("merge.outcome") => {
+            let _ = app.emit("merge-outcome", event);
+        }
         _ => {}
     }
 }

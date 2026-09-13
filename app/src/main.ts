@@ -16,6 +16,8 @@ import {
   type HardwareSample,
   type PriceOverride,
   type ProviderId,
+  type MergeOutcome,
+  type MergePlan,
   type SessionSummary,
   type SpendModelBucket,
   type VerificationResult,
@@ -1294,6 +1296,21 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
       }
     });
+    // Merging writes to the user's own checkout, so it is two deliberate steps: see exactly what
+    // would happen, then say yes. Nothing here resolves a conflict or rewrites history.
+    const mergeLane = h('button', {class: 'btn'}, ['merge lane']);
+    mergeLane.disabled = !summary.worktreePath;
+    mergeLane.addEventListener('click', async () => {
+      review.innerHTML = '';
+      mergeLane.disabled = true;
+      try {
+        showMergePlan(await api.mergePlan(sessionId));
+      } catch (error) {
+        review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
+      } finally {
+        mergeLane.disabled = !summary.worktreePath;
+      }
+    });
     const runChecks = h('button', {class: 'btn'}, ['run checks']);
     runChecks.addEventListener('click', async () => {
       review.innerHTML = '';
@@ -1314,8 +1331,51 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         verificationPill(summary.verification),
         h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
       ]),
-      h('div', {class: 'actions'}, [runChecks, reviewChanges, removeWorktree, stopButton])
+      h('div', {class: 'actions'}, [mergeLane, runChecks, reviewChanges, removeWorktree, stopButton])
     );
+  }
+
+  /** The plan before the merge: which branch, how many commits, what git predicts would conflict,
+   * and anything standing in the way — stated before anything is touched, not after. */
+  function showMergePlan(plan: MergePlan) {
+    review.innerHTML = '';
+    const blocked = plan.blockers.length > 0 || plan.conflicts.length > 0;
+    const close = h('button', {class: 'btn'}, ['close']);
+    close.addEventListener('click', () => { review.innerHTML = ''; });
+    const confirm = h('button', {class: 'btn primary'}, [`merge into ${plan.base}`]);
+    confirm.disabled = blocked;
+    confirm.addEventListener('click', async () => {
+      confirm.disabled = true;
+      try {
+        showMergeOutcome(await api.mergeIntegrate(sessionId));
+      } catch (error) {
+        review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
+      }
+    });
+    review.append(h('div', {class: 'card'}, [
+      h('div', {class: 'toolbar'}, [
+        h('div', {}, [
+          h('h3', {}, [blocked ? 'this lane cannot merge yet' : `merge into ${plan.base}`]),
+          h('p', {class: 'section-sub'}, [`${plan.ahead} commit${plan.ahead === 1 ? '' : 's'} ahead · ${plan.uncommittedFiles} uncommitted file${plan.uncommittedFiles === 1 ? '' : 's'} · checks run before anything merges`])
+        ]),
+        h('div', {class: 'actions'}, [confirm, close])
+      ]),
+      ...plan.blockers.map(blocker => h('p', {class: 'error'}, [blocker])),
+      ...(plan.conflicts.length > 0
+        ? [h('p', {class: 'error'}, [`git predicts ${plan.conflicts.length} conflicting file${plan.conflicts.length === 1 ? '' : 's'}. Resolve them in the lane, then try again — fluentd will not resolve them for you.`]), h('pre', {class: 'diff'}, [plan.conflicts.join('\n')])]
+        : [])
+    ]));
+  }
+
+  function showMergeOutcome(outcome: MergeOutcome) {
+    review.innerHTML = '';
+    const close = h('button', {class: 'btn'}, ['close']);
+    close.addEventListener('click', () => { review.innerHTML = ''; });
+    review.append(h('div', {class: 'card'}, [
+      h('div', {class: 'toolbar'}, [h('div', {}, [h('h3', {}, [outcome.status === 'merged' ? 'merged' : `not merged — ${outcome.status}`])]), close]),
+      h('p', {class: outcome.status === 'merged' ? 'section-sub' : 'error'}, [outcome.detail]),
+      ...(outcome.verification?.output && outcome.status === 'unverified' ? [h('pre', {class: 'diff'}, [outcome.verification.output])] : [])
+    ]));
   }
 
   /** Shows what ran, not just whether it was green — including the reasons to read a pass
