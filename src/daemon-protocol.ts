@@ -162,6 +162,25 @@ export type AdmissionVerdict = {
  * measures whether an agent actually *uses* it. `delta` is what the skill was worth on this case
  * under with/without ablation.
  */
+/** What a run will cost in work, before it is started. */
+export type EvalPlan = {cases: string[]; runsPerCase: number; arms: number; totalRuns: number};
+/**
+ * Everything the UI needs to ask for consent in the right currency: a subscription is spent in
+ * quota, platform credits and an API key in dollars.
+ */
+export type EvalReadiness = {
+  plan: EvalPlan;
+  running: boolean;
+  run?: EvalRun;
+  /** The Claude credential Fluent would run the evaluator on. */
+  accountId?: string;
+  accountLabel?: string;
+  mode?: CredentialMode;
+  /** Where that credential's five-hour-shaped window stands, when the provider has reported one. */
+  quotaUsedPercent?: number;
+  quotaResetsAt?: string;
+};
+
 export type EvalCaseResult = {name: string; score: number; passRate: number; runs: number; costUsd: number; delta?: number; notes?: string};
 export type EvalRun = {
   schemaVersion: number;
@@ -243,6 +262,7 @@ export type RpcRequest =
   | {id: string; method: 'skills.status'}
   | {id: string; method: 'skills.install'}
   | {id: string; method: 'evals.latest'}
+  | {id: string; method: 'evals.readiness'}
   | {id: string; method: 'evals.run'; params: {maxCostUsd?: number; caseGlob?: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}

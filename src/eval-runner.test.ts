@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
 import {after, describe, it} from 'node:test';
-import {evalSuiteDirectory, materializePlugin, parseEvalRun} from './eval-runner.js';
+import {EvalRunner, evalSuiteDirectory, materializePlugin, parseEvalRun, planEvals} from './eval-runner.js';
 import {skillContent} from './collab-skill.js';
 
 const run = promisify(execFile);
@@ -56,6 +56,34 @@ describe('the authored suite loads in the real evaluator', {skip: claudeInstalle
     assert.doesNotMatch(output, /failed to load/);
     assert.doesNotMatch(output, /not granted/, 'the runner passes --allow-tools Bash; the suite must not need more than that');
     assert.match(output, /\$0\.00/);
+  });
+});
+
+describe('planning a run before spending anything', () => {
+  it('counts every authored case against both arms', async () => {
+    const plan = await planEvals();
+
+    assert.deepEqual(plan.cases, ['claims-before-editing', 'proposes-rather-than-assigns', 'respects-a-refusal']);
+    assert.equal(plan.runsPerCase, 3);
+    assert.equal(plan.arms, 2, 'with/without ablation doubles the runs');
+    assert.equal(plan.totalRuns, 18, 'the evaluator itself reports 18 runs for this suite');
+  });
+
+  it('reports an empty plan rather than failing when there is no suite', async () => {
+    const plan = await planEvals(join(await scratch(), 'no-such-suite'));
+
+    assert.deepEqual(plan.cases, []);
+    assert.equal(plan.totalRuns, 0);
+  });
+});
+
+describe('which credential the evaluator runs on', () => {
+  it('refuses to start a second run while one is in flight', async () => {
+    const runner = new EvalRunner(await scratch());
+    const first = runner.run({env: {ANTHROPIC_API_KEY: 'not-a-real-key'}}).catch(() => undefined);
+
+    await assert.rejects(() => runner.run(), /already in progress/);
+    await first;
   });
 });
 

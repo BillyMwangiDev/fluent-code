@@ -132,6 +132,17 @@ export type CoordinationState = {
   messages: LaneMessage[];
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
 };
+export type EvalPlan = {cases: string[]; runsPerCase: number; arms: number; totalRuns: number};
+export type EvalReadiness = {
+  plan: EvalPlan;
+  running: boolean;
+  run?: EvalRun;
+  accountId?: string;
+  accountLabel?: string;
+  mode?: CredentialMode;
+  quotaUsedPercent?: number;
+  quotaResetsAt?: string;
+};
 export type EvalCaseResult = {name: string; score: number; passRate: number; runs: number; costUsd: number; delta?: number; notes?: string};
 export type EvalRun = {
   schemaVersion: number;
@@ -230,7 +241,7 @@ export const api = {
   messages: (project: string) => daemonRequest<LaneMessage[]>('coordination.messages', {project}),
   skillStatus: () => daemonRequest<SkillInstallState[]>('skills.status'),
   installSkill: () => daemonRequest<SkillInstallState[]>('skills.install'),
-  latestEvals: () => daemonRequest<{run?: EvalRun; running: boolean}>('evals.latest'),
+  evalReadiness: () => daemonRequest<EvalReadiness>('evals.readiness'),
   runEvals: (maxCostUsd: number) => daemonRequest<EvalRun>('evals.run', {maxCostUsd}),
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),

@@ -638,7 +638,7 @@ async function renderOrchestration(main: HTMLElement) {
   const state = await api.coordination(project);
   const conflicts = await api.conflicts(project);
   const skills = await api.skillStatus().catch(() => []);
-  const evals = await api.latestEvals().catch(() => ({run: undefined, running: false}));
+  const evals = await api.evalReadiness().catch(() => undefined);
   const live = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
   const taskInput = h('input', {type: 'text', placeholder: 'add a shared task'});
   const addTask = h('button', {class: 'btn primary'}, ['add task']);
@@ -746,7 +746,18 @@ async function renderOrchestration(main: HTMLElement) {
 
   // Tests prove `fluent-coord` works. Only an eval can show whether an agent actually *uses* it —
   // a skill is a prompt, and a prompt's effect is measured, not asserted.
-  const evalRun = evals.run;
+  const evalRun = evals?.run;
+  // A subscription is spent in quota and an API key in dollars, so the consent question has to be
+  // asked in whichever one this credential actually uses — a "$2 ceiling" means nothing on a
+  // subscription, where the ceiling never trips.
+  const spendsDollars = evals?.mode === 'platform-credits' || evals?.mode === 'api-key';
+  const runCount = evals?.plan.totalRuns ?? 0;
+  const quotaNote = evals?.quotaUsedPercent === undefined
+    ? ''
+    : ` Your subscription's current window is at ${Math.round(evals.quotaUsedPercent)}%.`;
+  const costSentence = spendsDollars
+    ? `${runCount} real agent runs on ${evals?.accountLabel ?? 'this credential'}, stopping at a $2 ceiling.`
+    : `${runCount} real agent runs against ${evals?.accountLabel ? `${evals.accountLabel}'s` : 'your subscription'} quota — not billed in dollars, so the cost ceiling will not stop it.${quotaNote}`;
   const evalRows = evalRun
     ? evalRun.cases.map(result => h('div', {class: 'option-row'}, [
         h('span', {class: 'label'}, [result.name]),
@@ -761,15 +772,15 @@ async function renderOrchestration(main: HTMLElement) {
       ? `${evalRun.casesPassed}/${evalRun.casesTotal} cases passed · ${Math.round(evalRun.overallScore * 100)}% overall · $${evalRun.costUsd.toFixed(2)} · ${relativeTime(evalRun.startedAt)}${evalRun.partial ? ' · partial run' : ''}${evalRun.ablation === 'with-without' ? ' · Δ is the skill\'s contribution' : ''}`
       : 'Each case runs with and without the skill, so the score separates the skill from the model.'
   ]);
-  const evalButton = h('button', {class: 'btn'}, [evals.running ? 'eval running…' : 'run evals']);
-  evalButton.disabled = evals.running;
+  const evalButton = h('button', {class: 'btn'}, [evals?.running ? 'eval running…' : 'run evals']);
+  evalButton.disabled = evals?.running ?? true;
   const evalNotice = h('p', {class: 'section-sub'}, [
-    evalRun?.reportPath ? `Report: ${evalRun.reportPath}` : 'Runs on this machine, on your own credential — nothing is published.'
+    evalRun?.reportPath ? `Report: ${evalRun.reportPath}` : `Runs locally on ${evals?.accountLabel ?? 'your active credential'} — nothing is published. ${costSentence}`
   ]);
   evalButton.addEventListener('click', async () => {
-    // Real agent runs on the user's credential: this spends money and quota, so it is never
-    // started without being asked for.
-    if (!confirm('Run the eval suite? Each case runs with and without the skill using real agent runs on your own credential, up to a $2 ceiling.')) return;
+    // Real agent runs on the active credential, so it is never started without being asked for —
+    // in the currency that credential is actually spent in.
+    if (!confirm(`Run the eval suite? ${costSentence}`)) return;
     evalButton.disabled = true;
     evalButton.textContent = 'eval running…';
     try {

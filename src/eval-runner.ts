@@ -1,11 +1,11 @@
 import {execFile} from 'node:child_process';
-import {cp, mkdir, mkdtemp, readFile, rename, rm, writeFile} from 'node:fs/promises';
+import {cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {skillContent, skillName} from './collab-skill.js';
-import type {EvalCaseResult, EvalRun} from './daemon-protocol.js';
+import type {EvalCaseResult, EvalPlan, EvalRun} from './daemon-protocol.js';
 
 const run = promisify(execFile);
 const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -27,6 +27,24 @@ export async function materializePlugin(directory: string) {
   await writeFile(join(directory, 'SKILL.md'), skillContent(), 'utf8');
   await cp(evalSuiteDirectory, join(directory, 'evals'), {recursive: true});
   return directory;
+}
+
+/** The evaluator's own defaults: three runs per case, and a second no-plugin arm whenever a plugin
+ * resolves — which it always does here, since the target is the assembled plugin directory. */
+const defaultRunsPerCase = 3;
+const ablationArms = 2;
+
+/**
+ * How much work a run is about to be, counted before anything is spent.
+ *
+ * Worth counting separately from cost because cost is the wrong unit on a subscription: a
+ * subscription is billed in quota, not dollars, so `--max-cost-usd` never trips and the real
+ * question is how much of a five-hour window eighteen agent runs will take.
+ */
+export async function planEvals(suiteDirectory = evalSuiteDirectory): Promise<EvalPlan> {
+  const entries = await readdir(suiteDirectory, {withFileTypes: true}).catch(() => []);
+  const cases = entries.filter(entry => entry.isDirectory()).map(entry => entry.name).sort();
+  return {cases, runsPerCase: defaultRunsPerCase, arms: ablationArms, totalRuns: cases.length * defaultRunsPerCase * ablationArms};
 }
 
 /**
@@ -82,10 +100,12 @@ export function parseEvalRun(payload: unknown, reportPath?: string): EvalRun {
  * changes behaviour is to run agents with and without it and score what they did — which is what
  * `claude plugin eval`'s with/without ablation is for.
  *
- * Two things to be plain about. Every run spawns a real `claude` child on the user's own
- * credential, so this costs money and counts against their quota — it is never automatic, and the
- * cost ceiling is passed on every run. And it evaluates the Claude side only: Codex has no
- * equivalent harness, so a passing score says the skill works for Claude lanes, not for every lane.
+ * Three things to be plain about. Every run spawns a real `claude` child on the credential Fluent
+ * has active, so it is never automatic. What that spends depends on which credential: platform
+ * credits and an API key are spent in dollars, where `--max-cost-usd` is a real ceiling, while a
+ * subscription is spent in quota, where the ceiling never trips and the honest figure is the run
+ * count (see `planEvals`). And it evaluates the Claude side only — Codex has no equivalent
+ * harness, so a passing score says the skill works for Claude lanes, not for every lane.
  */
 export class EvalRunner {
   private latest?: EvalRun;
@@ -112,7 +132,13 @@ export class EvalRunner {
     return this.running;
   }
 
-  async run({maxCostUsd = 2, caseGlob, concurrency = 2}: {maxCostUsd?: number; caseGlob?: string; concurrency?: number} = {}) {
+  /**
+   * `env` is the credential Fluent has active for Claude, resolved by the broker. Without it the
+   * evaluator's child processes would quietly use whatever `claude` itself is logged into, which
+   * would mean the app says one credential and the run bills another — and it would make it
+   * impossible to evaluate on an API key at all.
+   */
+  async run({maxCostUsd = 2, caseGlob, concurrency = 2, env}: {maxCostUsd?: number; caseGlob?: string; concurrency?: number; env?: Record<string, string>} = {}) {
     if (this.running) throw new Error('An eval run is already in progress');
     this.running = true;
     const workspace = await mkdtemp(join(tmpdir(), 'fluent-eval-'));
@@ -144,7 +170,7 @@ export class EvalRunner {
       // A non-zero exit is expected whenever a case scores below threshold, and a below-threshold
       // score is a result rather than an error — so the JSON is read either way, and only a run
       // that produced no JSON at all counts as a failure.
-      await run('claude', args, {timeout: 45 * 60_000, maxBuffer: 16_000_000}).catch(() => undefined);
+      await run('claude', args, {timeout: 45 * 60_000, maxBuffer: 16_000_000, env: {...process.env, ...env}}).catch(() => undefined);
 
       const payload = await readFile(jsonPath, 'utf8').catch(() => undefined);
       if (payload === undefined) throw new Error('The evaluator produced no result — is `claude` installed and logged in?');

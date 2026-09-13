@@ -21,7 +21,7 @@ import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type
 import {AdmissionAdvisor} from './admission.js';
 import {renderInbox} from './agent-view.js';
 import {installSkill, skillStatus} from './collab-skill.js';
-import {EvalRunner} from './eval-runner.js';
+import {EvalRunner, planEvals} from './eval-runner.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -421,9 +421,31 @@ async function dispatch(request: RpcRequest) {
     case 'skills.status': return skillStatus();
     case 'skills.install': return installSkill();
     case 'evals.latest': return {run: evals.last(), running: evals.isRunning()};
+    case 'evals.readiness': {
+      // The UI needs to ask for consent in the currency the active credential is actually spent in.
+      const chain = broker.list().find(state => state.provider === 'claude');
+      const account = chain?.accounts.find(candidate => candidate.id === chain.activeAccountId);
+      const quota = usage.snapshot().sessions.find(session => session.provider === 'claude' && session.quota)?.quota?.primary;
+      return {
+        plan: await planEvals(),
+        running: evals.isRunning(),
+        run: evals.last(),
+        accountId: account?.id,
+        accountLabel: account?.label,
+        mode: account?.mode,
+        quotaUsedPercent: quota?.usedPercent,
+        quotaResetsAt: quota?.resetsAt
+      };
+    }
     case 'evals.run': {
       // Never automatic: every case spawns real agent runs on the user's own credential.
-      const result = await evals.run({maxCostUsd: request.params.maxCostUsd, caseGlob: request.params.caseGlob});
+      // Run the evaluator on the credential Fluent says is active, not on whatever `claude` itself
+      // happens to be logged into — otherwise the app names one account and the run bills another.
+      const result = await evals.run({
+        maxCostUsd: request.params.maxCostUsd,
+        caseGlob: request.params.caseGlob,
+        env: await broker.resolveEnv('claude').catch(() => undefined)
+      });
       for (const socket of streamingSockets) pushEvent(socket, {event: 'evals.finished', run: result});
       return result;
     }
