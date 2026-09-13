@@ -1,6 +1,7 @@
 # Agent orchestration — research findings and recommendations
 
-Status: research complete. R2.1, R3, R4 and R5 are implemented; the rest are pending review.
+Status: research complete. R2, R3, R4, R5 and the Codex half of R1 are implemented; the rest are
+pending review.
 Implementation status is tracked per recommendation in the table below.
 Companion docs: [the design spec](../superpowers/specs/2026-09-13-fluent-code-design.md) (§§3, 7.5, 10, 11, 14 are
 the sections this report argues with), [`AGENTS.md`](../../AGENTS.md), [`CLAUDE.md`](../../CLAUDE.md).
@@ -40,8 +41,8 @@ Everything in the middle — the agent turn itself — is already excellent and 
 
 | # | Recommendation | Why it matters | Phase | Status |
 |---|---|---|---|---|
-| R1 | Structured control channel per provider (ACP + `codex app-server`), PTY kept for rendering | Unlocks R6/R7/R8/R9/R10; closes the spec §14 Codex-parity risk | v1 | not started |
-| R2 | Integration as a product surface: predictive claims + serialized merge queue | The 27.67%/41.7% conflict problem; Fluent's most exposed *and* most defensible edge | v2→v3 | **part 1 done** — overlap-aware claims with leases; diff-derived claims and the merge queue remain |
+| R1 | Structured control channel per provider (ACP + `codex app-server`), PTY kept for rendering | Unlocks R6/R7/R8/R9/R10; closes the spec §14 Codex-parity risk | v1 | **Codex done** (unverified against a real `codex` binary); ACP for Claude remains |
+| R2 | Integration as a product surface: predictive claims + serialized merge queue | The 27.67%/41.7% conflict problem; Fluent's most exposed *and* most defensible edge | v2→v3 | **parts 1–3 done** — overlap-aware claims, diff-derived claims with hotspot ranking, and a verification-gated merge queue; part 4 (build-conflict prediction) remains |
 | R3 | Verification gate on the repo's own checks before a lane reads "done" | MAST's largest failure category; agent self-report is not evidence | v1 | **done** |
 | R4 | Prompt-cache-aware credential switching | The credential broker, as specified, silently destroys the provider-side prefix cache | v1 | **done** |
 | R5 | Prewarmed lane pool + reflink/CoW worktrees | The single biggest wall-clock win available; target lane-ready < 1s | v2 | **CoW warming done**, lane-ready latency published; the warm pool remains |
@@ -547,6 +548,17 @@ in the MAST taxonomy is a whole category (task derailment, step repetition). Cod
 | **v1** | R1 (structured channel; closes §14's Codex risk) · R3 (verification gate, single-lane) · R4 (cache-aware broker) |
 | **v2** | R5 (prewarm + CoW; the speed story) · R2 parts 1–3 (claims fix, derived claims, merge queue) · R7 (admission scheduler) · R10 (traces) · R11 (context packs) · R12 (checkpoints) |
 | **v3** | R6 (coordination MCP — pull the read path to v2 if the orchestrator screen slips) · R2 part 4 (build-conflict prediction) · R8 (race mode) · R9 (mailbox) |
+
+**Resolved while implementing.** Spec §14's first open risk — Codex's hook/telemetry parity — is
+answered: `codex app-server` reports the same two quota windows Claude Code's status line does, so
+no output pattern-matching is required and the credential broker works for both providers. It is
+verified against the documented protocol and a scripted peer, not against an installed `codex`, so
+confirm it on a real binary before depending on it.
+
+Also worth recording, because it changed a design: R4 as originally written said "switch at a turn
+boundary, never mid-turn." Reading the code, a credential switch cannot move a running session at
+all — env resolves once at spawn — so the real fix was disclosure of what a switch does and does
+not do, not timing.
 
 **Two open questions this research did not resolve**, both still live from spec §14: what
 "OpenRouter" means as a product concept, and the hardware-advisory thresholds (R7 proposes a shape,
