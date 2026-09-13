@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
 import {after, describe, it} from 'node:test';
 import {CredentialBroker} from './credential-broker.js';
+import {join} from 'node:path';
 import type {FallbackGuidance, FallbackPolicy} from './daemon-protocol.js';
+
+// The OS keyring is not available in every environment a test runs in (headless CI, containers).
+// The store already has an in-memory mode for exactly this; the key material below is fake.
+process.env.FLUENT_SECRET_STORE = 'memory';
 
 const directories: string[] = [];
 
@@ -28,6 +32,91 @@ function notices(instance: CredentialBroker) {
 
 after(async () => {
   for (const directory of directories) await rm(directory, {recursive: true, force: true});
+});
+
+describe('putting a session on one account', () => {
+  /**
+   * Verified against Claude Code 2.1.270: `claude auth login --claudeai` is the subscription and
+   * `--console` is Anthropic Console API-usage billing. Both are OAuth logins, so neither can be
+   * selected with an env var — only with its own config directory.
+   */
+  it('gives a subscription its own CLI config directory', async () => {
+    const instance = await broker();
+
+    const environment = await instance.resolveEnv('claude', 'work-sub');
+
+    assert.equal(environment.set.CLAUDE_CONFIG_DIR, instance.configDirectory('claude', 'work-sub'));
+    assert.equal(environment.set.ANTHROPIC_API_KEY, undefined);
+  });
+
+  it('gives platform credits a different one, so both can run at once', async () => {
+    const instance = await broker();
+
+    const subscription = await instance.resolveEnv('claude', 'work-sub');
+    const credits = await instance.resolveEnv('claude', 'work-credits');
+
+    assert.notEqual(subscription.set.CLAUDE_CONFIG_DIR, credits.set.CLAUDE_CONFIG_DIR, 'sharing a directory would make the two accounts the same login');
+  });
+
+  it('removes a key the user happened to export, on every non-key account', async () => {
+    const instance = await broker();
+
+    for (const accountId of ['work-sub', 'work-credits']) {
+      const environment = await instance.resolveEnv('claude', accountId);
+      assert.ok(environment.unset.includes('ANTHROPIC_API_KEY'), `${accountId} must not inherit a key Fluent did not choose`);
+      assert.ok(environment.unset.includes('ANTHROPIC_AUTH_TOKEN'));
+    }
+  });
+
+  it('uses the key for an api-key account, and keeps it out of an account config dir', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-key', 'api-key', 'personal · key', 'sk-ant-test');
+
+    const environment = await instance.resolveEnv('claude', 'personal-key');
+
+    assert.equal(environment.set.ANTHROPIC_API_KEY, 'sk-ant-test');
+    assert.ok(environment.unset.includes('CLAUDE_CONFIG_DIR'), 'a key is meant to win over any OAuth login');
+  });
+
+  it('sends OpenRouter its bearer token with the key variable removed, not blanked', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'router', 'api-key', 'openrouter', 'or-key', 'https://openrouter.ai/api');
+
+    const environment = await instance.resolveEnv('claude', 'router');
+
+    assert.equal(environment.set.ANTHROPIC_AUTH_TOKEN, 'or-key');
+    assert.equal(environment.set.ANTHROPIC_BASE_URL, 'https://openrouter.ai/api');
+    assert.ok(environment.unset.includes('ANTHROPIC_API_KEY'), 'an empty value is still a value the CLI can prefer');
+    assert.equal(environment.set.ANTHROPIC_API_KEY, undefined);
+  });
+
+  it('says how to connect each account in the CLI\'s own words', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-key', 'api-key', 'personal · key', 'sk-ant-test');
+    const statuses = await instance.authStatus('claude');
+    const byId = Object.fromEntries(statuses.map(status => [status.accountId, status]));
+
+    assert.match(byId['work-sub']!.loginCommand!, /claude auth login --claudeai$/);
+    assert.match(byId['work-credits']!.loginCommand!, /claude auth login --console$/);
+    assert.match(byId['work-credits']!.loginCommand!, /^CLAUDE_CONFIG_DIR=/);
+    assert.equal(byId['personal-key']!.loginCommand, undefined, 'a key is pasted, not logged into');
+  });
+
+  it('reports a stored key as connected without shelling out', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-key', 'api-key', 'personal · key', 'sk-ant-test');
+
+    const status = (await instance.authStatus('claude')).find(entry => entry.accountId === 'personal-key');
+
+    assert.equal(status?.loggedIn, true);
+    assert.equal(status?.authMethod, 'api_key');
+  });
+
+  it('returns nothing to change for an account it does not know', async () => {
+    const instance = await broker();
+
+    assert.deepEqual(await instance.resolveEnv('claude', 'not-an-account'), {set: {}, unset: []});
+  });
 });
 
 describe('fallback guidance', () => {

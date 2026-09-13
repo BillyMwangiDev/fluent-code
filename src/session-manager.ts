@@ -9,7 +9,7 @@ import {providerAdapter, resolveProviderExecutable} from './providers.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
 import {briefingArgs} from './agent-briefing.js';
-import type {ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
+import type {CredentialEnvironment, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 
 const run = promisify(execFile);
 
@@ -23,6 +23,19 @@ type LiveSession = {
 type StoredSession = Omit<LiveSession, 'child'>;
 
 const maxOutputBytes = 160_000;
+
+/**
+ * Builds a lane's environment from the daemon's own, the credential's changes, and any overrides.
+ *
+ * The `unset` half is the part that matters and the part a plain spread cannot do: a credential
+ * variable exported in the user's shell is inherited by the daemon and would otherwise reach every
+ * lane, including lanes Fluent put on a different account.
+ */
+export function applyCredentialEnvironment(credential?: CredentialEnvironment, overrides: Record<string, string> = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  for (const name of credential?.unset ?? []) delete env[name];
+  return {...env, ...(credential?.set ?? {}), ...overrides};
+}
 
 /** Emits 'output' (sessionId, chunk) and 'status' (sessionId, summary) so daemon.ts can push
  * `sessions.subscribe` events without the manager knowing anything about sockets/RPC. */
@@ -66,7 +79,7 @@ export class SessionManager extends EventEmitter {
     return {...session.summary, output: session.output};
   }
 
-  async create({provider, directory, task, env, accountId, isolate}: {provider: ProviderId; directory: string; task?: string; env?: Record<string, string>; accountId?: string; isolate?: boolean}) {
+  async create({provider, directory, task, env, accountId, isolate}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean}) {
     const adapter = providerAdapter(provider);
     const executable = resolveProviderExecutable(adapter);
     const now = new Date().toISOString();
@@ -102,13 +115,11 @@ export class SessionManager extends EventEmitter {
     // (spec §7.5) — never by rewriting what the CLI does or what it prints.
     const terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider)], {
       cwd: sessionDirectory,
-      env: {
-        ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
-        ...env,
+      env: applyCredentialEnvironment(env, {
         // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
         // `env node` shebang resolves inside the detached daemon as well.
         PATH: [dirname(executable), process.env.PATH].filter(Boolean).join(delimiter)
-      },
+      }),
       name: process.env.TERM ?? 'xterm-256color',
       cols: 120,
       rows: 40

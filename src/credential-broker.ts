@@ -1,15 +1,21 @@
 import {EventEmitter} from 'node:events';
 import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import type {
+  AccountAuthStatus,
   CredentialAccount,
   CredentialChainState,
+  CredentialEnvironment,
   CredentialMode,
   FallbackGuidance,
   FallbackPolicy,
   ProviderId
 } from './daemon-protocol.js';
 import {SecretStore} from './secret-store.js';
+
+const execute = promisify(execFile);
 
 const defaultRevertMs = 15 * 60_000;
 
@@ -74,34 +80,101 @@ export class CredentialBroker extends EventEmitter {
     return [...this.providers.values()].map(({revertTimer: _revertTimer, ...state}) => state);
   }
 
+  /** Where an OAuth-based account keeps its own CLI login, so two of them can coexist. */
+  configDirectory(provider: ProviderId, accountId: string) {
+    return join(dirname(this.stateFile), 'auth', provider, accountId);
+  }
+
   /**
-   * The env overrides `sessions.create` should merge in for the provider's currently active
-   * account — the actual mechanism behind spec §7.5's "inject an API key/base URL override via
-   * that CLI's own env vars." Subscription/platform-credits accounts rely on the CLI's own
-   * already-logged-in state and need no override. Only Claude Code's env var names are
-   * confirmed (spec §7.5); Codex's API-key path is a v2 gap, left undefined here rather than
-   * guessed.
+   * How to connect an account, in the provider CLI's own words. Fluent never runs this itself: it
+   * is an interactive browser flow, and spec §9's hard boundary is that credentials are the user's
+   * business with their provider.
    */
-  async resolveEnv(provider: ProviderId, accountId?: string): Promise<Record<string, string> | undefined> {
+  loginCommand(provider: ProviderId, account: CredentialAccount) {
+    if (provider !== 'claude') return undefined;
+    if (account.mode === 'api-key') return undefined;
+    // Verified against Claude Code 2.1.270: `--claudeai` is the subscription, `--console` is
+    // Anthropic Console API-usage billing. Both are OAuth logins, which is why they each need
+    // their own config directory rather than an env var.
+    const flag = account.mode === 'platform-credits' ? '--console' : '--claudeai';
+    return `CLAUDE_CONFIG_DIR=${this.configDirectory(provider, account.id)} claude auth login ${flag}`;
+  }
+
+  /**
+   * The environment that puts a session on one account — spec §7.5's "inject via that CLI's own
+   * env vars", done for all three of spec §9's modes rather than only the third.
+   *
+   * The shape of the problem, confirmed against Claude Code 2.1.270 rather than assumed: a
+   * subscription and Anthropic Console API credits are *both* OAuth logins (`claude auth login
+   * --claudeai` versus `--console`), and the CLI holds one login per config directory. So they
+   * cannot be told apart by an env var, and pointing both at the default directory would make
+   * "platform credits" a label on whatever the user happened to log in as. Each OAuth account
+   * therefore gets its own `CLAUDE_CONFIG_DIR`, which is what lets a subscription lane and a
+   * credits lane run side by side.
+   *
+   * An API key is the one mode that *is* an env var, and it is also the one that can arrive
+   * uninvited: a key exported in the user's shell would be inherited by every lane. So every
+   * non-key account explicitly unsets it.
+   */
+  async resolveEnv(provider: ProviderId, accountId?: string): Promise<CredentialEnvironment> {
+    const empty: CredentialEnvironment = {set: {}, unset: []};
     const state = this.providers.get(provider);
     const selectedAccountId = accountId ?? state?.activeAccountId;
-    if (!state || !selectedAccountId) return undefined;
+    if (!state || !selectedAccountId) return empty;
     const account = state.accounts.find(candidate => candidate.id === selectedAccountId);
-    if (!account || account.mode !== 'api-key') return undefined;
-    const apiKey = await this.secrets.get(provider, account.id);
-    if (!apiKey) throw new Error(`The API key for ${account.label} is unavailable in the system credential store`);
-    if (provider === 'codex') return {OPENAI_API_KEY: apiKey};
-    if (provider !== 'claude') return undefined;
-    if (account.baseUrl === 'https://openrouter.ai/api') {
+    if (!account) return empty;
+
+    if (account.mode !== 'api-key') {
+      if (provider !== 'claude') return empty;
       return {
-        ANTHROPIC_BASE_URL: account.baseUrl,
-        ANTHROPIC_AUTH_TOKEN: apiKey,
-        ANTHROPIC_API_KEY: ''
+        set: {CLAUDE_CONFIG_DIR: this.configDirectory(provider, account.id)},
+        // Neither key may shadow the login this account is: a stray one in the environment is a
+        // credential the user did not pick for this lane.
+        unset: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL']
       };
     }
-    const env: Record<string, string> = {ANTHROPIC_API_KEY: apiKey};
-    if (account.baseUrl) env.ANTHROPIC_BASE_URL = account.baseUrl;
-    return env;
+
+    const apiKey = await this.secrets.get(provider, account.id);
+    if (!apiKey) throw new Error(`The API key for ${account.label} is unavailable in the system credential store`);
+    // Codex's own key variable; unconfirmed against a real Codex install (spec §7.5).
+    if (provider === 'codex') return {set: {OPENAI_API_KEY: apiKey}, unset: []};
+    if (provider !== 'claude') return empty;
+    if (account.baseUrl === 'https://openrouter.ai/api') {
+      // OpenRouter authenticates on the bearer token, so the key variable must be gone rather than
+      // empty — an empty one is still a value the CLI can prefer.
+      return {set: {ANTHROPIC_BASE_URL: account.baseUrl, ANTHROPIC_AUTH_TOKEN: apiKey}, unset: ['ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR']};
+    }
+    const set: Record<string, string> = {ANTHROPIC_API_KEY: apiKey};
+    if (account.baseUrl) set.ANTHROPIC_BASE_URL = account.baseUrl;
+    // A key is meant to win over any OAuth login, so do not point it at an account's config dir.
+    return {set, unset: ['ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CONFIG_DIR']};
+  }
+
+  /**
+   * What each account's CLI says about itself, read from `claude auth status --json` — the CLI's
+   * own reported state, never its credential files (spec §7.5). This is how the credentials screen
+   * can show "connected" without Fluent ever holding an OAuth token.
+   */
+  async authStatus(provider: ProviderId = 'claude'): Promise<AccountAuthStatus[]> {
+    const state = this.providers.get(provider);
+    if (!state) return [];
+    return Promise.all(state.accounts.map(async account => {
+      const base: AccountAuthStatus = {accountId: account.id, provider, mode: account.mode, loggedIn: false, loginCommand: this.loginCommand(provider, account)};
+      if (account.mode === 'api-key') {
+        return {...base, loggedIn: Boolean(account.hasSecret), authMethod: 'api_key', detail: account.hasSecret ? undefined : 'No key stored for this account yet.'};
+      }
+      if (provider !== 'claude') return {...base, detail: 'Fluent cannot read this provider\'s auth state yet.'};
+      try {
+        const {stdout} = await execute('claude', ['auth', 'status', '--json'], {
+          timeout: 20_000,
+          env: {...process.env, CLAUDE_CONFIG_DIR: this.configDirectory(provider, account.id), ANTHROPIC_API_KEY: '', ANTHROPIC_AUTH_TOKEN: ''}
+        });
+        const report = JSON.parse(stdout) as {loggedIn?: boolean; authMethod?: string; apiProvider?: string};
+        return {...base, loggedIn: report.loggedIn === true, authMethod: report.authMethod, apiProvider: report.apiProvider};
+      } catch {
+        return {...base, detail: 'Could not read `claude auth status` — is Claude Code installed?'};
+      }
+    }));
   }
 
   private ensure(provider: ProviderId): ProviderState {

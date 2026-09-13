@@ -304,6 +304,7 @@ export type RpcRequest =
   | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
   | {id: string; method: 'credentials.guidance'; params: {provider: ProviderId}}
+  | {id: string; method: 'credentials.authStatus'}
   | {id: string; method: 'hooks.report'; params: {cwd: string; event: string; payload: Record<string, unknown>}};
 
 export type RpcResponse =
@@ -331,6 +332,30 @@ export type RpcEvent =
   | {event: 'evals.finished'; run: EvalRun};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
+
+/**
+ * Environment changes that put a session on one account. `unset` matters as much as `set`: an
+ * inherited `ANTHROPIC_API_KEY` in the user's shell is a credential Fluent did not choose, and a
+ * lane it did not choose it for should not inherit it.
+ */
+export type CredentialEnvironment = {set: Record<string, string>; unset: string[]};
+
+/**
+ * Connection state read from the provider CLI's own `auth status`, never from its credential files
+ * (spec §7.5). `authMethod` is the CLI's own word for it — `oauth_token` for both Claude
+ * subscription and Console billing, an api-key value when a key is in play.
+ */
+export type AccountAuthStatus = {
+  accountId: string;
+  provider: ProviderId;
+  mode: CredentialMode;
+  loggedIn: boolean;
+  authMethod?: string;
+  apiProvider?: string;
+  /** The exact command that connects this account, for an account that is not connected yet. */
+  loginCommand?: string;
+  detail?: string;
+};
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';
 
 export type CredentialAccount = {

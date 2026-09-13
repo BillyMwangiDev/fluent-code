@@ -133,10 +133,10 @@ export class EvalRunner {
   }
 
   /**
-   * `env` is the credential Fluent has active for Claude, resolved by the broker. Without it the
-   * evaluator's child processes would quietly use whatever `claude` itself is logged into, which
-   * would mean the app says one credential and the run bills another — and it would make it
-   * impossible to evaluate on an API key at all.
+   * `env` is the complete environment for the evaluator's children, already carrying the active
+   * credential (see `applyCredentialEnvironment`). It is used as given and never merged over
+   * `process.env` again: that merge would resurrect exactly the credential variables the broker
+   * deliberately removed, and the run would bill an account the user did not choose.
    */
   async run({maxCostUsd = 2, caseGlob, concurrency = 2, env}: {maxCostUsd?: number; caseGlob?: string; concurrency?: number; env?: Record<string, string>} = {}) {
     if (this.running) throw new Error('An eval run is already in progress');
@@ -170,7 +170,7 @@ export class EvalRunner {
       // A non-zero exit is expected whenever a case scores below threshold, and a below-threshold
       // score is a result rather than an error — so the JSON is read either way, and only a run
       // that produced no JSON at all counts as a failure.
-      await run('claude', args, {timeout: 45 * 60_000, maxBuffer: 16_000_000, env: {...process.env, ...env}}).catch(() => undefined);
+      await run('claude', args, {timeout: 45 * 60_000, maxBuffer: 16_000_000, env: env ?? process.env}).catch(() => undefined);
 
       const payload = await readFile(jsonPath, 'utf8').catch(() => undefined);
       if (payload === undefined) throw new Error('The evaluator produced no result — is `claude` installed and logged in?');

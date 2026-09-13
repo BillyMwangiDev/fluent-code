@@ -1609,6 +1609,12 @@ async function renderCredentials(main: HTMLElement) {
     fallbackPolicy: 'always-ask' as const
   };
 
+  // Connection state comes from the provider CLI's own `auth status`, never from its credential
+  // files (spec §7.5) — so this says "connected" without Fluent ever holding an OAuth token.
+  const authByAccount = credentialProvider === 'claude'
+    ? Object.fromEntries((await api.authStatus().catch(() => [])).map(status => [status.accountId, status]))
+    : {};
+
   const list = h('div', {});
   main.append(list);
 
@@ -1618,9 +1624,13 @@ async function renderCredentials(main: HTMLElement) {
       const account = chain.accounts.find(a => a.id === accountId);
       if (!account) return;
       const isActive = chain.activeAccountId === accountId;
+      const auth = authByAccount[accountId];
+      const connection = auth
+        ? (auth.loggedIn ? `connected${auth.authMethod ? ` · ${auth.authMethod}` : ''}` : 'not connected')
+        : '';
       const row = h('div', {class: `option-row${isActive ? ' selected' : ''}`}, [
         h('span', {class: 'label'}, [`${index + 1}. ${account.label}`]),
-        h('span', {class: 'meta'}, [account.mode + (isActive ? ' · active now' : '')])
+        h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, connection, isActive ? 'active now' : ''].filter(Boolean).join(' · ')])
       ]);
       const controls = h('div', {});
       if (index > 0) {
@@ -1636,6 +1646,13 @@ async function renderCredentials(main: HTMLElement) {
       }
       row.append(controls);
       list.append(row);
+      // Subscription and Console credits are both OAuth logins the CLI owns, so Fluent shows the
+      // command rather than running it: the browser flow is the user's business with Anthropic
+      // (spec §9), and each account keeps its own config directory so both can be connected.
+      if (auth && !auth.loggedIn && auth.loginCommand) {
+        list.append(h('p', {class: 'section-sub'}, [`connect it with:  ${auth.loginCommand}`]));
+      }
+      if (auth?.detail) list.append(h('p', {class: 'section-sub'}, [auth.detail]));
     });
     if (chain.accounts.length === 0) list.append(h('p', {class: 'section-sub'}, ['No accounts yet — add one below or from onboarding.']));
   }

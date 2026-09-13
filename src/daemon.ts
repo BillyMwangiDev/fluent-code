@@ -1,7 +1,7 @@
 import {createServer, type Socket} from 'node:net';
 import {unlink} from 'node:fs/promises';
 import {daemonSocketPath, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
-import {SessionManager} from './session-manager.js';
+import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
 import {HardwareMonitor} from './hardware-monitor.js';
 import {providerAdapter, providerHealth, resolveProviderExecutable} from './providers.js';
@@ -166,7 +166,7 @@ async function startCodexChannel(sessionId: string, directory: string, accountId
   if (codexChannels.has(sessionId)) return;
   let env: NodeJS.ProcessEnv = process.env;
   try {
-    env = {...process.env, ...await broker.resolveEnv('codex', accountId)};
+    env = applyCredentialEnvironment(await broker.resolveEnv('codex', accountId));
   } catch {
     // A missing API key is the PTY's problem to report, not a reason to skip observing the lane.
   }
@@ -444,7 +444,7 @@ async function dispatch(request: RpcRequest) {
       const result = await evals.run({
         maxCostUsd: request.params.maxCostUsd,
         caseGlob: request.params.caseGlob,
-        env: await broker.resolveEnv('claude').catch(() => undefined)
+        env: applyCredentialEnvironment(await broker.resolveEnv('claude').catch(() => undefined))
       });
       for (const socket of streamingSockets) pushEvent(socket, {event: 'evals.finished', run: result});
       return result;
@@ -495,6 +495,7 @@ async function dispatch(request: RpcRequest) {
     case 'credentials.setFallbackPolicy': return broker.setFallbackPolicy(request.params.provider, request.params.policy);
     case 'credentials.confirmFallback': return broker.confirmFallback(request.params.provider, request.params.accept, {resetAt: request.params.resetAt});
     case 'credentials.guidance': return broker.guidance(request.params.provider, {activeSessions: activeSessionCount(request.params.provider)});
+    case 'credentials.authStatus': return broker.authStatus('claude');
     case 'hooks.report': return handleHookReport(request.params);
     // sessions.subscribe/unsubscribe/stream.open are handled before dispatch (need the socket).
     case 'sessions.subscribe': case 'sessions.unsubscribe': case 'stream.open': throw new Error(`${request.method} must not reach dispatch`);
