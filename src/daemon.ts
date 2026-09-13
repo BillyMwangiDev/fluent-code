@@ -13,6 +13,7 @@ import {ResourceMonitorClient} from './resource-monitor-client.js';
 import {SpendTracker} from './spend-tracker.js';
 import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
+import * as sourceControl from './source-control.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -112,6 +113,9 @@ async function dispatch(request: RpcRequest) {
     case 'spend.summary': return spend.summary(request.params.rangeDays);
     case 'spend.setPriceOverride': await spend.setPriceOverride(request.params.model, request.params.override); return {ok: true};
     case 'spend.clearPriceOverride': await spend.clearPriceOverride(request.params.model); return {ok: true};
+    case 'sourceControl.repoStatus': return sourceControl.repoStatus(request.params.directory);
+    case 'sourceControl.assignedIssues': return sourceControl.assignedIssues();
+    case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
     case 'providers.list': return providerHealth();
     case 'coordination.get': return coordination.get(request.params.project);
     case 'coordination.task.create': return coordination.task(request.params.project, request.params.title, request.params.sessionId);

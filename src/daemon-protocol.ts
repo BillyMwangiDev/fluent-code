@@ -1,5 +1,6 @@
 import type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {PriceOverride, SpendSummary} from './spend-tracker.js';
+export type {AssignedIssue, OpenPullRequest, RepoStatus} from './source-control.js';
 
 export type ProviderId = 'claude' | 'codex';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
@@ -99,6 +100,9 @@ export type RpcRequest =
   | {id: string; method: 'spend.summary'; params: {rangeDays?: number}}
   | {id: string; method: 'spend.setPriceOverride'; params: {model: string; override: PriceOverride}}
   | {id: string; method: 'spend.clearPriceOverride'; params: {model: string}}
+  | {id: string; method: 'sourceControl.repoStatus'; params: {directory: string}}
+  | {id: string; method: 'sourceControl.assignedIssues'}
+  | {id: string; method: 'sourceControl.myOpenPullRequests'}
   | {id: string; method: 'providers.list'}
   | {id: string; method: 'coordination.get'; params: {project: string}}
   | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; sessionId?: string}}
