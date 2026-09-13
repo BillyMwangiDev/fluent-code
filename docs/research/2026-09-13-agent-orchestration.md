@@ -467,6 +467,12 @@ For a well-specified task, run the same prompt in N lanes across *different prov
 credentials*, then rank by the R3 verification result, then by diff size, and present them
 side by side for the user to pick. Codex's `thread/fork` makes the same-provider variant cheap.
 
+**Guardrail tightened:** the candidate pool must be different providers, or different models/tiers
+*within one account identity* — never two identities (two separate logins) of the same provider
+racing the same task, which is the exact "multiple accounts working one piece of work at once"
+shape provider ToS enforcement targets. Not offered as a selectable combination; see
+[the account-identity-safety design](../superpowers/specs/2026-09-13-account-identity-safety-design.md) §3.
+
 *Why:* a heterogeneous N=3 pool beat every model in it on SWE-Bench Verified (78.2% vs 76.8/75.8/
 75.8) (§2.4), and Fluent is the only tool in §1's list whose data model already knows how to run N
 across providers and credentials. *Guardrails:* the token cost is the whole story — show the

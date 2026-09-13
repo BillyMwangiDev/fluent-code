@@ -30,6 +30,10 @@ out of scope; see the spec's Non-goals section.
 - [`docs/research/2026-09-13-agent-orchestration.md`](./docs/research/2026-09-13-agent-orchestration.md) —
   orchestration research (field survey + sourced findings) and the ranked recommendations that
   come out of it. Read alongside the spec before changing the coordination or credential layers.
+- [`docs/superpowers/specs/2026-09-13-account-identity-safety-design.md`](./docs/superpowers/specs/2026-09-13-account-identity-safety-design.md) —
+  which multi-account/multi-lane patterns are ToS-safe vs. not, and the `identityId` concept the
+  credential broker needs so it never auto-switches between two different logins. Read before
+  touching `CredentialAccount`/`setChain` in `credential-broker.ts` or building R8 (race mode).
 - [`design/`](./design/) — pen.dev source + PNG previews, source of truth for UI.
 - [`src/coord-cli.ts`](./src/coord-cli.ts) — `fluent-coord`, the coordination surface the *agents*
   use (status / claim / release / note / task / handoff). A CLI rather than an MCP server on
