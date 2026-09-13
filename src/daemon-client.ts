@@ -118,7 +118,7 @@ export const daemonClient = {
   listProviders: () => request<ProviderHealth[]>('providers.list'),
   coordination: (project: string) => request<import('./daemon-protocol.js').CoordinationState>('coordination.get', {project}),
   createTask: (project: string, title: string, sessionId?: string) => request<import('./daemon-protocol.js').CoordinationState>('coordination.task.create', {project, title, sessionId}),
-  claimFile: (project: string, path: string, sessionId: string) => request<{state: import('./daemon-protocol.js').CoordinationState; conflict?: {path: string; sessionId: string}}>('coordination.claim', {project, path, sessionId}),
+  claimFile: (project: string, path: string, sessionId: string) => request<import('./daemon-protocol.js').ClaimResult>('coordination.claim', {project, path, sessionId}),
   resize: (sessionId: string, cols: number, rows: number) => request<{resized: boolean}>('sessions.resize', {sessionId, cols, rows}),
   subscribeSession,
   openEventStream,

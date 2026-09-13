@@ -66,10 +66,12 @@ export type ProviderHealth = {id: ProviderId; label: string; installed: boolean;
 export type CoordinationState = {
   project: string;
   tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string}>;
-  claims: Array<{path: string; sessionId: string; createdAt: string}>;
+  claims: Array<{path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
   decisions: Array<{id: string; summary: string; sessionId?: string; createdAt: string}>;
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
 };
+export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
+export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
@@ -134,7 +136,7 @@ export const api = {
   coordination: (project: string) => daemonRequest<CoordinationState>('coordination.get', {project}),
   createTask: (project: string, title: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.create', {project, title, sessionId}),
   updateTask: (project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.update', {project, taskId, status, sessionId}),
-  claimFile: (project: string, path: string, sessionId: string) => daemonRequest<{state: CoordinationState; conflict?: {path: string; sessionId: string}}>('coordination.claim', {project, path, sessionId}),
+  claimFile: (project: string, path: string, sessionId: string) => daemonRequest<ClaimResult>('coordination.claim', {project, path, sessionId}),
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),

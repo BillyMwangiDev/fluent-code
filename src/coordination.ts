@@ -1,7 +1,41 @@
 import {randomUUID} from 'node:crypto';
 import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
-import type {CoordinationState} from './daemon-protocol.js';
+import type {ClaimConflict, ClaimResult, CoordinationState, FileClaim} from './daemon-protocol.js';
+
+/**
+ * How long a claim survives without its lane renewing it. A claim is a *signal of intent*, never
+ * an OS lock (spec §11) — but an un-expiring signal from a lane that died is worse than no signal
+ * at all, because it blocks live lanes forever with no way to tell it is stale.
+ */
+const claimLeaseMs = 15 * 60_000;
+
+/**
+ * Normalizes a claim path so overlap comparison is meaningful: POSIX separators, no leading `./`
+ * or `/`, no trailing `/`. Paths stay exactly as the caller scoped them (repo-relative or
+ * absolute) — this only removes spelling differences, it never resolves against the filesystem.
+ */
+function normalizeClaimPath(path: string) {
+  const normalized = path.trim().replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!normalized) throw new Error('A file claim needs a path');
+  return normalized;
+}
+
+/**
+ * Two claims overlap when they name the same path, or when one is a directory containing the
+ * other. This is the fix for the original exact-string comparison, under which a lane claiming
+ * `src/` and a lane claiming `src/daemon.ts` looked entirely unrelated.
+ *
+ * Deliberately *not* glob matching: every real claim seen so far is a concrete file or directory,
+ * and a half-correct glob implementation would report overlaps it cannot justify. A claim
+ * containing wildcards is compared literally until there is a reason to do better.
+ */
+function claimsOverlap(left: string, right: string): ClaimConflict['overlap'] | undefined {
+  if (left === right) return 'same';
+  if (right.startsWith(`${left}/`)) return 'contains';
+  if (left.startsWith(`${right}/`)) return 'contained';
+  return undefined;
+}
 
 export class CoordinationManager {
   private readonly states = new Map<string, CoordinationState>();
@@ -15,7 +49,18 @@ export class CoordinationManager {
   async restore() {
     try {
       const parsed = JSON.parse(await readFile(this.stateFile, 'utf8')) as CoordinationState[];
-      for (const state of parsed) this.states.set(state.project, state);
+      for (const state of parsed) {
+        // Claims written before leases existed carry no expiry. Give them one starting now rather
+        // than dropping them: a restored claim from a lane that is still running gets renewed on
+        // the next heartbeat, and one from a lane that is gone expires on its own.
+        state.claims = (state.claims ?? []).map(claim => ({
+          ...claim,
+          origin: claim.origin ?? 'declared',
+          renewedAt: claim.renewedAt ?? claim.createdAt,
+          expiresAt: claim.expiresAt ?? new Date(Date.now() + claimLeaseMs).toISOString()
+        }));
+        this.states.set(state.project, state);
+      }
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -42,21 +87,100 @@ export class CoordinationManager {
     return state;
   }
 
-  async claim(project: string, path: string, sessionId: string) {
+  /**
+   * Claims `path` for one lane. The result says explicitly whether the claim was granted: the
+   * previous shape returned the conflict alongside the state, so a caller that forgot to check
+   * `conflict` read a refused claim as a successful one.
+   *
+   * A conflict does not block the edit — nothing here is an OS lock (spec §11). It raises a
+   * visible overlap so the orchestration column can show it before two lanes discover it at
+   * merge time, which is where the field measures a 27.67% conflict rate (and 41.7% when the two
+   * lanes run different providers — see docs/research/2026-09-13-agent-orchestration.md §2.3).
+   */
+  async claim(project: string, path: string, sessionId: string, origin: FileClaim['origin'] = 'declared'): Promise<ClaimResult> {
     const state = this.ensure(project);
-    const conflict = state.claims.find(claim => claim.path === path && claim.sessionId !== sessionId);
-    if (!conflict) state.claims = [...state.claims.filter(claim => !(claim.path === path && claim.sessionId === sessionId)), {path, sessionId, createdAt: new Date().toISOString()}];
+    const claimPath = normalizeClaimPath(path);
+    const now = new Date();
+    const conflicts: ClaimConflict[] = [];
+    for (const existing of state.claims) {
+      if (existing.sessionId === sessionId) continue;
+      const overlap = claimsOverlap(claimPath, existing.path);
+      if (overlap) conflicts.push({path: claimPath, claimedPath: existing.path, sessionId: existing.sessionId, overlap});
+    }
+
+    const granted = conflicts.length === 0;
+    if (granted) {
+      const existing = state.claims.find(claim => claim.path === claimPath && claim.sessionId === sessionId);
+      const lease = {renewedAt: now.toISOString(), expiresAt: new Date(now.getTime() + claimLeaseMs).toISOString()};
+      if (existing) Object.assign(existing, lease, {origin: existing.origin === 'declared' ? 'declared' : origin});
+      else state.claims.push({path: claimPath, sessionId, origin, createdAt: now.toISOString(), ...lease});
+    }
+
     await this.persist();
-    return {state, conflict};
+    return {granted, state, conflicts};
   }
 
   async releaseClaim(project: string, path: string, sessionId: string) {
     const state = this.ensure(project);
+    const claimPath = normalizeClaimPath(path);
     const before = state.claims.length;
-    state.claims = state.claims.filter(claim => !(claim.path === path && claim.sessionId === sessionId));
+    state.claims = state.claims.filter(claim => !(claim.path === claimPath && claim.sessionId === sessionId));
     if (state.claims.length === before) throw new Error('File claim not found for this agent');
     await this.persist();
     return state;
+  }
+
+  /**
+   * Renews every claim held by a live lane and drops every claim whose lease lapsed. Driven by a
+   * daemon heartbeat rather than by the agents, because the thing a lease protects against is a
+   * lane that can no longer act on its own behalf.
+   *
+   * Returns the claims it dropped so the daemon can tell subscribers *why* a claim disappeared —
+   * a claim vanishing with no explanation is exactly the hidden coordination spec §2 forbids.
+   */
+  async renewLeases(liveSessionIds: readonly string[]) {
+    const live = new Set(liveSessionIds);
+    const now = Date.now();
+    const renewedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + claimLeaseMs).toISOString();
+    const expired: Array<FileClaim & {project: string}> = [];
+    let changed = false;
+
+    for (const state of this.states.values()) {
+      const keep: FileClaim[] = [];
+      for (const claim of state.claims) {
+        if (live.has(claim.sessionId)) {
+          claim.renewedAt = renewedAt;
+          claim.expiresAt = expiresAt;
+          keep.push(claim);
+          changed = true;
+          continue;
+        }
+        if (new Date(claim.expiresAt).getTime() > now) {
+          keep.push(claim);
+          continue;
+        }
+        expired.push({...claim, project: state.project});
+        changed = true;
+      }
+      state.claims = keep;
+    }
+
+    if (changed) await this.persist();
+    return expired;
+  }
+
+  /** Drops every claim a lane holds, across every project — called when a session stops or exits
+   * so the next lane does not wait out a lease for a lane that is already gone. */
+  async releaseSession(sessionId: string) {
+    let changed = false;
+    for (const state of this.states.values()) {
+      const before = state.claims.length;
+      state.claims = state.claims.filter(claim => claim.sessionId !== sessionId);
+      if (state.claims.length !== before) changed = true;
+    }
+    if (changed) await this.persist();
+    return changed;
   }
 
   async decision(project: string, summary: string, sessionId?: string) {

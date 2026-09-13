@@ -8,13 +8,14 @@
     "fluentd": "dist/daemon.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
     "dev": "tsx src/index.tsx",
     "daemon": "tsx src/daemon.ts",
     "daemon:status": "tsx src/daemon-cli.ts status",
     "postinstall": "node scripts/ensure-node-pty-helper.mjs",
     "start": "tsx src/index.tsx",
     "check": "tsc --noEmit",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
     "check:frontend": "tsc --noEmit -p app/tsconfig.json",
     "build:frontend": "esbuild app/src/main.ts --bundle --outdir=app/dist --format=esm --platform=browser --target=es2022 --loader:.woff=file --loader:.woff2=file",
     "tauri": "tauri"

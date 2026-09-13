@@ -63,6 +63,11 @@ manager.on('output', (sessionId: string, chunk: string) => {
 });
 manager.on('status', (sessionId: string, summary) => {
   for (const socket of sessionSubscribers.get(sessionId) ?? []) pushEvent(socket, {event: 'sessions.status', sessionId, summary});
+  // A lane that is no longer running cannot act on its claims, so it should not hold them. Without
+  // this the lease below still frees them, but only after it lapses — this makes it immediate.
+  if (summary.status === 'exited' || summary.status === 'stopped' || summary.status === 'failed') {
+    void coordination.releaseSession(sessionId).catch(error => console.error(`fluentd could not release claims for ${sessionId}: ${error.message}`));
+  }
 });
 broker.on('switched', (provider, accountId, reason) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
@@ -70,6 +75,20 @@ broker.on('switched', (provider, accountId, reason) => {
 broker.on('notice', (provider, message, resetAt) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.notice', provider, message, resetAt});
 });
+
+/**
+ * Renews the claims of every live lane and drops the ones whose lease lapsed — the safety net for
+ * a lane fluentd never saw stop (daemon restart, killed process, machine sleep). Expiries are
+ * pushed to streaming clients so a claim never disappears unexplained.
+ */
+async function sweepClaimLeases() {
+  const live = manager.list().filter(session => session.status === 'running' || session.status === 'starting').map(session => session.id);
+  const expired = await coordination.renewLeases(live);
+  if (expired.length > 0) {
+    for (const socket of streamingSockets) pushEvent(socket, {event: 'coordination.claimsExpired', claims: expired});
+  }
+  return {renewed: live.length, expired};
+}
 
 async function handleHookReport({cwd, event, payload}: {cwd: string; event: string; payload: Record<string, unknown>}) {
   const session = manager.findActiveByDirectory(cwd);
@@ -117,6 +136,7 @@ async function dispatch(request: RpcRequest) {
     case 'coordination.task.create': return coordination.task(request.params.project, request.params.title, request.params.sessionId);
     case 'coordination.task.update': return coordination.updateTask(request.params.project, request.params.taskId, request.params.status, request.params.sessionId);
     case 'coordination.claim': return coordination.claim(request.params.project, request.params.path, request.params.sessionId);
+    case 'coordination.claims.sweep': return sweepClaimLeases();
     case 'coordination.claim.release': return coordination.releaseClaim(request.params.project, request.params.path, request.params.sessionId);
     case 'coordination.decision.add': return coordination.decision(request.params.project, request.params.summary, request.params.sessionId);
     case 'coordination.handoff.create': return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
@@ -151,6 +171,9 @@ async function main() {
   await openDesign.restore();
   resources.start(process.pid);
   hardware.start();
+  // Half the lease, so a live lane is always renewed well before its claims could lapse.
+  const claimSweep = setInterval(() => void sweepClaimLeases().catch(error => console.error(`fluentd claim sweep failed: ${error.message}`)), 7 * 60_000);
+  claimSweep.unref();
   try {
     await unlink(socketPath);
   } catch (error: unknown) {

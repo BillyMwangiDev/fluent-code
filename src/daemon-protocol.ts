@@ -67,7 +67,16 @@ export type ProviderHealth = {
 };
 
 export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
-export type FileClaim = {path: string; sessionId: string; createdAt: string};
+/**
+ * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
+ * `origin` separates a claim an agent declared from one fluentd observed in the lane's own diff;
+ * the lease fields let a dead lane's claims lapse instead of blocking live lanes forever.
+ */
+export type FileClaim = {path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string};
+/** `path` is the claim being attempted; `claimedPath` is the existing claim it overlaps, which is
+ * not necessarily the same string — `src/` and `src/daemon.ts` overlap without matching. */
+export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
+export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
 export type Decision = {id: string; summary: string; sessionId?: string; createdAt: string};
 export type Handoff = {id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'};
 export type CoordinationState = {project: string; tasks: CoordinationTask[]; claims: FileClaim[]; decisions: Decision[]; handoffs: Handoff[]};
@@ -104,6 +113,7 @@ export type RpcRequest =
   | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; sessionId?: string}}
   | {id: string; method: 'coordination.task.update'; params: {project: string; taskId: string; status: 'todo' | 'active' | 'done'; sessionId?: string}}
   | {id: string; method: 'coordination.claim'; params: {project: string; path: string; sessionId: string}}
+  | {id: string; method: 'coordination.claims.sweep'}
   | {id: string; method: 'coordination.claim.release'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.decision.add'; params: {project: string; summary: string; sessionId?: string}}
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
@@ -134,7 +144,10 @@ export type RpcEvent =
   | {event: 'sessions.output'; sessionId: string; chunk: string}
   | {event: 'sessions.status'; sessionId: string; summary: SessionSummary}
   | {event: 'credential.switched'; provider: ProviderId; accountId: string; reason: 'fallback' | 'revert' | 'manual'}
-  | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string};
+  | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string}
+  /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes
+   * from the orchestration column without a visible reason (spec §2 principle 3). */
+  | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

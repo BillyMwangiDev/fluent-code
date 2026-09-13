@@ -608,8 +608,12 @@ async function renderOrchestration(main: HTMLElement) {
   claimButton.addEventListener('click', async () => {
     if (!claimInput.value.trim() || !live[0]) return claimInput.focus();
     const result = await api.claimFile(project, claimInput.value.trim(), live[0].id);
-    claimNotice.textContent = result.conflict ? `overlap detected — ${result.conflict.path} is claimed by ${result.conflict.sessionId.slice(0, 8)}` : 'claim recorded';
-    claimNotice.className = result.conflict ? 'error' : 'section-sub';
+    // An overlap names the *existing* claim it collides with, which is not necessarily the same
+    // path — claiming `src/daemon.ts` conflicts with a lane already holding `src/`.
+    claimNotice.textContent = result.granted
+      ? 'claim recorded'
+      : result.conflicts.map(conflict => `overlap detected — ${conflict.claimedPath} is claimed by ${conflict.sessionId.slice(0, 8)}`).join(' · ');
+    claimNotice.className = result.granted ? 'section-sub' : 'error';
     void render();
   });
   const decisionInput = h('input', {type: 'text', placeholder: 'record a project decision'});
@@ -649,7 +653,7 @@ async function renderOrchestration(main: HTMLElement) {
   const claimRows = state.claims.map(claim => {
     const release = h('button', {class: 'btn'}, ['release']);
     release.addEventListener('click', async () => { await api.releaseClaim(project, claim.path, claim.sessionId); void render(); });
-    return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [claim.path]), h('span', {class: 'meta'}, [claim.sessionId.slice(0, 8)]), release]);
+    return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [claim.path]), h('span', {class: 'meta'}, [`${claim.sessionId.slice(0, 8)} · ${claim.origin}`]), release]);
   });
   main.append(h('div', {class: 'cards-row'}, [
     h('div', {class: 'card'}, [h('h3', {}, ['shared task board']), ...taskRows, h('div', {class: 'field'}, [taskInput, addTask])]),
