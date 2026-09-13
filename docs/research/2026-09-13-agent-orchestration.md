@@ -1,7 +1,7 @@
 # Agent orchestration — research findings and recommendations
 
-Status: research complete. R2, R3, R4, R5 and the Codex half of R1 are implemented; the rest are
-pending review.
+Status: research complete. R2, R3, R4, R5, R6 and the Codex half of R1 are implemented; the rest
+are pending review.
 Implementation status is tracked per recommendation in the table below.
 Companion docs: [the design spec](../superpowers/specs/2026-09-13-fluent-code-design.md) (§§3, 7.5, 10, 11, 14 are
 the sections this report argues with), [`AGENTS.md`](../../AGENTS.md), [`CLAUDE.md`](../../CLAUDE.md).
@@ -46,7 +46,7 @@ Everything in the middle — the agent turn itself — is already excellent and 
 | R3 | Verification gate on the repo's own checks before a lane reads "done" | MAST's largest failure category; agent self-report is not evidence | v1 | **done** |
 | R4 | Prompt-cache-aware credential switching | The credential broker, as specified, silently destroys the provider-side prefix cache | v1 | **done** |
 | R5 | Prewarmed lane pool + reflink/CoW worktrees | The single biggest wall-clock win available; target lane-ready < 1s | v2 | **CoW warming done**, lane-ready latency published; the warm pool remains |
-| R6 | Coordination state as an MCP server the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 | not started |
+| R6 | Coordination state the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 | **done, as a CLI not an MCP server** — see the note below |
 | R7 | Admission scheduler over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 | not started |
 | R8 | Race mode: heterogeneous best-of-N with a verifier | Only Fluent can run N across providers *and* credentials | v3 | not started (R3 supplies its verifier) |
 | R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 | not started |
@@ -548,6 +548,18 @@ in the MAST taxonomy is a whole category (task derailment, step repetition). Cod
 | **v1** | R1 (structured channel; closes §14's Codex risk) · R3 (verification gate, single-lane) · R4 (cache-aware broker) |
 | **v2** | R5 (prewarm + CoW; the speed story) · R2 parts 1–3 (claims fix, derived claims, merge queue) · R7 (admission scheduler) · R10 (traces) · R11 (context packs) · R12 (checkpoints) |
 | **v3** | R6 (coordination MCP — pull the read path to v2 if the orchestrator screen slips) · R2 part 4 (build-conflict prediction) · R8 (race mode) · R9 (mailbox) |
+
+**Changed while implementing: R6 shipped as a CLI, not an MCP server.** The recommendation said
+MCP because MCP is the tool layer of the stack (§2.6) and both CLIs consume it natively. Building
+it, a CLI turned out to be the better fit and the smaller change. Every coding agent already has a
+shell, so one command covers every provider Fluent supports and any it might later — including any
+without an MCP client — with no per-provider server config and no server process per lane. It is
+also the shape the prior art converged on (herdr's agent-facing CLI and socket API), and AXI, which
+§11 already cites, is *specifically* a set of principles for CLI output meant to be read by an
+agent. The one thing MCP does better is announce itself: a tool appears in the model's tool list
+and a command does not, so the lane has to be told the command exists — which is what
+`agent-briefing.ts` does, through each CLI's own direction flag (§7.5). Both options remain open;
+MCP would now be a thin wrapper over the same `agent.*` RPCs if it is ever wanted.
 
 **Resolved while implementing.** Spec §14's first open risk — Codex's hook/telemetry parity — is
 answered: `codex app-server` reports the same two quota windows Claude Code's status line does, so
