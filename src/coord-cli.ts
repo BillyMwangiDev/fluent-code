@@ -27,8 +27,11 @@ const usage = `fluent-coord — coordination between agent lanes
   fluent-coord task add TITLE...         add a shared task
   fluent-coord task start ID             take a task
   fluent-coord task done ID              finish a task
+  fluent-coord send LANE MESSAGE...      message another lane; it reads it when it next checks
+  fluent-coord inbox                     read your unread messages, oldest first
   fluent-coord handoff LANE SUMMARY...   propose handing your work to another lane
 
+Lanes may be different products — a Codex lane and a Claude lane are peers here.
 Run it from inside your working directory; that is how it knows which lane you are.
 'status --since CURSOR' prints 'unchanged CURSOR' when nothing has changed since that check.
 A refused claim is an ordinary result, not an error: read it and coordinate.`;
@@ -61,6 +64,13 @@ async function main(argv: string[]) {
       if (action !== 'add' && action !== 'start' && action !== 'done') throw new Error('usage: fluent-coord task add|start|done');
       return print(await daemonRequest<Reply>('agent.task', {cwd, action, title: args.join(' '), taskId: args[0]}));
     }
+    case 'send': {
+      const [to, ...body] = rest;
+      if (!to || body.length === 0) throw new Error('usage: fluent-coord send LANE MESSAGE...');
+      return print(await daemonRequest<Reply>('agent.send', {cwd, to, body: body.join(' ')}));
+    }
+    case 'inbox':
+      return print(await daemonRequest<Reply>('agent.inbox', {cwd, peek: rest.includes('--peek')}));
     case 'handoff': {
       const [to, ...summary] = rest;
       if (!to) throw new Error('usage: fluent-coord handoff LANE SUMMARY...');

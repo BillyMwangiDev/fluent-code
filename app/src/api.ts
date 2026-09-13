@@ -129,8 +129,11 @@ export type CoordinationState = {
   tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string}>;
   claims: Array<{path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
   decisions: Array<{id: string; summary: string; sessionId?: string; createdAt: string}>;
+  messages: LaneMessage[];
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
 };
+export type LaneMessage = {id: string; from: string; to: string; body: string; createdAt: string; readAt?: string};
+export type SkillInstallState = {provider: ProviderId; path: string; installed: boolean; current: boolean};
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
 export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
@@ -207,6 +210,9 @@ export const api = {
   claimFile: (project: string, path: string, sessionId: string) => daemonRequest<ClaimResult>('coordination.claim', {project, path, sessionId}),
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
   conflicts: (project: string) => daemonRequest<RankedConflict[]>('coordination.conflicts', {project}),
+  messages: (project: string) => daemonRequest<LaneMessage[]>('coordination.messages', {project}),
+  skillStatus: () => daemonRequest<SkillInstallState[]>('skills.status'),
+  installSkill: () => daemonRequest<SkillInstallState[]>('skills.install'),
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),
   acceptHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.accept', {project, handoffId}),
@@ -273,6 +279,10 @@ export function onAdmissionWarning(handler: (event: {sessionId: string; verdict:
 
 export function onMergeOutcome(handler: (event: {outcome: MergeOutcome}) => void) {
   return listen<{outcome: MergeOutcome}>('merge-outcome', event => handler(event.payload));
+}
+
+export function onCoordinationMessage(handler: (event: {project: string; message: LaneMessage}) => void) {
+  return listen<{project: string; message: LaneMessage}>('coordination-message', event => handler(event.payload));
 }
 
 export function onConflicts(handler: (event: {project: string; conflicts: RankedConflict[]}) => void) {

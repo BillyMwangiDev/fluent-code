@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import type {CoordinationState, ProviderId, RankedConflict} from './daemon-protocol.js';
+import type {CoordinationState, LaneMessage, ProviderId, RankedConflict} from './daemon-protocol.js';
 
 /** Enough of a UUID to name a thing, short enough to be worth sending into a context window. */
 export const shortId = (id: string) => id.slice(0, 8);
@@ -12,6 +12,9 @@ export type AgentView = {
   claims: CoordinationState['claims'];
   conflicts: RankedConflict[];
   handoffs: CoordinationState['handoffs'];
+  /** Unread messages waiting for this lane. Counted in the status a lane already asks for, so mail
+   * is noticed without inventing a second thing to poll. */
+  unread: number;
   /** Fingerprint of everything above, so a lane can ask "anything new?" and be told no cheaply. */
   cursor: string;
 };
@@ -33,7 +36,9 @@ export function viewCursor(view: Omit<AgentView, 'cursor'>) {
     view.tasks.map(task => [task.id, task.status, task.sessionId, task.title]),
     view.claims.map(claim => [claim.path, claim.sessionId, claim.origin]),
     view.conflicts.map(conflict => [conflict.path, conflict.claimedPath, conflict.sessionId]),
-    view.handoffs.map(handoff => [handoff.id, handoff.status])
+    view.handoffs.map(handoff => [handoff.id, handoff.status]),
+    // Mail has to move the cursor, or a lane polling with --since would never hear about it.
+    view.unread
   ]);
   return createHash('sha256').update(material).digest('hex').slice(0, 12);
 }
@@ -86,8 +91,24 @@ export function renderAgentView(view: AgentView) {
     }
   }
 
+  lines.push(`inbox ${view.unread}`);
   lines.push(`cursor ${view.cursor}`);
   return lines.join('\n');
+}
+
+/**
+ * Renders a lane's unread mail. Sender first on every row, body last, one message per block — an
+ * agent has to be able to tell where one message ends and the next begins without parsing.
+ */
+export function renderInbox(messages: readonly LaneMessage[]) {
+  if (messages.length === 0) return 'inbox 0';
+  const lines = [`inbox ${messages.length}`];
+  for (const message of messages) {
+    lines.push(`from ${shortId(message.from)} at ${message.createdAt}`);
+    lines.push(message.body);
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd();
 }
 
 /**

@@ -84,6 +84,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("admission.warning") => {
             let _ = app.emit("admission-warning", event);
         }
+        Some("coordination.message") => {
+            let _ = app.emit("coordination-message", event);
+        }
         _ => {}
     }
 }

@@ -34,8 +34,10 @@ out of scope; see the spec's Non-goals section.
 - [`src/coord-cli.ts`](./src/coord-cli.ts) — `fluent-coord`, the coordination surface the *agents*
   use (status / claim / release / note / task / handoff). A CLI rather than an MCP server on
   purpose: every agent already has a shell, so it works on every provider with nothing to install
-  per lane. Lanes are told it exists via each CLI's own direction flag — see
-  [`src/agent-briefing.ts`](./src/agent-briefing.ts).
+  per lane. Lanes are told it exists two ways — a short always-on briefing through each CLI's own
+  direction flag ([`src/agent-briefing.ts`](./src/agent-briefing.ts)), and the `fluent-collab`
+  skill ([`src/collab-skill.ts`](./src/collab-skill.ts)) installed into *both* providers' user
+  skill directories, which is what lets a Codex lane and a Claude lane collaborate as peers.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
   prototype (spec §7.4) — port their RPC wiring to the Tauri frontend, not their JSX.

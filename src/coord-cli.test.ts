@@ -23,12 +23,19 @@ async function scratch() {
   return directory;
 }
 
-/** A stand-in provider CLI: it holds its PTY open so the lane stays running, and does nothing. */
-async function fakeProvider() {
+/**
+ * Stand-in provider CLIs, one per provider, so the cross-provider case is actually exercised rather
+ * than asserted. Each holds its PTY open so the lane stays running and does nothing else; the fake
+ * `codex` exits immediately on `app-server`, which is the same thing an install too old to have one
+ * does, and the daemon is expected to carry on without a structured channel.
+ */
+async function fakeProviders() {
   const bin = await scratch();
-  const path = join(bin, 'claude');
-  await writeFile(path, `#!/usr/bin/env node\nprocess.stdin.resume();\nsetInterval(() => {}, 1 << 30);\n`);
-  await chmod(path, 0o755);
+  for (const name of ['claude', 'codex']) {
+    const path = join(bin, name);
+    await writeFile(path, `#!/usr/bin/env node\nif (process.argv[2] === 'app-server') process.exit(1);\nprocess.stdin.resume();\nsetInterval(() => {}, 1 << 30);\n`);
+    await chmod(path, 0o755);
+  }
   return bin;
 }
 
@@ -75,14 +82,16 @@ before(async () => {
       ...process.env,
       FLUENT_STATE_DIR: state,
       FLUENT_WORKTREE_DIR: await scratch(),
-      PATH: [await fakeProvider(), process.env.PATH].join(delimiter)
+      PATH: [await fakeProviders(), process.env.PATH].join(delimiter)
     },
     stdio: 'ignore'
   });
   await waitFor(async () => (await daemonRequest<{ok: boolean}>('ping')).ok, 'fluentd to start');
 
   laneA = await daemonRequest<SessionSummary>('sessions.create', {provider: 'claude', directory: project, isolate: true, task: 'lane A work'});
-  laneB = await daemonRequest<SessionSummary>('sessions.create', {provider: 'claude', directory: project, isolate: true, task: 'lane B work'});
+  // Deliberately a different provider: the point of the surface is that a Codex lane and a Claude
+  // lane are peers, so the test's two lanes must not both be Claude.
+  laneB = await daemonRequest<SessionSummary>('sessions.create', {provider: 'codex', directory: project, isolate: true, task: 'lane B work'});
   await waitFor(async () => {
     const sessions = await daemonRequest<SessionSummary[]>('sessions.list');
     return sessions.filter(session => session.status === 'running').length === 2;
@@ -155,6 +164,45 @@ describe('an agent coordinating from its own working directory', () => {
     assert.match(reply, /waiting for the user to accept it/);
     const state = await daemonRequest<{handoffs: Array<{status: string}>}>('coordination.get', {project});
     assert.equal(state.handoffs[0]?.status, 'open', 'the other lane cannot be given work without the user');
+  });
+
+  it('carries a message from a Claude lane to a Codex lane', async () => {
+    const sent = await coord(laneA.directory, 'send', laneB.id.slice(0, 8), 'I am changing the Router type;', 'your call site needs updating');
+
+    assert.match(sent, new RegExp(`^sent to ${laneB.id.slice(0, 8)}`));
+    assert.match(await coord(laneB.directory, 'status'), /^inbox 1$/m, 'mail shows up in the status a lane already runs');
+
+    const inbox = await coord(laneB.directory, 'inbox');
+    assert.match(inbox, /^inbox 1$/m);
+    assert.match(inbox, new RegExp(`^from ${laneA.id.slice(0, 8)} at `, 'm'));
+    assert.match(inbox, /I am changing the Router type; your call site needs updating/);
+  });
+
+  it('and back again from the Codex lane to the Claude lane', async () => {
+    await coord(laneB.directory, 'send', laneA.id.slice(0, 8), 'understood, I will wait for your commit');
+
+    assert.match(await coord(laneA.directory, 'inbox'), /understood, I will wait for your commit/);
+  });
+
+  it('does not deliver the same message twice', async () => {
+    assert.equal(await coord(laneA.directory, 'inbox'), 'inbox 0');
+    assert.match(await coord(laneA.directory, 'status'), /^inbox 0$/m);
+  });
+
+  it('moves the status cursor when mail arrives, so a polling lane notices', async () => {
+    const before = (await coord(laneA.directory, 'status')).split('\n').find(line => line.startsWith('cursor '))!.slice(7);
+    await coord(laneB.directory, 'send', laneA.id.slice(0, 8), 'one more thing');
+
+    const after = await coord(laneA.directory, 'status', '--since', before);
+
+    assert.notEqual(after, `unchanged ${before}`, 'otherwise a lane polling with --since would never hear about mail');
+    assert.match(after, /^inbox 1$/m);
+    await coord(laneA.directory, 'inbox');
+  });
+
+  it('refuses to send to a lane that does not exist, or to itself', async () => {
+    await assert.rejects(() => coord(laneA.directory, 'send', 'ffffffff', 'hello'), /No lane matches/);
+    await assert.rejects(() => coord(laneA.directory, 'send', laneA.id.slice(0, 8), 'hello'), /your own lane/);
   });
 
   it('refuses to guess when run somewhere no lane is working', async () => {

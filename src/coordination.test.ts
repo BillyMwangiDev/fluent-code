@@ -91,6 +91,71 @@ describe('file claims', () => {
   });
 });
 
+describe('messages between lanes', () => {
+  it('delivers to the named lane, oldest first', async () => {
+    const coordination = await manager();
+    await coordination.send('/project', 'lane-a', 'lane-b', 'first');
+    await coordination.send('/project', 'lane-a', 'lane-b', 'second');
+
+    const inbox = await coordination.inbox('/project', 'lane-b');
+
+    assert.deepEqual(inbox.map(message => message.body), ['first', 'second'], 'a later message that assumes an earlier one was read is nonsense out of order');
+  });
+
+  it('only shows a lane its own mail', async () => {
+    const coordination = await manager();
+    await coordination.send('/project', 'lane-a', 'lane-b', 'for b');
+    await coordination.send('/project', 'lane-b', 'lane-a', 'for a');
+
+    assert.deepEqual((await coordination.inbox('/project', 'lane-a')).map(message => message.body), ['for a']);
+  });
+
+  it('reading marks it read, so the same message is not delivered twice', async () => {
+    const coordination = await manager();
+    await coordination.send('/project', 'lane-a', 'lane-b', 'once');
+
+    assert.equal((await coordination.inbox('/project', 'lane-b')).length, 1);
+    assert.equal((await coordination.inbox('/project', 'lane-b')).length, 0);
+    assert.equal(coordination.unreadCount('/project', 'lane-b'), 0);
+  });
+
+  it('peeking leaves it unread, which is what the UI needs', async () => {
+    const coordination = await manager();
+    await coordination.send('/project', 'lane-a', 'lane-b', 'still waiting');
+
+    assert.equal((await coordination.inbox('/project', 'lane-b', {peek: true})).length, 1);
+    assert.equal(coordination.unreadCount('/project', 'lane-b'), 1, 'watching is not reading');
+  });
+
+  it('keeps read mail in the record rather than deleting it', async () => {
+    const coordination = await manager();
+    await coordination.send('/project', 'lane-a', 'lane-b', 'archived');
+    await coordination.inbox('/project', 'lane-b');
+
+    assert.equal(coordination.messages('/project').length, 1, 'the user can still see what the lanes said to each other');
+    assert.ok(coordination.messages('/project')[0]?.readAt);
+  });
+
+  it('refuses an empty message rather than queueing nothing', async () => {
+    const coordination = await manager();
+    await assert.rejects(() => coordination.send('/project', 'lane-a', 'lane-b', '   '));
+  });
+
+  it('survives state written before messages existed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const {writeFile} = await import('node:fs/promises');
+    await writeFile(join(directory, 'coordination.json'), JSON.stringify([{project: '/project', tasks: [], claims: [], decisions: [], handoffs: []}]));
+
+    const coordination = new CoordinationManager(directory);
+    await coordination.restore();
+
+    assert.deepEqual(coordination.messages('/project'), []);
+    await coordination.send('/project', 'lane-a', 'lane-b', 'works');
+    assert.equal(coordination.messages('/project').length, 1);
+  });
+});
+
 describe('claim leases', () => {
   it('renews a live lane and expires a lane that is gone', async () => {
     const coordination = await manager();

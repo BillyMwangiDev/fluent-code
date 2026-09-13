@@ -19,6 +19,8 @@ import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
 import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
 import {AdmissionAdvisor} from './admission.js';
+import {renderInbox} from './agent-view.js';
+import {installSkill, skillStatus} from './collab-skill.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -271,6 +273,7 @@ async function agentView(cwd: string): Promise<AgentView> {
   const branch = await gitBranch(project);
   const partial = {
     lane: {sessionId: session.id, provider: session.provider, project, branch},
+    unread: coordination.unreadCount(project, session.id),
     // Done tasks are history; a lane asking what is going on needs what is still open.
     tasks: state.tasks.filter(task => task.status !== 'done'),
     claims: state.claims,
@@ -398,6 +401,23 @@ async function dispatch(request: RpcRequest) {
       await coordination.updateTask(project, task.id, request.params.action === 'start' ? 'active' : 'done', session.id);
       return {text: `${request.params.action === 'start' ? 'started' : 'done'} ${shortId(task.id)}`};
     }
+    case 'agent.send': {
+      const {session, project} = laneFor(request.params.cwd);
+      const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
+      if (!target) throw new Error(`No lane matches ${request.params.to}`);
+      if (target.id === session.id) throw new Error('That is your own lane');
+      const message = await coordination.send(project, session.id, target.id, request.params.body);
+      // Cross-lane traffic is shown, never hidden (spec §2 principle 3) — including to the user
+      // whose two agents are talking to each other.
+      for (const socket of streamingSockets) pushEvent(socket, {event: 'coordination.message', project, message});
+      return {text: `sent to ${shortId(target.id)} — it will read this when it next checks its inbox`};
+    }
+    case 'agent.inbox': {
+      const {session, project} = laneFor(request.params.cwd);
+      return {text: renderInbox(await coordination.inbox(project, session.id, {peek: request.params.peek}))};
+    }
+    case 'skills.status': return skillStatus();
+    case 'skills.install': return installSkill();
     case 'agent.handoff': {
       const {session, project} = laneFor(request.params.cwd);
       const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
@@ -424,6 +444,7 @@ async function dispatch(request: RpcRequest) {
     case 'coordination.claim': return coordination.claim(request.params.project, request.params.path, request.params.sessionId);
     case 'coordination.claims.sweep': return sweepClaimLeases();
     case 'coordination.conflicts': return claimObserver.rank(request.params.project, coordination.conflicts(request.params.project));
+    case 'coordination.messages': return coordination.messages(request.params.project);
     case 'coordination.claim.release': return coordination.releaseClaim(request.params.project, request.params.path, request.params.sessionId);
     case 'coordination.decision.add': return coordination.decision(request.params.project, request.params.summary, request.params.sessionId);
     case 'coordination.handoff.create': return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);

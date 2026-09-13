@@ -173,7 +173,13 @@ export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts
 export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type Decision = {id: string; summary: string; sessionId?: string; createdAt: string};
 export type Handoff = {id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'};
-export type CoordinationState = {project: string; tasks: CoordinationTask[]; claims: FileClaim[]; decisions: Decision[]; handoffs: Handoff[]};
+/**
+ * A message from one lane to another. Durable and ordered per recipient, because the alternative —
+ * one agent writing into another's terminal as it runs — is the kind of invisible coordination
+ * spec §2 principle 3 rules out. A lane reads its own mail when it is ready to.
+ */
+export type LaneMessage = {id: string; from: string; to: string; body: string; createdAt: string; readAt?: string};
+export type CoordinationState = {project: string; tasks: CoordinationTask[]; claims: FileClaim[]; decisions: Decision[]; handoffs: Handoff[]; messages: LaneMessage[]};
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
@@ -207,6 +213,10 @@ export type RpcRequest =
   | {id: string; method: 'agent.note'; params: {cwd: string; summary: string}}
   | {id: string; method: 'agent.task'; params: {cwd: string; action: 'add' | 'start' | 'done'; title?: string; taskId?: string}}
   | {id: string; method: 'agent.handoff'; params: {cwd: string; to: string; summary: string}}
+  | {id: string; method: 'agent.send'; params: {cwd: string; to: string; body: string}}
+  | {id: string; method: 'agent.inbox'; params: {cwd: string; peek?: boolean}}
+  | {id: string; method: 'skills.status'}
+  | {id: string; method: 'skills.install'}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
@@ -227,6 +237,7 @@ export type RpcRequest =
   | {id: string; method: 'coordination.claim'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.claims.sweep'}
   | {id: string; method: 'coordination.conflicts'; params: {project: string}}
+  | {id: string; method: 'coordination.messages'; params: {project: string}}
   | {id: string; method: 'coordination.claim.release'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.decision.add'; params: {project: string; summary: string; sessionId?: string}}
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
@@ -267,7 +278,9 @@ export type RpcEvent =
   | {event: 'coordination.conflicts'; project: string; conflicts: RankedConflict[]}
   | {event: 'merge.outcome'; outcome: MergeOutcome}
   /** Pushed when a lane starts with no headroom — a warning after the fact, never a refusal. */
-  | {event: 'admission.warning'; sessionId: string; verdict: AdmissionVerdict};
+  | {event: 'admission.warning'; sessionId: string; verdict: AdmissionVerdict}
+  /** A lane sent another lane a message — surfaced so cross-lane traffic is never invisible. */
+  | {event: 'coordination.message'; project: string; message: LaneMessage};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

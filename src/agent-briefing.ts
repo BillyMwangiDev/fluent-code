@@ -33,15 +33,18 @@ export function coordinationBriefing(command = coordCommand()) {
     'You are one of several agent lanes Fluent Code is running on this repository. Other lanes may be editing it right now.',
     '',
     `Coordinate with them using \`${command}\`, which identifies your lane from your working directory:`,
-    `  ${command} status            everything at once: shared tasks, file claims, conflicts, handoffs`,
-    `  ${command} claim PATH...     say which files you intend to edit, before you edit them`,
-    `  ${command} release PATH...   give them back when you are done`,
-    `  ${command} note SUMMARY      record a decision the other lanes should know about`,
+    `  ${command} status             everything at once: shared tasks, file claims, conflicts, handoffs`,
+    `  ${command} claim PATH...      say which files you intend to edit, before you edit them`,
+    `  ${command} release PATH...    give them back when you are done`,
+    `  ${command} note SUMMARY       record a decision the other lanes should know about`,
+    `  ${command} send LANE MESSAGE  message another lane — it may be running a different provider`,
+    `  ${command} inbox              read messages waiting for you`,
     `  ${command} task add|start|done`,
     `  ${command} handoff LANE SUMMARY`,
     '',
     'Run `status` before you start and again before a large edit; pass `--since CURSOR` from your last check and you get one line back when nothing has changed.',
-    'If a claim is refused, another lane is already working there. Do not edit those files: say so, and either pick different files or propose a handoff. Claims are advisory signals, not locks — they exist so two lanes do not silently write the same merge conflict.'
+    'If a claim is refused, another lane is already working there. Do not edit those files: say so, and either pick different files or propose a handoff. Claims are advisory signals, not locks — they exist so two lanes do not silently write the same merge conflict.',
+    'Read your inbox whenever `status` shows one or more messages waiting. The full protocol is in the `fluent-collab` skill.'
   ].join('\n');
 }
 

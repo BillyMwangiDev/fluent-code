@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
-import type {ClaimConflict, ClaimResult, CoordinationState, FileClaim} from './daemon-protocol.js';
+import type {ClaimConflict, ClaimResult, CoordinationState, FileClaim, LaneMessage} from './daemon-protocol.js';
 
 /**
  * How long a claim survives without its lane renewing it. A claim is a *signal of intent*, never
@@ -59,6 +59,7 @@ export class CoordinationManager {
           renewedAt: claim.renewedAt ?? claim.createdAt,
           expiresAt: claim.expiresAt ?? new Date(Date.now() + claimLeaseMs).toISOString()
         }));
+        state.messages ??= [];
         this.states.set(state.project, state);
       }
     } catch (error: unknown) {
@@ -245,6 +246,42 @@ export class CoordinationManager {
     return changed;
   }
 
+  /**
+   * Queues a message from one lane to another. Appended, never unshifted: mail is read in the order
+   * it was sent, and a later message that assumes an earlier one was read is otherwise nonsense.
+   */
+  async send(project: string, from: string, to: string, body: string) {
+    if (!body.trim()) throw new Error('An empty message is not worth sending');
+    const state = this.ensure(project);
+    const message: LaneMessage = {id: randomUUID(), from, to, body: body.trim(), createdAt: new Date().toISOString()};
+    state.messages.push(message);
+    await this.persist();
+    return message;
+  }
+
+  /**
+   * A lane's unread mail, oldest first. Reading marks it read, which is what makes this a mailbox
+   * rather than a feed — `peek` is for the UI, which watches without consuming.
+   */
+  async inbox(project: string, sessionId: string, {peek = false} = {}) {
+    const state = this.ensure(project);
+    const unread = state.messages.filter(message => message.to === sessionId && !message.readAt);
+    if (!peek && unread.length > 0) {
+      const readAt = new Date().toISOString();
+      for (const message of unread) message.readAt = readAt;
+      await this.persist();
+    }
+    return unread;
+  }
+
+  unreadCount(project: string, sessionId: string) {
+    return this.ensure(project).messages.filter(message => message.to === sessionId && !message.readAt).length;
+  }
+
+  messages(project: string) {
+    return this.ensure(project).messages;
+  }
+
   async decision(project: string, summary: string, sessionId?: string) {
     const state = this.ensure(project);
     state.decisions.unshift({id: randomUUID(), summary, sessionId, createdAt: new Date().toISOString()});
@@ -271,7 +308,7 @@ export class CoordinationManager {
   private ensure(project: string) {
     let state = this.states.get(project);
     if (!state) {
-      state = {project, tasks: [], claims: [], decisions: [], handoffs: []};
+      state = {project, tasks: [], claims: [], decisions: [], handoffs: [], messages: []};
       this.states.set(project, state);
     }
     return state;

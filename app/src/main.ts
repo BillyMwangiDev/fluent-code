@@ -637,6 +637,7 @@ async function renderOrchestration(main: HTMLElement) {
   }
   const state = await api.coordination(project);
   const conflicts = await api.conflicts(project);
+  const skills = await api.skillStatus().catch(() => []);
   const live = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
   const taskInput = h('input', {type: 'text', placeholder: 'add a shared task'});
   const addTask = h('button', {class: 'btn primary'}, ['add task']);
@@ -714,6 +715,37 @@ async function renderOrchestration(main: HTMLElement) {
     h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimButton, claimNotice])]),
     h('div', {class: 'card'}, [h('h3', {}, ['project memory']), ...state.decisions.map(decision => h('p', {class: 'section-sub'}, [decision.summary || 'no decisions yet'])), h('div', {class: 'field'}, [decisionInput, decisionButton])]),
     h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffButton])])
+  ]));
+
+  // Lanes talking to each other is coordination, so it is shown like every other kind: visible by
+  // default, never something happening out of sight (spec §2 principle 3).
+  const messageRows = state.messages.length === 0
+    ? [h('p', {class: 'section-sub'}, ['No messages between lanes yet — an agent sends one with `fluent-coord send`.'])]
+    : [...state.messages].reverse().slice(0, 12).map(message => h('div', {class: 'option-row'}, [
+        h('span', {class: 'label'}, [message.body]),
+        h('span', {class: 'meta'}, [`${message.from.slice(0, 8)} → ${message.to.slice(0, 8)} · ${message.readAt ? 'read' : 'unread'}`])
+      ]));
+
+  const missingSkill = skills.filter(skill => !skill.current);
+  const installButton = h('button', {class: 'btn primary'}, [skills.some(skill => skill.installed) ? 'update collaboration skill' : 'install collaboration skill']);
+  const installNotice = h('p', {class: 'section-sub'}, [
+    missingSkill.length === 0
+      ? 'Every provider has the current fluent-collab skill — new lanes know how to coordinate.'
+      : `${missingSkill.map(skill => skill.provider).join(' and ')} ${missingSkill.length === 1 ? 'does' : 'do'} not have the current skill. Installing writes it to each provider's own skills directory; it never touches this repository.`
+  ]);
+  installButton.addEventListener('click', async () => {
+    installButton.disabled = true;
+    try {
+      await api.installSkill();
+      void render();
+    } finally {
+      installButton.disabled = false;
+    }
+  });
+
+  main.append(h('div', {class: 'cards-row'}, [
+    h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows]),
+    h('div', {class: 'card'}, [h('h3', {}, ['collaboration skill']), installNotice, h('div', {class: 'field'}, [installButton])])
   ]));
 }
 
