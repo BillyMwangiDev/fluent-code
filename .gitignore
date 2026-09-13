@@ -1,0 +1,15 @@
+.superpowers/
+node_modules/
+dist/
+
+# local agent-harness tooling state (session replays, hook caches) — not project source
+.omc/
+.impeccable/
+
+# fluentd runtime state — credentials.json holds metadata only; API keys remain in the OS credential store
+.fluent/
+
+# generated frontend bundle and Rust build artifacts
+app/dist/
+src-tauri/target/
+native/resource-monitor/target/

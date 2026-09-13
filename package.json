@@ -1,0 +1,44 @@
+{
+  "name": "fluent-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fluent": "dist/index.js",
+    "fluentd": "dist/daemon.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.tsx",
+    "daemon": "tsx src/daemon.ts",
+    "daemon:status": "tsx src/daemon-cli.ts status",
+    "postinstall": "node scripts/ensure-node-pty-helper.mjs",
+    "start": "tsx src/index.tsx",
+    "check": "tsc --noEmit",
+    "check:frontend": "tsc --noEmit -p app/tsconfig.json",
+    "build:frontend": "esbuild app/src/main.ts --bundle --outdir=app/dist --format=esm --platform=browser --target=es2022 --loader:.woff=file --loader:.woff2=file",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@fontsource/archivo": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@napi-rs/keyring": "^2.0.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "ink": "^6.3.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.1.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.10",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.4",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
