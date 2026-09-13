@@ -1,6 +1,7 @@
 # Agent orchestration — research findings and recommendations
 
-Status: research complete, recommendations pending your review.
+Status: research complete. R2.1, R3, R4 and R5 are implemented; the rest are pending review.
+Implementation status is tracked per recommendation in the table below.
 Companion docs: [the design spec](../superpowers/specs/2026-09-13-fluent-code-design.md) (§§3, 7.5, 10, 11, 14 are
 the sections this report argues with), [`AGENTS.md`](../../AGENTS.md), [`CLAUDE.md`](../../CLAUDE.md).
 
@@ -37,20 +38,20 @@ Everything in the middle — the agent turn itself — is already excellent and 
 
 **The twelve recommendations**, ranked by leverage per unit of work:
 
-| # | Recommendation | Why it matters | Phase |
-|---|---|---|---|
-| R1 | Structured control channel per provider (ACP + `codex app-server`), PTY kept for rendering | Unlocks R3/R6/R7/R8/R9/R10; closes the spec §14 Codex-parity risk | v1 |
-| R2 | Integration as a product surface: predictive claims + serialized merge queue | The 27.67%/41.7% conflict problem; Fluent's most exposed *and* most defensible edge | v2→v3 |
-| R3 | Verification gate on the repo's own checks before a lane reads "done" | MAST's largest failure category; agent self-report is not evidence | v1 |
-| R4 | Prompt-cache-aware credential switching | The credential broker, as specified, silently destroys the provider-side prefix cache | v1 |
-| R5 | Prewarmed lane pool + reflink/CoW worktrees | The single biggest wall-clock win available; target lane-ready < 1s | v2 |
-| R6 | Coordination state as an MCP server the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 |
-| R7 | Admission scheduler over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 |
-| R8 | Race mode: heterogeneous best-of-N with a verifier | Only Fluent can run N across providers *and* credentials | v3 |
-| R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 |
-| R10 | OTel `gen_ai` semantic conventions for local traces | Makes the Usage Observatory a debugger, at no cost to local-first | v2 |
-| R11 | Delta-injected, budgeted context packs per lane | Already specified in §11 — pull forward, because R6 makes it live | v2 |
-| R12 | Per-turn git checkpoints on a lane ref | Makes R2, R3 and R8 retries safe; makes "undo that turn" a button | v2 |
+| # | Recommendation | Why it matters | Phase | Status |
+|---|---|---|---|---|
+| R1 | Structured control channel per provider (ACP + `codex app-server`), PTY kept for rendering | Unlocks R6/R7/R8/R9/R10; closes the spec §14 Codex-parity risk | v1 | not started |
+| R2 | Integration as a product surface: predictive claims + serialized merge queue | The 27.67%/41.7% conflict problem; Fluent's most exposed *and* most defensible edge | v2→v3 | **part 1 done** — overlap-aware claims with leases; diff-derived claims and the merge queue remain |
+| R3 | Verification gate on the repo's own checks before a lane reads "done" | MAST's largest failure category; agent self-report is not evidence | v1 | **done** |
+| R4 | Prompt-cache-aware credential switching | The credential broker, as specified, silently destroys the provider-side prefix cache | v1 | **done** |
+| R5 | Prewarmed lane pool + reflink/CoW worktrees | The single biggest wall-clock win available; target lane-ready < 1s | v2 | **CoW warming done**, lane-ready latency published; the warm pool remains |
+| R6 | Coordination state as an MCP server the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 | not started |
+| R7 | Admission scheduler over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 | not started |
+| R8 | Race mode: heterogeneous best-of-N with a verifier | Only Fluent can run N across providers *and* credentials | v3 | not started (R3 supplies its verifier) |
+| R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 | not started |
+| R10 | OTel `gen_ai` semantic conventions for local traces | Makes the Usage Observatory a debugger, at no cost to local-first | v2 | not started |
+| R11 | Delta-injected, budgeted context packs per lane | Already specified in §11 — pull forward, because R6 makes it live | v2 | not started |
+| R12 | Per-turn git checkpoints on a lane ref | Makes R2, R3 and R8 retries safe; makes "undo that turn" a button | v2 | not started |
 
 ---
 
