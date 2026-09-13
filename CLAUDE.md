@@ -43,10 +43,11 @@ out of scope; see the spec's Non-goals section.
   built-in `claude plugin eval`. Tests prove `fluent-coord` works; evals measure whether an agent
   actually *uses* it, scored with and without the skill. `pnpm evals:check` validates the suite for
   $0 (CI-safe); `pnpm evals` runs it for real and costs money on your own credential.
-- [`docs/credential-testing.md`](./docs/credential-testing.md) — which of spec §9's three auth modes
-  are actually proven (subscription only), and exactly what to check when platform credits or an
-  API key become available. Note that `platform-credits` currently resolves identically to
-  `subscription` — that is the open question, not a settled design.
+- [`docs/credential-testing.md`](./docs/credential-testing.md) — how each of spec §9's three auth
+  modes is actually selected, verified against Claude Code's own `auth` surface. The key fact:
+  subscription and platform credits are *both* OAuth logins (`--claudeai` vs `--console`), so they
+  are told apart by `CLAUDE_CONFIG_DIR`, not by an env var. Only subscription is proven end to end;
+  the doc lists what to check when credits or a key arrive.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
   prototype (spec §7.4) — port their RPC wiring to the Tauri frontend, not their JSX.

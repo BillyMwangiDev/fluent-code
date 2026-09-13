@@ -17,11 +17,11 @@ import {VerificationRunner} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
 import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
-import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
+import {renderAgentView, renderClaimResult, renderInbox, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
 import {AdmissionAdvisor} from './admission.js';
-import {renderInbox} from './agent-view.js';
 import {installSkill, skillStatus} from './collab-skill.js';
 import {EvalRunner, planEvals} from './eval-runner.js';
+import * as sourceControl from './source-control.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -467,6 +467,9 @@ async function dispatch(request: RpcRequest) {
     case 'spend.summary': return spend.summary(request.params.rangeDays);
     case 'spend.setPriceOverride': await spend.setPriceOverride(request.params.model, request.params.override); return {ok: true};
     case 'spend.clearPriceOverride': await spend.clearPriceOverride(request.params.model); return {ok: true};
+    case 'sourceControl.repoStatus': return sourceControl.repoStatus(request.params.directory);
+    case 'sourceControl.assignedIssues': return sourceControl.assignedIssues();
+    case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
     case 'providers.list': return providerHealth();
     case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);

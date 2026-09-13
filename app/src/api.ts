@@ -123,6 +123,13 @@ export type SpendSummary = {
   ratesUpdatedAt?: string;
   ratesError?: string;
 };
+// Mirrors src/source-control.ts.
+export type PullRequestChecksStatus = 'pending' | 'passing' | 'failing' | 'unknown';
+export type PullRequestStatus = {number: number; title: string; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean; mergedAt: string | null; checksStatus: PullRequestChecksStatus};
+export type RepoStatus = {connected: boolean; owner?: string; repo?: string; branch?: string; dirty?: boolean; pullRequest?: PullRequestStatus; error?: string};
+export type AssignedIssue = {number: number; title: string; url: string; repo: string};
+export type OpenPullRequest = {number: number; title: string; url: string; repo: string; isDraft: boolean};
+
 export type ProviderHealth = {id: ProviderId; label: string; installed: boolean; executable?: string; version?: string};
 export type CoordinationState = {
   project: string;
@@ -239,6 +246,9 @@ export const api = {
   resourceSnapshot: () => daemonRequest<ResourceSnapshot>('resources.snapshot'),
   resourceHistory: (windowMs: number) => daemonRequest<ResourceSnapshot[]>('resources.history', {windowMs}),
   spendSummary: (rangeDays?: number) => daemonRequest<SpendSummary>('spend.summary', {rangeDays}),
+  repoStatus: (directory: string) => daemonRequest<RepoStatus>('sourceControl.repoStatus', {directory}),
+  assignedIssues: () => daemonRequest<AssignedIssue[] | {error: string}>('sourceControl.assignedIssues'),
+  myOpenPullRequests: () => daemonRequest<OpenPullRequest[] | {error: string}>('sourceControl.myOpenPullRequests'),
   setPriceOverride: (model: string, override: PriceOverride) => daemonRequest<{ok: boolean}>('spend.setPriceOverride', {model, override}),
   clearPriceOverride: (model: string) => daemonRequest<{ok: boolean}>('spend.clearPriceOverride', {model}),
   listProviders: () => daemonRequest<ProviderHealth[]>('providers.list'),

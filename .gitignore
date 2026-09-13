@@ -9,6 +9,10 @@ dist/
 # fluentd runtime state — credentials.json holds metadata only; API keys remain in the OS credential store
 .fluent/
 
+# fluentd-generated Claude Code hooks config (hooks-config.ts) — points at this machine's
+# absolute dist/ path, so it's local runtime state, not portable project config
+/.claude/
+
 # generated frontend bundle and Rust build artifacts
 app/dist/
 src-tauri/target/
