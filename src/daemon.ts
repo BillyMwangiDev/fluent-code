@@ -69,6 +69,7 @@ manager.on('status', (sessionId: string, summary) => {
   // this the lease below still frees them, but only after it lapses — this makes it immediate.
   if (summary.status === 'exited' || summary.status === 'stopped' || summary.status === 'failed') {
     void coordination.releaseSession(sessionId).catch(error => console.error(`fluentd could not release claims for ${sessionId}: ${error.message}`));
+    broker.forgetSession(summary.provider, sessionId);
   }
   // An isolated lane that exited is done, and its worktree is the thing being judged — so gate it
   // on the project's own checks without waiting to be asked. A session sharing the user's own
@@ -81,8 +82,8 @@ manager.on('status', (sessionId: string, summary) => {
 broker.on('switched', (provider, accountId, reason) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
 });
-broker.on('notice', (provider, message, resetAt) => {
-  for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.notice', provider, message, resetAt});
+broker.on('notice', (provider, message, resetAt, guidance) => {
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.notice', provider, message, resetAt, guidance});
 });
 
 /**
@@ -117,17 +118,35 @@ async function sweepClaimLeases() {
   return {renewed: live.length, expired};
 }
 
+/** Sessions still holding a credential for this provider — they keep the one they started with,
+ * which is precisely why a switch is not the rescue it looks like. */
+function activeSessionCount(provider: 'claude' | 'codex') {
+  return manager.list().filter(session => session.provider === provider && (session.status === 'running' || session.status === 'starting')).length;
+}
+
 async function handleHookReport({cwd, event, payload}: {cwd: string; event: string; payload: Record<string, unknown>}) {
   const session = manager.findActiveByDirectory(cwd);
   if (!session) return {handled: false};
   if (event === 'StatusLine' && session.provider === 'claude') {
     await usage.recordClaude(session.id, payload);
+    // The status line is where Claude Code reports its own prompt-cache reuse. Handing it to the
+    // broker is what lets a fallback notice say what switching costs instead of implying it is
+    // free (spec §9 + docs/research/2026-09-13-agent-orchestration.md §2.5).
+    const cache = payload.prompt_cache;
+    const hitRatio = cache && typeof cache === 'object' && typeof (cache as Record<string, unknown>).hit_ratio === 'number'
+      ? (cache as {hit_ratio: number}).hit_ratio
+      : undefined;
+    broker.observeCache(session.provider, {sessionId: session.id, accountId: session.accountId, hitRatio});
     return {handled: true};
   }
   if (event === 'StopFailure') {
     const errorType = payload.error;
     if (errorType === 'rate_limit' || errorType === 'overloaded' || errorType === 'authentication_failed') {
-      await broker.reportUsageLimit(session.provider, {accountId: session.accountId, resetAt: typeof payload.resetAt === 'string' ? payload.resetAt : undefined});
+      await broker.reportUsageLimit(session.provider, {
+        accountId: session.accountId,
+        resetAt: typeof payload.resetAt === 'string' ? payload.resetAt : undefined,
+        activeSessions: activeSessionCount(session.provider)
+      });
       return {handled: true};
     }
   }
@@ -185,6 +204,7 @@ async function dispatch(request: RpcRequest) {
     case 'credentials.setChain': return broker.setChain(request.params.provider, request.params.accountIds);
     case 'credentials.setFallbackPolicy': return broker.setFallbackPolicy(request.params.provider, request.params.policy);
     case 'credentials.confirmFallback': return broker.confirmFallback(request.params.provider, request.params.accept, {resetAt: request.params.resetAt});
+    case 'credentials.guidance': return broker.guidance(request.params.provider, {activeSessions: activeSessionCount(request.params.provider)});
     case 'hooks.report': return handleHookReport(request.params);
     // sessions.subscribe/unsubscribe/stream.open are handled before dispatch (need the socket).
     case 'sessions.subscribe': case 'sessions.unsubscribe': case 'stream.open': throw new Error(`${request.method} must not reach dispatch`);

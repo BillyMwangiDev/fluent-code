@@ -27,6 +27,14 @@ export type SessionSummary = {
   verification?: VerificationStatus;
 };
 
+export type FallbackGuidance = {
+  recommendation: 'switch' | 'wait';
+  resetsInMs?: number;
+  cacheHitRatio?: number;
+  activeSessions: number;
+  detail: string;
+};
+
 export type VerificationStatus = 'running' | 'passed' | 'failed' | 'unavailable';
 export type VerificationResult = {
   sessionId: string;
@@ -213,6 +221,15 @@ export function onCredentialSwitched(handler: (event: {provider: ProviderId; acc
   return listen<{provider: ProviderId; accountId: string; reason: 'fallback' | 'revert' | 'manual'}>('credential-switched', event => handler(event.payload));
 }
 
-export function onCredentialNotice(handler: (event: {provider: ProviderId; message: string; resetAt?: string}) => void) {
-  return listen<{provider: ProviderId; message: string; resetAt?: string}>('credential-notice', event => handler(event.payload));
+export function onCredentialNotice(handler: (event: {provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}) => void) {
+  return listen<{provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}>('credential-notice', event => handler(event.payload));
+}
+
+/** A claim never disappears from the coordination column without a reason — this is the reason. */
+export function onClaimsExpired(handler: (event: {claims: Array<{project: string; path: string; sessionId: string}>}) => void) {
+  return listen<{claims: Array<{project: string; path: string; sessionId: string}>}>('coordination-claims-expired', event => handler(event.payload));
+}
+
+export function onSessionVerification(handler: (event: {sessionId: string; result: VerificationResult}) => void) {
+  return listen<{sessionId: string; result: VerificationResult}>('session-verification', event => handler(event.payload));
 }

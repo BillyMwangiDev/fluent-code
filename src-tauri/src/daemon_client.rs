@@ -69,6 +69,12 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("credential.notice") => {
             let _ = app.emit("credential-notice", event);
         }
+        Some("coordination.claimsExpired") => {
+            let _ = app.emit("coordination-claims-expired", event);
+        }
+        Some("sessions.verification") => {
+            let _ = app.emit("session-verification", event);
+        }
         _ => {}
     }
 }

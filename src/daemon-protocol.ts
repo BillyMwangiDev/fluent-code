@@ -164,6 +164,7 @@ export type RpcRequest =
   | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]}}
   | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
+  | {id: string; method: 'credentials.guidance'; params: {provider: ProviderId}}
   | {id: string; method: 'hooks.report'; params: {cwd: string; event: string; payload: Record<string, unknown>}};
 
 export type RpcResponse =
@@ -176,7 +177,7 @@ export type RpcEvent =
   | {event: 'sessions.output'; sessionId: string; chunk: string}
   | {event: 'sessions.status'; sessionId: string; summary: SessionSummary}
   | {event: 'credential.switched'; provider: ProviderId; accountId: string; reason: 'fallback' | 'revert' | 'manual'}
-  | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string}
+  | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}
   /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes
    * from the orchestration column without a visible reason (spec §2 principle 3). */
   | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>}
@@ -193,6 +194,23 @@ export type CredentialAccount = {
   /** API key material is held in the operating system credential store, never in Fluent state. */
   hasSecret?: boolean;
   baseUrl?: string;
+};
+
+/**
+ * What a credential switch is about to cost, attached to every fallback notice. A switch changes
+ * which account *new* sessions start on; sessions already running keep the credential they were
+ * created with, so the switch buys headroom for the next lane rather than rescuing the current one.
+ * That, plus the warm prompt cache a new account does not inherit, is the part a user needs in
+ * front of them before answering "switch and keep going?".
+ */
+export type FallbackGuidance = {
+  recommendation: 'switch' | 'wait';
+  resetsInMs?: number;
+  /** Prompt-cache hit ratio last observed on the limited account, where the CLI reported one. */
+  cacheHitRatio?: number;
+  /** Sessions already running on this provider, which keep their current credential either way. */
+  activeSessions: number;
+  detail: string;
 };
 
 export type CredentialChainState = {

@@ -5,12 +5,25 @@ import type {
   CredentialAccount,
   CredentialChainState,
   CredentialMode,
+  FallbackGuidance,
   FallbackPolicy,
   ProviderId
 } from './daemon-protocol.js';
 import {SecretStore} from './secret-store.js';
 
 const defaultRevertMs = 15 * 60_000;
+
+/**
+ * Below this much time left in a limited window, switching is worse than waiting: a new account
+ * starts cold, and prefix-cache reuse is worth far more on a long coding-agent prompt than a few
+ * minutes of headroom on a window that is about to reset anyway.
+ */
+const shortWindowMs = Number(process.env.FLUENT_SWITCH_MIN_WINDOW_MS ?? 5 * 60_000);
+
+/** Cache observations older than this say nothing useful about the session running now. */
+const observationTtlMs = 30 * 60_000;
+
+type CacheObservation = {sessionId: string; accountId?: string; hitRatio?: number; observedAt: number};
 
 type ProviderState = CredentialChainState & {revertTimer?: NodeJS.Timeout};
 
@@ -21,6 +34,9 @@ type ProviderState = CredentialChainState & {revertTimer?: NodeJS.Timeout};
  */
 export class CredentialBroker extends EventEmitter {
   private readonly providers = new Map<ProviderId, ProviderState>();
+  /** Deliberately in memory only: a cache hit ratio from a previous run of the daemon describes a
+   * session that no longer exists, and stale advice is worse than none. */
+  private readonly cacheObservations = new Map<ProviderId, Map<string, CacheObservation>>();
   private readonly stateFile: string;
   private readonly secrets = new SecretStore();
   private persistQueue: Promise<void> = Promise.resolve();
@@ -135,15 +151,86 @@ export class CredentialBroker extends EventEmitter {
     return this.publicState(state);
   }
 
+  /**
+   * Records what a provider's own reporting says about prompt-cache reuse in a live session — fed
+   * from the Claude Code status line's `prompt_cache.hit_ratio` (see usage-monitor.ts), never
+   * estimated here. It is the only local evidence of what a credential switch is about to throw
+   * away, so the fallback notice can say so instead of presenting the switch as free.
+   */
+  observeCache(provider: ProviderId, observation: {sessionId: string; accountId?: string; hitRatio?: number}) {
+    let observations = this.cacheObservations.get(provider);
+    if (!observations) {
+      observations = new Map();
+      this.cacheObservations.set(provider, observations);
+    }
+    observations.set(observation.sessionId, {...observation, observedAt: Date.now()});
+    for (const [sessionId, existing] of observations) {
+      if (Date.now() - existing.observedAt > observationTtlMs) observations.delete(sessionId);
+    }
+  }
+
+  forgetSession(provider: ProviderId, sessionId: string) {
+    this.cacheObservations.get(provider)?.delete(sessionId);
+  }
+
+  /**
+   * What switching would cost right now, and whether it is worth it.
+   *
+   * Two things make a switch less attractive than it looks. A new account starts with a cold
+   * prefix cache, which on a long coding-agent prompt is the difference between a cheap fast turn
+   * and an expensive slow one. And a switch only changes what *new* sessions get: sessions already
+   * running keep the credential they were created with, so it buys room for the next lane rather
+   * than rescuing the one that hit the wall. Both belong in front of the user before they answer.
+   *
+   * This advises; it never overrides. A user who set 'always-switch' gets the switch they asked
+   * for, with the cost stated (spec §2 principle 4).
+   */
+  guidance(provider: ProviderId, options: {accountId?: string; resetAt?: string; activeSessions?: number} = {}): FallbackGuidance {
+    const state = this.ensure(provider);
+    const limitedId = options.accountId ?? state.activeAccountId ?? state.chain[0];
+    const observations = [...(this.cacheObservations.get(provider)?.values() ?? [])].filter(observation => Date.now() - observation.observedAt <= observationTtlMs);
+    const relevant = observations.filter(observation => !observation.accountId || observation.accountId === limitedId);
+    const ratios = relevant.map(observation => observation.hitRatio).filter((ratio): ratio is number => typeof ratio === 'number');
+    const cacheHitRatio = ratios.length > 0 ? ratios.reduce((total, ratio) => total + ratio, 0) / ratios.length : undefined;
+    const activeSessions = options.activeSessions ?? relevant.length;
+    const resetsInMs = options.resetAt ? new Date(options.resetAt).getTime() - Date.now() : undefined;
+
+    const next = state.chain.find(id => id !== limitedId);
+    const parts: string[] = [];
+    if (!next) parts.push('No other credential is connected for this provider, so there is nothing to switch to.');
+    if (cacheHitRatio !== undefined) parts.push(`The current account is reusing ${Math.round(cacheHitRatio * 100)}% of its prompt cache; a different account starts cold.`);
+    if (activeSessions > 0) parts.push(`${activeSessions} running session${activeSessions === 1 ? '' : 's'} will keep the current credential either way — a switch applies to sessions started from now on.`);
+
+    if (resetsInMs !== undefined && resetsInMs > 0 && resetsInMs <= shortWindowMs) {
+      const minutes = Math.max(1, Math.round(resetsInMs / 60_000));
+      return {
+        recommendation: 'wait',
+        resetsInMs,
+        cacheHitRatio,
+        activeSessions,
+        detail: [`The limit resets in about ${minutes} minute${minutes === 1 ? '' : 's'} — waiting it out costs less than starting cold on another account.`, ...parts].join(' ')
+      };
+    }
+
+    return {
+      recommendation: next ? 'switch' : 'wait',
+      resetsInMs,
+      cacheHitRatio,
+      activeSessions,
+      detail: (parts.length > 0 ? parts : ['Switching starts the next session on the following credential in your chain.']).join(' ')
+    };
+  }
+
   /** Fed by a Claude Code `StopFailure` hook (or another adapter's equivalent) — never invented
    * client-side; it's the CLI's own reported signal (spec §7.5/§9). */
-  async reportUsageLimit(provider: ProviderId, options: {accountId?: string; resetAt?: string} = {}) {
+  async reportUsageLimit(provider: ProviderId, options: {accountId?: string; resetAt?: string; activeSessions?: number} = {}) {
     const state = this.ensure(provider);
     const limitedId = options.accountId ?? state.activeAccountId ?? state.chain[0];
     if (!limitedId) return this.publicState(state);
+    const guidance = this.guidance(provider, {...options, accountId: limitedId});
 
     if (state.fallbackPolicy === 'never-switch') {
-      this.emit('notice', provider, `${limitedId} hit a usage limit; fallback is disabled, staying on it.`, options.resetAt);
+      this.emit('notice', provider, `${limitedId} hit a usage limit; fallback is disabled, staying on it.`, options.resetAt, guidance);
       await this.persist();
       return this.publicState(state);
     }
@@ -152,12 +239,16 @@ export class CredentialBroker extends EventEmitter {
       // Deliberately does NOT mutate state yet — 'always-ask' means exactly that: the active
       // credential stays put until the user calls confirmFallback. Only 'always-switch' below
       // is allowed to flip activeAccountId without a human in the loop.
-      this.emit('notice', provider, `${limitedId} hit a usage limit. Switch to the next credential?`, options.resetAt);
+      const question = guidance.recommendation === 'wait' ? 'Switch anyway?' : 'Switch to the next credential?';
+      this.emit('notice', provider, `${limitedId} hit a usage limit. ${guidance.detail} ${question}`, options.resetAt, guidance);
       return this.publicState(state);
     }
 
+    // 'always-switch' is an instruction, not a suggestion: honour it even when waiting would cost
+    // less, and say what it cost rather than quietly substituting our own judgement.
     this.applyFallback(state, limitedId, options.resetAt);
     this.emit('switched', provider, state.activeAccountId, 'fallback');
+    if (guidance.recommendation === 'wait') this.emit('notice', provider, `Switched away from ${limitedId} as configured. ${guidance.detail}`, options.resetAt, guidance);
     await this.persist();
     return this.publicState(state);
   }

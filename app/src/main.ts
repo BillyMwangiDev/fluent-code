@@ -9,6 +9,7 @@ import {
   api,
   onCredentialNotice,
   onCredentialSwitched,
+  onSessionVerification,
   selectRemoteSocket,
   subscribeSession,
   type CredentialChainState,
@@ -1325,16 +1326,22 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     ]));
   }
 
-  function showBanner(message: string, onSwitch?: () => void) {
+  /**
+   * The fallback question, with the recommendation reflected in which button leads. Switching is
+   * not free — a new account starts with a cold prompt cache — so when waiting is the better trade
+   * the emphasis follows the advice instead of nudging toward the switch regardless.
+   */
+  function showBanner(message: string, onSwitch?: () => void, recommendation?: 'switch' | 'wait') {
     banner.innerHTML = '';
     const actions = h('div', {class: 'actions'});
     if (onSwitch) {
-      const switchButton = h('button', {class: 'btn primary'}, ['switch now']);
+      const preferWaiting = recommendation === 'wait';
+      const switchButton = h('button', {class: preferWaiting ? 'btn' : 'btn primary'}, [preferWaiting ? 'switch anyway' : 'switch now']);
       switchButton.addEventListener('click', () => {
         onSwitch();
         banner.innerHTML = '';
       });
-      const dismiss = h('button', {class: 'btn'}, ['keep waiting']);
+      const dismiss = h('button', {class: preferWaiting ? 'btn primary' : 'btn'}, ['keep waiting']);
       dismiss.addEventListener('click', () => (banner.innerHTML = ''));
       actions.append(switchButton, dismiss);
     }
@@ -1353,7 +1360,13 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     if (event.provider !== initial.provider) return;
     showBanner(event.message, () => {
       void api.confirmFallback(event.provider, true, event.resetAt);
-    });
+    }, event.guidance?.recommendation);
+  });
+  // A verification result is pushed whether the user asked for it or ran it themselves, so an
+  // automatic check on lane exit lands in the same place a manual one does.
+  const unlistenVerification = await onSessionVerification(event => {
+    if (event.sessionId !== sessionId) return;
+    showVerification(event.result);
   });
   const unlistenSwitched = await onCredentialSwitched(event => {
     if (event.provider !== initial.provider) return;
@@ -1365,6 +1378,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     void unsubscribe();
     unlistenNotice();
     unlistenSwitched();
+    unlistenVerification();
     terminal.dispose();
   };
 }
