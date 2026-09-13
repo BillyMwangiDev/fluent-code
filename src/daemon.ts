@@ -4,7 +4,7 @@ import {daemonSocketPath, type RpcEvent, type RpcRequest, type RpcResponse} from
 import {SessionManager} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
 import {HardwareMonitor} from './hardware-monitor.js';
-import {providerHealth} from './providers.js';
+import {providerAdapter, providerHealth, resolveProviderExecutable} from './providers.js';
 import {CoordinationManager} from './coordination.js';
 import {RemoteManager} from './remote-manager.js';
 import {SoftwareMonitor} from './software-monitor.js';
@@ -16,6 +16,7 @@ import {DesignToolManager} from './design-tool-manager.js';
 import {VerificationRunner} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
 import {MergeQueue} from './merge-queue.js';
+import {CodexAppServer} from './codex-app-server.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -32,6 +33,8 @@ const designTools = new DesignToolManager();
 const verification = new VerificationRunner();
 const claimObserver = new ClaimObserver(coordination);
 const merges = new MergeQueue(verification);
+/** One structured control channel per running Codex lane, alongside its PTY (R1). */
+const codexChannels = new Map<string, CodexAppServer>();
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -71,7 +74,11 @@ manager.on('status', (sessionId: string, summary) => {
   for (const socket of sessionSubscribers.get(sessionId) ?? []) pushEvent(socket, {event: 'sessions.status', sessionId, summary});
   // A lane that is no longer running cannot act on its claims, so it should not hold them. Without
   // this the lease below still frees them, but only after it lapses — this makes it immediate.
+  if (summary.provider === 'codex' && summary.status === 'running') {
+    void startCodexChannel(sessionId, summary.directory, summary.accountId).catch(error => console.error(`fluentd could not open a Codex channel for ${sessionId}: ${error.message}`));
+  }
   if (summary.status === 'exited' || summary.status === 'stopped' || summary.status === 'failed') {
+    stopCodexChannel(sessionId);
     void coordination.releaseSession(sessionId).catch(error => console.error(`fluentd could not release claims for ${sessionId}: ${error.message}`));
     broker.forgetSession(summary.provider, sessionId);
   }
@@ -132,6 +139,65 @@ async function sweepClaimLeases() {
     for (const socket of streamingSockets) pushEvent(socket, {event: 'coordination.claimsExpired', claims: expired});
   }
   return {renewed: live.length, expired};
+}
+
+/**
+ * Opens Codex's app-server for a lane so fluentd learns its quota from Codex's own reporting
+ * rather than from scraping its terminal. Best-effort throughout: a Codex old enough to lack an
+ * app-server just means this lane has no structured channel, never that it fails to start.
+ */
+async function startCodexChannel(sessionId: string, directory: string, accountId?: string) {
+  if (codexChannels.has(sessionId)) return;
+  let env: NodeJS.ProcessEnv = process.env;
+  try {
+    env = {...process.env, ...await broker.resolveEnv('codex', accountId)};
+  } catch {
+    // A missing API key is the PTY's problem to report, not a reason to skip observing the lane.
+  }
+  const channel = new CodexAppServer({executable: resolveProviderExecutable(providerAdapter('codex')), cwd: directory, env});
+  codexChannels.set(sessionId, channel);
+  channel.on('quota', quota => {
+    void usage.recordQuota(sessionId, 'codex', quota).catch(() => undefined);
+    void reportCodexExhaustion(sessionId, accountId).catch(() => undefined);
+  });
+  channel.on('closed', () => codexChannels.delete(sessionId));
+  if (!await channel.start()) {
+    codexChannels.delete(sessionId);
+    console.log(`fluentd: no Codex app-server for session ${sessionId}; its PTY runs unchanged, without structured telemetry`);
+  }
+}
+
+/** Lanes already reported as exhausted, so a repeated quota report is not a repeated notice. */
+const codexExhausted = new Set<string>();
+
+/**
+ * Turns Codex's own quota reporting into the same usage-limit signal the credential broker already
+ * gets from Claude Code's `StopFailure` hook.
+ *
+ * The two signals are not identical and it is worth being precise about it: Claude's is a turn
+ * that actually failed, while this is Codex saying a window is spent. It is the closest thing
+ * Codex reports without driving its turns, so the threshold is a strict 100% — being slow to
+ * announce a limit is better than switching a user's credential on a window that had headroom
+ * left.
+ */
+async function reportCodexExhaustion(sessionId: string, accountId?: string) {
+  const windows = [usage.get(sessionId)?.quota?.primary, usage.get(sessionId)?.quota?.secondary].filter(Boolean);
+  const spent = windows.filter(window => (window!.usedPercent ?? 0) >= 100);
+  if (spent.length === 0) {
+    codexExhausted.delete(sessionId);
+    return;
+  }
+  if (codexExhausted.has(sessionId)) return;
+  codexExhausted.add(sessionId);
+  // Of the spent windows, the one that frees up first is the one worth waiting for.
+  const resetAt = spent.map(window => window!.resetsAt).filter(Boolean).sort()[0];
+  await broker.reportUsageLimit('codex', {accountId, resetAt, activeSessions: activeSessionCount('codex')});
+}
+
+function stopCodexChannel(sessionId: string) {
+  codexExhausted.delete(sessionId);
+  codexChannels.get(sessionId)?.stop();
+  codexChannels.delete(sessionId);
 }
 
 claimObserver.on('conflicts', (project: string, conflicts) => {
@@ -311,6 +377,7 @@ async function main() {
   const shutdown = () => {
     hardware.stop();
     resources.stop();
+    for (const channel of codexChannels.values()) channel.stop();
     server.close(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);

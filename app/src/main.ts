@@ -18,6 +18,7 @@ import {
   type ProviderId,
   type MergeOutcome,
   type MergePlan,
+  type QuotaWindow,
   type SessionSummary,
   type SpendModelBucket,
   type VerificationResult,
@@ -116,6 +117,16 @@ function h<K extends keyof HTMLElementTagNameMap>(
   }
   for (const child of children) element.append(child);
   return element;
+}
+
+/** One provider-reported quota window, labelled by its own duration rather than by either
+ * vendor's name for it — Claude Code's 5h/7d and Codex's primary/secondary are the same windows,
+ * and the observatory shows both providers in one table. */
+function quotaLabel(window?: QuotaWindow) {
+  if (!window || window.usedPercent === undefined) return '—';
+  const minutes = window.windowMinutes;
+  const name = minutes === undefined ? 'quota' : minutes % 1440 === 0 ? `${minutes / 1440}d` : `${Math.round(minutes / 60)}h`;
+  return `${name} ${window.usedPercent.toFixed(0)}%`;
 }
 
 /** A lane's state against the project's own checks, kept visually distinct from its process
@@ -292,12 +303,12 @@ async function renderUsage(main: HTMLElement) {
   ]));
   if (usage.sessions.length) {
     main.append(h('div', {class: 'card'}, [
-      h('h3', {}, ['claude code usage · official status-line telemetry']),
+      h('h3', {}, ['provider usage · each provider\'s own telemetry']),
       ...usage.sessions.map(item => h('div', {class: 'usage-row'}, [
-        h('strong', {}, [item.model ?? 'Claude Code']),
+        h('strong', {}, [item.model ?? (item.provider === 'codex' ? 'Codex' : 'Claude Code')]),
         h('span', {class: 'trace'}, [`context ${item.contextPercent?.toFixed(0) ?? '—'}%  ${sparkline(item.history, 'contextPercent')}`]),
         h('span', {class: 'section-sub'}, [`input ${formatTokens(item.inputTokens)} · output ${formatTokens(item.outputTokens)} · cache ${item.cacheHitRatio === undefined ? '—' : `${(item.cacheHitRatio * 100).toFixed(0)}%`} · cost ${item.costUsd === undefined ? '—' : `$${item.costUsd.toFixed(2)}`}`]),
-        h('span', {class: 'section-sub'}, [`5h ${item.fiveHourPercent?.toFixed(0) ?? '—'}% · 7d ${item.sevenDayPercent?.toFixed(0) ?? '—'}% · ${relativeTime(item.updatedAt)}`])
+        h('span', {class: 'section-sub'}, [`${quotaLabel(item.quota?.primary)} · ${quotaLabel(item.quota?.secondary)} · ${relativeTime(item.updatedAt)}`])
       ]))
     ]));
   } else {

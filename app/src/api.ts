@@ -87,7 +87,9 @@ export type HardwareSample = {
 
 export type HardwareSnapshot = {current: HardwareSample; history: HardwareSample[]};
 export type SoftwareSnapshot = {capturedAt: string; hostname: string; kernel: string; nodeVersion: string; daemonPid: number; git?: string; providers: ProviderHealth[]};
-export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: 'claude'; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; fiveHourPercent?: number; fiveHourResetsAt?: string; sevenDayPercent?: number; sevenDayResetsAt?: string; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
+export type QuotaWindow = {usedPercent?: number; windowMinutes?: number; resetsAt?: string};
+export type ProviderQuota = {primary?: QuotaWindow; secondary?: QuotaWindow; observedAt: string};
+export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
 export type ResourceSnapshot = {sequence: number; sampledAtUnixMs: number; scannedProcessCount: number; retainedProcessCount: number; inaccessibleProcessCount: number; processes: Array<{pid: number; ppid: number; name: string; command: string; status: string; cpuPercent: number; residentBytes: number; virtualBytes: number; ioReadBytes: number; ioWriteBytes: number}>};
 
 // Mirrors src/spend-tracker.ts — forked from T3 Code's usage system (MIT licensed).

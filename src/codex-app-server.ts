@@ -1,0 +1,209 @@
+import {EventEmitter} from 'node:events';
+import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
+import type {ProviderQuota, QuotaWindow} from './daemon-protocol.js';
+
+/**
+ * Codex's app-server returns empty rate-limit data when asked too soon after `initialize`. Rather
+ * than reporting "no limits known" for a session that has them, the first read is retried on this
+ * schedule and then left to the event stream.
+ */
+const initialReadDelaysMs = [1_500, 6_000, 20_000];
+
+type Pending = {resolve: (value: unknown) => void; reject: (error: Error) => void};
+
+/** The payload Codex reports for one window. Field names are its own. */
+type RawWindow = {usedPercent?: number; windowDurationMins?: number; resetsAt?: number | string};
+
+/**
+ * Reads one of Codex's rate-limit windows. `resetsAt` is a Unix timestamp; a window that carries
+ * nothing useful is dropped entirely so it merges as "unchanged" rather than as an empty window
+ * that would overwrite what is already known.
+ */
+export function windowFrom(raw: unknown): QuotaWindow | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const {usedPercent, windowDurationMins, resetsAt} = raw as RawWindow;
+  const window: QuotaWindow = {
+    usedPercent: typeof usedPercent === 'number' && Number.isFinite(usedPercent) ? usedPercent : undefined,
+    windowMinutes: typeof windowDurationMins === 'number' && Number.isFinite(windowDurationMins) ? windowDurationMins : undefined,
+    resetsAt: typeof resetsAt === 'number' && Number.isFinite(resetsAt)
+      ? new Date(resetsAt * 1000).toISOString()
+      : typeof resetsAt === 'string' ? resetsAt : undefined
+  };
+  return window.usedPercent === undefined && window.windowMinutes === undefined && window.resetsAt === undefined ? undefined : window;
+}
+
+/** Normalizes either shape Codex uses to carry rate limits — the `account/rateLimits/read` result
+ * and the `usage.rate_limits` notification carry the same two windows. */
+export function quotaFrom(payload: unknown): Partial<ProviderQuota> | undefined {
+  if (!payload || typeof payload !== 'object') return undefined;
+  const source = payload as Record<string, unknown>;
+  const nested = source.rateLimits ?? source.rate_limits ?? source;
+  if (!nested || typeof nested !== 'object') return undefined;
+  const windows = nested as Record<string, unknown>;
+  const primary = windowFrom(windows.primary);
+  const secondary = windowFrom(windows.secondary);
+  if (!primary && !secondary) return undefined;
+  return {primary, secondary, observedAt: new Date().toISOString()};
+}
+
+/**
+ * A structured control channel for one Codex lane, alongside its PTY.
+ *
+ * Codex ships an app-server speaking JSON-RPC 2.0 over stdio, which is how a third party is meant
+ * to observe a session: turn lifecycle, account state, and rate limits, without scraping a TUI.
+ * Before this, the Codex adapter was a bare `spawn('codex')` with no telemetry path at all, and
+ * the spec's §14 open risk assumed output pattern-matching might be needed. It is not.
+ *
+ * This channel observes; it never drives a turn. The PTY session remains the real, unmodified CLI
+ * the user is talking to (spec §1), and nothing here reimplements what happens inside a turn.
+ *
+ * Emits 'quota' (Partial<ProviderQuota>) and 'closed'.
+ */
+export class CodexAppServer extends EventEmitter {
+  private child?: ChildProcessWithoutNullStreams;
+  private buffer = '';
+  private nextId = 1;
+  private readonly pending = new Map<number, Pending>();
+  private timers: NodeJS.Timeout[] = [];
+  private closed = false;
+
+  constructor(private readonly options: {executable?: string; cwd?: string; env?: NodeJS.ProcessEnv} = {}) {
+    super();
+  }
+
+  /**
+   * Starts the app-server and asks it what it knows. Entirely best-effort: a Codex install too old
+   * to have an app-server, or one that fails to start, must not stop the lane's PTY from running —
+   * the lane simply has no structured channel, exactly as before.
+   */
+  async start() {
+    if (this.child) return true;
+    try {
+      this.child = spawn(this.options.executable ?? 'codex', ['app-server'], {
+        cwd: this.options.cwd,
+        env: this.options.env ?? process.env,
+        stdio: ['pipe', 'pipe', 'pipe']
+      }) as ChildProcessWithoutNullStreams;
+    } catch {
+      return false;
+    }
+
+    this.child.on('error', () => this.stop());
+    this.child.on('exit', () => this.stop());
+    this.child.stdout.setEncoding('utf8');
+    this.child.stdout.on('data', chunk => this.consume(chunk as string));
+    // The app-server's own diagnostics are not the lane's output and must never reach the terminal.
+    this.child.stderr.resume();
+
+    try {
+      await this.request('initialize', {clientInfo: {name: 'fluentd', version: '0.1.0'}});
+    } catch {
+      this.stop();
+      return false;
+    }
+
+    this.scheduleInitialReads();
+    return true;
+  }
+
+  /**
+   * Reads current rate limits. Returns undefined when the server has nothing yet — which is a
+   * documented state shortly after initialize, not an error.
+   */
+  async readRateLimits() {
+    try {
+      const quota = quotaFrom(await this.request('account/rateLimits/read', {}));
+      if (quota) this.emit('quota', quota);
+      return quota;
+    } catch {
+      return undefined;
+    }
+  }
+
+  stop() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers = [];
+    for (const {reject} of this.pending.values()) reject(new Error('The Codex app-server channel closed'));
+    this.pending.clear();
+    this.child?.kill('SIGTERM');
+    this.child = undefined;
+    this.emit('closed');
+  }
+
+  private scheduleInitialReads() {
+    for (const delay of initialReadDelaysMs) {
+      const timer = setTimeout(() => {
+        void this.readRateLimits().then(quota => {
+          // Once something real comes back, stop asking — the event stream carries it from here.
+          if (quota) for (const pending of this.timers) clearTimeout(pending);
+        });
+      }, delay);
+      timer.unref();
+      this.timers.push(timer);
+    }
+  }
+
+  private consume(chunk: string) {
+    this.buffer += chunk;
+    const lines = this.buffer.split('\n');
+    this.buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      this.handle(message);
+    }
+  }
+
+  private handle(message: Record<string, unknown>) {
+    if (typeof message.id === 'number' && (('result' in message) || ('error' in message))) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (!pending) return;
+      if ('error' in message) {
+        const error = message.error as {message?: string} | undefined;
+        pending.reject(new Error(error?.message ?? 'Codex app-server error'));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+
+    // Notifications. Rate limits can arrive on their own channel or attached to a turn's end;
+    // either way they are the same two windows, and either way they are merged, never replaced.
+    const method = typeof message.method === 'string' ? message.method : undefined;
+    if (!method) return;
+    if (method === 'usage.rate_limits' || method.endsWith('rate_limits') || method.endsWith('rateLimits')) {
+      const quota = quotaFrom(message.params);
+      if (quota) this.emit('quota', quota);
+      return;
+    }
+    if (method === 'turn/completed') {
+      const quota = quotaFrom((message.params as Record<string, unknown> | undefined)?.usage);
+      if (quota) this.emit('quota', quota);
+    }
+  }
+
+  private request(method: string, params: unknown) {
+    return new Promise<unknown>((resolve, reject) => {
+      if (!this.child) return reject(new Error('The Codex app-server is not running'));
+      const id = this.nextId++;
+      this.pending.set(id, {resolve, reject});
+      // The app-server omits the standard "jsonrpc" member; it is a JSON-RPC 2.0 dialect, not
+      // strict JSON-RPC, and sending the member is not what it reads.
+      this.child.stdin.write(`${JSON.stringify({id, method, params})}\n`);
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        reject(new Error(`Codex app-server did not answer ${method}`));
+      }, 15_000);
+      timer.unref();
+      this.timers.push(timer);
+    });
+  }
+}

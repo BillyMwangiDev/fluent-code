@@ -64,7 +64,21 @@ export type SoftwareSnapshot = {
   git?: string;
   providers: ProviderHealth[];
 };
-export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: 'claude'; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; fiveHourPercent?: number; fiveHourResetsAt?: string; sevenDayPercent?: number; sevenDayResetsAt?: string; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
+/**
+ * One provider-reported usage window. Both supported CLIs report the same shape under different
+ * names — Claude Code's status line calls them five_hour/seven_day, Codex's app-server calls them
+ * primary/secondary — so fluentd normalizes to the window's own duration rather than to either
+ * vendor's vocabulary.
+ */
+export type QuotaWindow = {usedPercent?: number; windowMinutes?: number; resetsAt?: string};
+/**
+ * Quota as last reported, per provider. Updates are *sparse*: a provider may report only one
+ * window, and an absent field means "unchanged", never "cleared" — Codex's app-server documents
+ * this explicitly, and treating absence as zero would show a user full headroom they do not have.
+ */
+export type ProviderQuota = {primary?: QuotaWindow; secondary?: QuotaWindow; observedAt: string};
+
+export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
 export type ResourceSnapshot = {sequence: number; sampledAtUnixMs: number; scannedProcessCount: number; retainedProcessCount: number; inaccessibleProcessCount: number; processes: Array<{pid: number; ppid: number; name: string; command: string; status: string; cpuPercent: number; residentBytes: number; virtualBytes: number; ioReadBytes: number; ioWriteBytes: number}>};
 
 export type ProviderHealth = {
