@@ -1,7 +1,5 @@
-/* Fluent Code brand tokens — AGENTS.md §4. The spec's written palette (Canvas/Surface/Ink...) is
-   the light-mode base; Fluent Dark (the default per spec §12) is approximated here from the
-   design/previews/*.png exports since no dark-mode hex table is written down yet — expect this
-   to be superseded by the real theme system (spec screen 12, v3). */
+/* Fluent Code desktop tokens. The written Canvas/Surface/Ink palette remains the brand source;
+   the semantic layer below is what lets every route switch safely between complete bundles. */
 :root {
   --canvas: #f5f4ee;
   --surface: #faf9f5;
@@ -16,25 +14,37 @@
   --radius-card: 12px;
   --radius-button: 8px;
   --radius-chip: 999px;
+  --rail-width: 224px;
+  --content-max: 1680px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 28px;
 
   --font-display: 'Archivo', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
-/* Fluent Dark — default appearance (spec §12). */
+/* Fluent Dark — default appearance. Surfaces are deliberately close together: a terminal tool
+   should feel settled, while borders and elevation still make independent work regions readable. */
 :root {
-  --bg: #18181a;
-  --bg-raised: #1f1f22;
-  --bg-card: #232326;
-  --bg-inset: #141416;
-  --fg: #ededea;
-  --fg-muted: #8a887f;
-  --fg-faint: #5f5d56;
-  --line: #2d2d30;
-  --line-strong: #3a3a3e;
-  --success: #7fb88a;
-  --error: #d97070;
+  --bg: #171716;
+  --bg-raised: #1d1c1b;
+  --bg-card: #22211f;
+  --bg-inset: #11110f;
+  --fg: #f5f4ee;
+  --fg-muted: #a29f96;
+  --fg-faint: #69665f;
+  --line: #34322e;
+  --line-strong: #4b4740;
+  --success: #87bd90;
+  --error: #df7c70;
+  --focus-ring: #e28a6c;
   --terminal-font-size: 13px;
+  --shadow-card: 0 12px 32px rgb(0 0 0 / 12%);
+  --shadow-float: 0 20px 50px rgb(0 0 0 / 32%);
 }
 
 :root[data-theme='light'] {
@@ -49,7 +59,20 @@
   --line-strong: #cbc8bd;
   --success: #477a56;
   --error: #b64d38;
+  --focus-ring: #c15f3c;
   --terminal-font-size: 13px;
+  --shadow-card: 0 12px 28px rgb(50 45 37 / 7%);
+  --shadow-float: 0 20px 50px rgb(50 45 37 / 16%);
+}
+
+/* These roles deliberately derive from each bundle's core colours. A new theme therefore gets
+   elevated, hover, subtle-border, and focus-safe states without a route-specific colour leak. */
+:root {
+  --bg-elevated: color-mix(in srgb, var(--bg-card) 88%, var(--fg));
+  --bg-hover: color-mix(in srgb, var(--bg-card) 84%, var(--fg));
+  --line-subtle: color-mix(in srgb, var(--line) 68%, transparent);
+  --focus-soft: color-mix(in srgb, var(--focus-ring) 20%, transparent);
+  --panel-glow: color-mix(in srgb, var(--fg) 3%, transparent);
 }
 
 /* Each bundle owns a complete semantic surface; the appearance picker only ever exposes bundles
@@ -64,18 +87,22 @@
   box-sizing: border-box;
 }
 
+html, body, #app {
+  min-height: 100%;
+}
+
 body {
+  margin: 0;
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
+  text-rendering: optimizeLegibility;
 }
 
 #app {
   min-height: 100vh;
-  display: flex;
-  flex-direction: column;
 }
 
 button {
@@ -84,7 +111,7 @@ button {
   cursor: pointer;
 }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
-  outline: 2px solid var(--coral);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -96,10 +123,12 @@ input, textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius-button);
   padding: 8px 10px;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
 }
 input:focus, textarea:focus {
   outline: none;
-  border-color: var(--coral);
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 3px var(--focus-soft);
 }
 
 .wordmark {
@@ -122,13 +151,28 @@ input:focus, textarea:focus {
 .mark span:nth-child(4) { left: 12px; top: 12px; }
 .mark span:nth-child(4) { background: var(--coral); }
 
-.topbar {
+.app-shell {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.topbar.app-rail {
+  position: sticky;
+  top: 0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 24px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg-raised);
+  height: 100vh;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 97%, var(--fg)) 0%, var(--bg-raised) 26%, var(--bg) 100%);
+}
+.rail-head {
+  display: grid;
+  gap: 5px;
+  padding: 22px 18px 16px;
+  border-bottom: 1px solid var(--line-subtle);
 }
 .topbar .brand {
   display: flex;
@@ -138,58 +182,87 @@ input:focus, textarea:focus {
   font-weight: 700;
   font-size: 15px;
 }
-.topbar nav {
-  display: flex;
-  gap: 4px;
+.rail-version, .rail-project-label, .rail-project-path, .rail-footer {
+  color: var(--fg-muted);
+  font-size: 10px;
+  letter-spacing: .035em;
 }
-.topbar-right { display: flex; align-items: center; gap: 12px; }
-.target-pill { color: var(--coral); border: 1px solid var(--coral); border-radius: var(--radius-chip); padding: 3px 8px; font-size: 11px; }
-.target-pill.local { color: var(--fg-muted); border-color: var(--line-strong); }
+.rail-project {
+  display: grid;
+  gap: 2px;
+  margin: 14px 12px 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--bg-inset) 76%, transparent);
+}
+.rail-project strong { font-size: 12px; font-weight: 700; }
+.rail-project-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-sections {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.topbar nav {
+  display: grid;
+  gap: 2px;
+}
+.rail-label {
+  display: block;
+  padding: 8px 8px 5px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
 .topbar nav button {
+  width: 100%;
+  text-align: left;
   background: transparent;
   border: 1px solid transparent;
   color: var(--fg-muted);
-  padding: 6px 12px;
+  padding: 7px 9px;
   border-radius: var(--radius-button);
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.topbar nav button:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
 }
 .topbar nav button.active {
   color: var(--fg);
-  border-color: var(--line-strong);
-  background: var(--bg-card);
+  border-color: var(--line);
+  background: var(--bg-elevated);
+  box-shadow: inset 2px 0 0 var(--coral);
 }
-.nav-more { position: relative; }
-.nav-more summary {
-  list-style: none;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-button);
-  color: var(--fg-muted);
-  cursor: pointer;
-  padding: 6px 12px;
-  text-transform: lowercase;
-}
-.nav-more summary::-webkit-details-marker { display: none; }
-.nav-more[open] summary { color: var(--fg); background: var(--bg-card); }
-.nav-more .secondary-nav {
-  position: absolute;
-  z-index: 10;
-  top: calc(100% + 8px);
-  right: 0;
+.rail-footer {
   display: grid;
-  min-width: 168px;
-  padding: 6px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-card);
-  box-shadow: 0 14px 34px rgb(0 0 0 / 22%);
+  gap: 7px;
+  margin-top: auto;
+  padding: 14px 18px 18px;
+  border-top: 1px solid var(--line-subtle);
 }
-.nav-more .secondary-nav button { text-align: left; }
+.target-pill {
+  width: max-content;
+  color: var(--coral);
+  border: 1px solid color-mix(in srgb, var(--coral) 60%, var(--line));
+  border-radius: var(--radius-chip);
+  padding: 3px 8px;
+  font-size: 10px;
+}
+.target-pill.local { color: var(--fg-muted); border-color: var(--line-strong); }
 
 main {
-  flex: 1;
-  width: min(100%, 1560px);
+  width: min(100%, var(--content-max));
+  min-width: 0;
+  min-height: 100vh;
   margin: 0 auto;
-  padding: 32px;
+  padding: 30px clamp(22px, 3vw, 48px) 48px;
   overflow: auto;
+  scrollbar-color: var(--line-strong) transparent;
 }
 
 /* Splash */
@@ -222,10 +295,10 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid var(--line-strong);
+  border: 1px solid var(--line);
   border-radius: var(--radius-chip);
-  padding: 4px 12px;
-  font-size: 12px;
+  padding: 4px 10px;
+  font-size: 11px;
   color: var(--fg-muted);
 }
 .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-faint); }
@@ -234,9 +307,10 @@ main {
 .pill {
   display: inline-block;
   border-radius: var(--radius-chip);
-  padding: 2px 10px;
-  font-size: 11px;
-  border: 1px solid var(--line-strong);
+  padding: 2px 8px;
+  font-size: 10px;
+  letter-spacing: .015em;
+  border: 1px solid var(--line);
   color: var(--fg-muted);
 }
 .pill.status-running, .pill.status-starting { color: var(--success); border-color: var(--success); }
@@ -251,54 +325,70 @@ main {
 
 h1.section-title {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: clamp(20px, 2vw, 24px);
+  letter-spacing: -.025em;
   display: flex;
   align-items: center;
   gap: 10px;
   margin: 0 0 4px;
 }
-.section-sub { color: var(--fg-muted); margin: 0 0 24px; }
+.section-sub { color: var(--fg-muted); margin: 0; max-width: 92ch; }
 
 .cards-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 .card {
-  background: var(--bg-card);
+  background:
+    linear-gradient(160deg, var(--panel-glow), transparent 34%),
+    var(--bg-card);
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
-  padding: 20px;
+  padding: 16px;
+  box-shadow: var(--shadow-card);
 }
-.card.selectable { cursor: pointer; }
-.card.selected { border-color: var(--coral); }
+.card.selectable { cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease; }
+.card.selectable:hover { border-color: var(--line-strong); background-color: var(--bg-elevated); transform: translateY(-1px); }
+.card.selected { border-color: var(--coral); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--coral) 38%, transparent), var(--shadow-card); }
 .card.disabled { opacity: 0.5; }
 .card h3 { margin: 0 0 2px; font-family: var(--font-display); font-size: 16px; }
-.card .subtitle { color: var(--fg-muted); font-size: 12px; margin-bottom: 12px; }
+.card .subtitle { color: var(--fg-muted); font-size: 12px; margin: 0 0 12px; }
 
 .option-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius-button);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  background: color-mix(in srgb, var(--bg-inset) 64%, transparent);
   cursor: pointer;
 }
-.option-row.selected { border-color: var(--coral); }
+.option-row:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.option-row.selected { border-color: var(--coral); background: color-mix(in srgb, var(--coral) 7%, var(--bg-card)); }
 .option-row .label { font-weight: 600; }
 .option-row .meta { color: var(--fg-muted); font-size: 12px; }
+/* The row's first child carries the label/meta text and should absorb width changes and wrap;
+   trailing pills and buttons keep their natural size so long text never crowds them. */
+.option-row > div:first-child { min-width: 0; flex: 1 1 auto; }
+.option-row > button, .option-row > .pill { flex-shrink: 0; }
 
 button.btn {
   border-radius: var(--radius-button);
-  padding: 9px 18px;
+  padding: 8px 12px;
   border: 1px solid var(--line-strong);
-  background: var(--bg-card);
+  background: var(--bg-elevated);
   color: var(--fg);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 5%, transparent);
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
-button.btn:hover { border-color: var(--fg-muted); }
+button.btn:hover { border-color: var(--fg-muted); background: var(--bg-hover); }
+button.btn:active { transform: translateY(1px); }
 button.btn.primary {
   background: var(--coral);
   border-color: var(--coral);
@@ -321,11 +411,11 @@ table.sessions th {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--line);
 }
 table.sessions td {
-  padding: 12px;
+  padding: 11px 12px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -341,11 +431,12 @@ table.sessions td {
   gap: 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
-  padding: 16px;
+  padding: 14px;
   background: var(--bg-card);
+  box-shadow: var(--shadow-card);
 }
-.metric-label, .metric-detail { color: var(--fg-muted); font-size: 11px; }
-.metric-card strong { font-size: 16px; font-weight: 600; }
+.metric-label, .metric-detail { color: var(--fg-muted); font-size: 11px; letter-spacing: .02em; }
+.metric-card strong { font-family: var(--font-display); font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
 .metric-card strong, .usage-row, .trace { font-variant-numeric: tabular-nums; }
 .trace { margin: 6px 0; letter-spacing: .07em; }
 .trace.cpu { color: var(--success); }
@@ -395,29 +486,38 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
   margin-bottom: 8px;
   display: block;
 }
-.field { margin-bottom: 20px; }
+/* A field is a vertical stack of one or more inputs/buttons/notices; without an explicit gap they
+   render flush against each other (inputs touch inputs, buttons touch the input above them). */
+.field { margin-bottom: 20px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .field input, .field textarea { width: 100%; }
-.field .check-label { display: flex; width: auto; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; margin-top: 10px; cursor: pointer; }
+.field .check-label { display: flex; width: auto; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; cursor: pointer; }
 .field .check-label input { width: auto; accent-color: var(--coral); }
 .field textarea { min-height: 80px; resize: vertical; }
 .usage-row { display: grid; grid-template-columns: minmax(120px, 0.8fr) minmax(150px, 1fr) minmax(260px, 1.6fr) minmax(180px, 1fr); gap: 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .usage-row:first-of-type { border-top: 0; }
 
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 22px; }
+.toolbar > div:first-child { display: grid; gap: 4px; }
+
+/* A generic grouped-button row. Scoped rules like `.banner .actions` used to be the only source of
+   this spacing, so any `.actions` div outside a banner (session header, toolbars, dialogs) rendered
+   its buttons with zero gap between them — this rule covers every one of those call sites. */
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 .banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  background: var(--coral-tint);
-  color: #4a2c1c;
-  border: 1px solid var(--coral);
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  background: color-mix(in srgb, var(--coral) 10%, var(--bg-card));
+  color: var(--fg);
+  border: 1px solid color-mix(in srgb, var(--coral) 62%, var(--line));
   border-radius: var(--radius-card);
-  padding: 12px 16px;
+  padding: 12px 14px;
   margin-bottom: 16px;
 }
-.banner .actions { display: flex; gap: 8px; flex-shrink: 0; }
+.banner .actions { flex-shrink: 0; }
 .banner.advisory { background: var(--bg-card); color: var(--fg); }
 .banner.advisory strong { color: var(--coral); }
 .banner.advisory p { margin: 4px 0 0; }
@@ -426,17 +526,20 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   margin-bottom: 12px;
 }
-.session-header .meta { display: flex; gap: 8px; align-items: center; }
+.session-header .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .session-header .dir { color: var(--fg-muted); font-size: 12px; }
 
 #terminal {
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-card);
   background: var(--bg-inset);
-  padding: 8px;
-  height: calc(100vh - 220px);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 3%, transparent), var(--shadow-card);
+  padding: 10px;
+  height: calc(100vh - 178px);
 }
 .review-panel { margin-bottom: 12px; }
 .diff { max-height: 320px; overflow: auto; margin: 10px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-button); background: var(--bg-inset); color: var(--fg); white-space: pre-wrap; font-size: 12px; }
@@ -458,11 +561,26 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 }
 @media (max-width: 720px) {
   .spend-grid { grid-template-columns: 1fr; }
-  main { padding: 20px 16px; }
-  .topbar { align-items: flex-start; padding: 10px 16px; }
-  .topbar-right { flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-  .target-pill { display: none; }
-  .topbar nav button, .nav-more summary { padding: 6px 8px; }
+  .app-shell { display: block; }
+  .topbar.app-rail {
+    z-index: 5;
+    display: flex;
+    width: 100%;
+    height: auto;
+    max-height: none;
+    flex-direction: row;
+    align-items: center;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-raised);
+  }
+  .rail-head { flex: 0 0 auto; padding: 10px 14px; border: 0; }
+  .rail-version, .rail-project, .rail-footer, .rail-label { display: none; }
+  .rail-sections { display: flex; flex: 1; gap: 2px; overflow-x: auto; padding: 8px 8px 8px 0; }
+  .topbar nav { display: flex; flex: 0 0 auto; gap: 2px; }
+  .topbar nav button { width: max-content; padding: 6px 8px; white-space: nowrap; }
+  .topbar nav button.active { box-shadow: inset 0 -2px 0 var(--coral); }
+  main { min-height: calc(100vh - 52px); padding: 20px 16px 32px; }
   .toolbar, .banner, .session-header, .preview-controls { align-items: stretch; flex-direction: column; }
   .toolbar { gap: 12px; }
   .banner .actions { flex-wrap: wrap; }
@@ -499,6 +617,24 @@ table.spend td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .override-form { display: grid; grid-template-columns: 1.4fr 1fr 1fr auto; gap: 8px; align-items: end; margin-top: 12px; }
 .override-form label { display: block; }
 
-.plugin-list { max-height: 480px; overflow-y: auto; margin-top: 12px; }
+/* Catalog list rows flow with the page rather than sitting in their own nested scroll box — a
+   scrollbar inside a scrollbar reads as broken/overlapping chrome, not as organized content. */
+.plugin-list { margin-top: 12px; }
 .plugin-list .option-row { cursor: default; }
-select.btn, .override-form select { border-radius: var(--radius-button); border: 1px solid var(--line-strong); background: var(--bg-card); color: var(--fg); padding: 9px 12px; }
+select.btn, .override-form select, .marketplace-form select, .mcp-form select { border-radius: var(--radius-button); border: 1px solid var(--line-strong); background: var(--bg-card); color: var(--fg); padding: 9px 12px; }
+/* Three fields (target, source, add) rather than the four the shared .override-form grid expects —
+   its own template keeps the button compact instead of stretching into the unused fourth column. */
+.marketplace-form { display: grid; grid-template-columns: 1fr 2fr auto; gap: 8px; align-items: end; margin-top: 12px; }
+@media (max-width: 720px) {
+  .marketplace-form { grid-template-columns: 1fr; }
+}
+/* The MCP add-server form has a variable number of fields (transport swaps command for a URL, an
+   optional args field, etc.) — a flex-wrap row sizes each field sensibly and reflows instead of
+   assuming a fixed column count the way a grid template would. */
+.mcp-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 12px; }
+.mcp-form input, .mcp-form select { flex: 1 1 160px; min-width: 120px; }
+.mcp-form button { flex: 0 0 auto; }
+
+/* Catalog section switcher — keeps plugins and MCP servers in their own dedicated views instead of
+   one long stacked scroll, per the brand's dense-but-organized information design. */
+.catalog-sections { margin-bottom: 4px; }

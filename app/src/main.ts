@@ -17,6 +17,7 @@ import {
   type HardwareSample,
   type PriceOverride,
   type ProviderId,
+  type Run,
   type MergeOutcome,
   type MergePlan,
   type QuotaWindow,
@@ -26,7 +27,7 @@ import {
   type VerificationStatus
 } from './api';
 import type {AssignedIssue, OpenPullRequest, PullRequestStatus, RepoStatus} from './api';
-import type {CatalogPlugin, McpServerEntry} from './api';
+import type {CatalogPlugin, McpServerEntry, McpTransport} from './api';
 
 const root = document.getElementById('app')!;
 
@@ -180,9 +181,14 @@ function accountLabel(accountId: string | undefined, chains: CredentialChainStat
 
 async function render() {
   root.innerHTML = '';
-  if (route.name !== 'splash') root.append(renderTopbar());
   const main = h('main');
-  root.append(main);
+  if (route.name === 'splash') {
+    root.append(main);
+  } else {
+    // The shell is deliberately stable while routes change. It keeps project, target, and the
+    // user's place in the control surface visible without competing with the active work plane.
+    root.append(h('div', {class: 'app-shell'}, [renderTopbar(), main]));
+  }
 
   try {
     switch (route.name) {
@@ -239,30 +245,42 @@ async function render() {
 }
 
 function renderTopbar(): HTMLElement {
-  const primary = h('nav', {class: 'primary-nav'}, [
+  const workspace = h('nav', {class: 'primary-nav'}, [
+    h('span', {class: 'rail-label'}, ['workspace']),
     navButton('sessions', 'sessions'),
     navButton('new session', 'new-session'),
     navButton('orchestrate', 'orchestration'),
     navButton('remote', 'remote')
   ]);
-  const more = document.createElement('details');
-  more.className = 'nav-more';
-  const summary = document.createElement('summary');
-  const secondaryRoutes: Route['name'][] = ['credentials', 'usage', 'spend', 'source-control', 'catalog', 'themes', 'design', 'preview'];
-  summary.textContent = secondaryRoutes.includes(route.name) ? route.name.replace('-', ' ') : 'more';
-  more.append(summary, h('nav', {class: 'secondary-nav'}, [
-    navButton('credentials', 'credentials'),
+  const control = h('nav', {class: 'primary-nav'}, [
+    h('span', {class: 'rail-label'}, ['control plane']),
     navButton('usage', 'usage'),
     navButton('spend', 'spend'),
     navButton('source control', 'source-control'),
     navButton('catalog', 'catalog'),
-    navButton('themes', 'themes'),
-    navButton('design', 'design'),
-    navButton('preview', 'preview')
-  ]));
-  return h('div', {class: 'topbar'}, [
-    h('div', {class: 'brand'}, [markEl(), 'fluent code']),
-    h('div', {class: 'topbar-right'}, [activeRemoteSocket() ? h('span', {class: 'target-pill'}, ['● remote target']) : h('span', {class: 'target-pill local'}, ['● local target']), primary, more])
+    navButton('credentials', 'credentials')
+  ]);
+  const tools = h('nav', {class: 'primary-nav'}, [
+    h('span', {class: 'rail-label'}, ['tools']),
+    navButton('design workspace', 'design'),
+    navButton('preview', 'preview'),
+    navButton('themes', 'themes')
+  ]);
+  const target = activeRemoteSocket()
+    ? h('span', {class: 'target-pill'}, ['● remote target'])
+    : h('span', {class: 'target-pill local'}, ['● local target']);
+  return h('aside', {class: 'topbar app-rail'}, [
+    h('div', {class: 'rail-head'}, [
+      h('div', {class: 'brand'}, [markEl(), 'fluent code']),
+      h('span', {class: 'rail-version'}, ['agent control surface'])
+    ]),
+    h('div', {class: 'rail-project'}, [
+      h('span', {class: 'rail-project-label'}, ['current project']),
+      h('strong', {}, ['fluent-code']),
+      h('span', {class: 'rail-project-path'}, ['~/WORK/fluent-code'])
+    ]),
+    h('div', {class: 'rail-sections'}, [workspace, control, tools]),
+    h('div', {class: 'rail-footer'}, [target, h('span', {}, ['local-first · owner only'])])
   ]);
 }
 
@@ -379,7 +397,7 @@ function metricCard(label: string, value: string, detail: string): HTMLElement {
 // 'usage' screen above (which is live, per-session status-line telemetry): this is cross-session
 // historical cost, scanned from the providers' own transcript files, same as T3's approach.
 
-const providerLabel: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex'};
+const providerLabel: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI'};
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
@@ -738,6 +756,10 @@ function mcpServerRow(server: McpServerEntry): HTMLElement {
 }
 
 async function renderCatalog(main: HTMLElement) {
+  // Plugins and MCP servers live in their own dedicated sections — switched by a tab rather than
+  // stacked into one long scroll — so neither crowds the other and the plugin list's own filters
+  // don't sit visually on top of the MCP form below it.
+  let section: 'plugins' | 'mcp' = 'plugins';
   let targetFilter: ProviderId | 'all' = 'all';
   let installedFilter: 'all' | 'installed' | 'available' = 'all';
   let search = '';
@@ -755,23 +777,15 @@ async function renderCatalog(main: HTMLElement) {
     return;
   }
 
-  function draw() {
-    container.innerHTML = '';
-    container.append(
-      h('div', {class: 'toolbar'}, [
-        h('div', {}, [
-          h('h1', {class: 'section-title'}, [markEl(), 'catalog']),
-          h('p', {class: 'section-sub'}, ['browse and install Claude Code / Codex skills, plugins, and MCP servers — orchestrated through each CLI\'s own catalog'])
-        ])
-      ])
-    );
+  function drawPlugins(): HTMLElement {
+    const wrap = h('div', {});
 
     // Plugins card: search + target/installed filters over the full merged catalog.
     const pluginsCard = h('div', {class: 'card'});
     pluginsCard.append(h('h3', {}, [`plugins (${plugins.length})`]));
 
     const targetToggle = h('div', {class: 'segmented'});
-    for (const option of ['all', 'claude', 'codex'] as const) {
+    for (const option of ['all', 'claude', 'codex', 'gemini'] as const) {
       const button = h('button', {class: `btn${targetFilter === option ? ' primary' : ''}`}, [option === 'all' ? 'all' : providerLabel[option]]);
       button.addEventListener('click', () => {
         targetFilter = option;
@@ -828,35 +842,7 @@ async function renderCatalog(main: HTMLElement) {
       }
     }
     pluginsCard.append(pluginList);
-    container.append(pluginsCard);
-
-    // MCP servers card.
-    const mcpCard = h('div', {class: 'card'}, [h('h3', {}, [`MCP servers (${servers.length})`])]);
-    if (servers.length === 0) {
-      mcpCard.append(h('p', {class: 'section-sub'}, ['No MCP servers configured yet.']));
-    } else {
-      for (const server of servers) mcpCard.append(mcpServerRow(server));
-    }
-    const mcpTargetSelect = h('select', {}, [h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex'])]);
-    const mcpNameInput = h('input', {type: 'text', placeholder: 'server name'});
-    const mcpCommandInput = h('input', {type: 'text', placeholder: 'command, or https:// url'});
-    const mcpAddButton = h('button', {class: 'btn primary'}, ['add']);
-    mcpAddButton.addEventListener('click', async () => {
-      const name = mcpNameInput.value.trim();
-      const commandOrUrl = mcpCommandInput.value.trim();
-      if (!name || !commandOrUrl) return;
-      const target = mcpTargetSelect.value as ProviderId;
-      if (!confirm(`Add MCP server “${name}” for ${providerLabel[target]}? It may execute ${commandOrUrl} when used by the provider.`)) return;
-      const result = await api.addCatalogMcpServer(target, name, commandOrUrl);
-      if (result.ok) {
-        servers = await api.catalogMcpServers();
-        draw();
-      } else {
-        alert(`Add MCP server failed: ${result.output}`);
-      }
-    });
-    mcpCard.append(h('div', {class: 'override-form'}, [mcpTargetSelect, mcpNameInput, mcpCommandInput, mcpAddButton]));
-    container.append(mcpCard);
+    wrap.append(pluginsCard);
 
     // Add-marketplace card — a new marketplace source unlocks more plugins in the list above.
     const marketplaceCard = h('div', {class: 'card'}, [
@@ -880,8 +866,85 @@ async function renderCatalog(main: HTMLElement) {
         alert(`Add marketplace failed: ${result.output}`);
       }
     });
-    marketplaceCard.append(h('div', {class: 'override-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]));
-    container.append(marketplaceCard);
+    marketplaceCard.append(h('div', {class: 'marketplace-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]));
+    wrap.append(marketplaceCard);
+    return wrap;
+  }
+
+  function drawMcp(): HTMLElement {
+    const mcpCard = h('div', {class: 'card'}, [h('h3', {}, [`MCP servers (${servers.length})`])]);
+    if (servers.length === 0) {
+      mcpCard.append(h('p', {class: 'section-sub'}, ['No MCP servers configured yet.']));
+    } else {
+      for (const server of servers) mcpCard.append(mcpServerRow(server));
+    }
+    const mcpTargetSelect = h('select', {}, [h('option', {value: 'all'}, ['all supported agents']), h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex']), h('option', {value: 'gemini'}, ['Gemini CLI'])]);
+    const mcpTransportSelect = h('select', {}, [h('option', {value: 'stdio'}, ['stdio']), h('option', {value: 'http'}, ['http']), h('option', {value: 'sse'}, ['sse'])]);
+    const mcpNameInput = h('input', {type: 'text', placeholder: 'server name'});
+    const mcpCommandInput = h('input', {type: 'text', placeholder: 'executable, or https:// URL'});
+    const mcpArgsInput = h('input', {type: 'text', placeholder: 'arguments JSON array (optional)'});
+    const mcpAddButton = h('button', {class: 'btn primary'}, ['add']);
+    mcpAddButton.addEventListener('click', async () => {
+      const name = mcpNameInput.value.trim();
+      const endpoint = mcpCommandInput.value.trim();
+      const transport = mcpTransportSelect.value as McpTransport;
+      if (!name || !endpoint) return;
+      let args: string[] = [];
+      try {
+        const parsed = mcpArgsInput.value.trim() ? JSON.parse(mcpArgsInput.value) : [];
+        if (!Array.isArray(parsed) || parsed.some(arg => typeof arg !== 'string')) throw new Error();
+        args = parsed;
+      } catch {
+        alert('Arguments must be a JSON array of strings, for example ["-y", "@scope/server"].');
+        return;
+      }
+      const selection = mcpTargetSelect.value as ProviderId | 'all';
+      const targets: ProviderId[] = selection === 'all' ? ['claude', 'codex', 'gemini'] : [selection];
+      const config = transport === 'stdio'
+        ? {name, transport, command: endpoint, args, scope: 'user' as const}
+        : {name, transport, url: endpoint, scope: 'user' as const};
+      if (!confirm(`Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? It may execute ${endpoint} when used by an agent.`)) return;
+      const results = await api.addCatalogMcpServer(targets, config);
+      const failures = results.filter(result => !result.ok);
+      if (failures.length === 0) {
+        servers = await api.catalogMcpServers();
+        draw();
+      } else {
+        alert(`MCP setup failed for ${failures.map(result => `${providerLabel[result.target]}: ${result.output}`).join('\n')}`);
+      }
+    });
+    mcpCard.append(
+      h('p', {class: 'section-sub'}, ['Portable MCP servers can be registered at user scope for every installed agent. Native marketplace plugins remain provider-specific.']),
+      h('div', {class: 'mcp-form'}, [mcpTargetSelect, mcpTransportSelect, mcpNameInput, mcpCommandInput, mcpArgsInput, mcpAddButton])
+    );
+    return mcpCard;
+  }
+
+  function draw() {
+    container.innerHTML = '';
+    const sectionTabs = h('div', {class: 'segmented catalog-sections'});
+    const tabs: Array<{id: 'plugins' | 'mcp'; label: string}> = [
+      {id: 'plugins', label: `plugins (${plugins.length})`},
+      {id: 'mcp', label: `MCP servers (${servers.length})`}
+    ];
+    for (const tab of tabs) {
+      const button = h('button', {class: `btn${section === tab.id ? ' primary' : ''}`}, [tab.label]);
+      button.addEventListener('click', () => {
+        section = tab.id;
+        draw();
+      });
+      sectionTabs.append(button);
+    }
+    container.append(
+      h('div', {class: 'toolbar'}, [
+        h('div', {}, [
+          h('h1', {class: 'section-title'}, [markEl(), 'catalog']),
+          h('p', {class: 'section-sub'}, ['browse and install Claude Code / Codex / Gemini skills, plugins, and MCP servers — orchestrated through each CLI\'s own catalog'])
+        ])
+      ]),
+      sectionTabs,
+      section === 'plugins' ? drawPlugins() : drawMcp()
+    );
   }
 
   draw();
@@ -1026,12 +1089,12 @@ async function renderOrchestration(main: HTMLElement) {
         h('span', {class: 'meta'}, [`${message.from.slice(0, 8)} → ${message.to.slice(0, 8)} · ${message.readAt ? 'read' : 'unread'}`])
       ]));
 
-  const missingSkill = skills.filter(skill => !skill.current);
-  const installButton = h('button', {class: 'btn primary'}, [skills.some(skill => skill.installed) ? 'update collaboration skill' : 'install collaboration skill']);
+  const missingSkill = skills.filter(skill => !skill.current || skill.mcpConfigured !== true);
+  const installButton = h('button', {class: 'btn primary'}, [skills.some(skill => skill.installed) ? 'update coordination bundle' : 'install coordination bundle']);
   const installNotice = h('p', {class: 'section-sub'}, [
     missingSkill.length === 0
-      ? 'Every provider has the current fluent-collab skill — new lanes know how to coordinate.'
-      : `${missingSkill.map(skill => skill.provider).join(' and ')} ${missingSkill.length === 1 ? 'does' : 'do'} not have the current skill. Installing writes it to each provider's own skills directory; it never touches this repository.`
+      ? 'Every installed provider has the current skill and compact MCP coordination tool.'
+      : `${missingSkill.map(skill => skill.provider).join(' and ')} ${missingSkill.length === 1 ? 'is' : 'are'} missing part of the coordination bundle. Installing writes user-scoped skills and MCP configuration only; it never touches this repository.`
   ]);
   installButton.addEventListener('click', async () => {
     installButton.disabled = true;
@@ -1364,7 +1427,8 @@ async function renderSplash(main: HTMLElement) {
   const chains = await api.listCredentials().catch(() => [] as CredentialChainState[]);
   const providers: Array<{id: ProviderId; label: string}> = [
     {id: 'claude', label: 'anthropic claude'},
-    {id: 'codex', label: 'openai codex'}
+    {id: 'codex', label: 'openai codex'},
+    {id: 'gemini', label: 'google gemini'}
   ];
 
   container.append(
@@ -1482,6 +1546,30 @@ async function renderOnboarding(main: HTMLElement) {
     const summary = await api.createSession({provider: 'codex', directory});
     navigate({name: 'active-session', sessionId: summary.id});
   });
+  const geminiKeyLabel = h('input', {type: 'text', placeholder: 'label (e.g. Google AI Studio)'});
+  const geminiKey = h('input', {type: 'password', placeholder: 'AIza...'});
+  const geminiStatus = h('p', {class: 'section-sub'}, []);
+  const geminiKeyButton = h('button', {class: 'btn'}, ['save Gemini API key']);
+  geminiKeyButton.addEventListener('click', async () => {
+    const apiKey = geminiKey.value.trim();
+    if (!apiKey) return geminiKey.focus();
+    await api.upsertAccount({
+      provider: 'gemini',
+      id: crypto.randomUUID(),
+      mode: 'api-key',
+      label: geminiKeyLabel.value.trim() || 'Gemini API key',
+      apiKey
+    });
+    geminiStatus.textContent = 'saved securely — select it when starting a Gemini session';
+    geminiKey.value = '';
+  });
+  const geminiLogin = h('button', {class: 'btn primary'}, ['connect via Gemini login']);
+  geminiLogin.addEventListener('click', async () => {
+    const directory = dirInput.value.trim();
+    if (!directory) return dirInput.focus();
+    const summary = await api.createSession({provider: 'gemini', directory});
+    navigate({name: 'active-session', sessionId: summary.id});
+  });
 
   cards.append(
     h('div', {class: 'card'}, [
@@ -1501,6 +1589,12 @@ async function renderOnboarding(main: HTMLElement) {
       h('p', {class: 'subtitle'}, ['OpenAI · subscription login or API key']),
       h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['CLI login — same working directory']), codexLogin]),
       h('div', {class: 'field'}, [codexKeyLabel, codexKey, codexKeyButton, codexStatus])
+    ]),
+    h('div', {class: 'card'}, [
+      h('h3', {}, ['Gemini CLI']),
+      h('p', {class: 'subtitle'}, ['Google login or Gemini API key']),
+      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['CLI login — same working directory']), geminiLogin]),
+      h('div', {class: 'field'}, [geminiKeyLabel, geminiKey, geminiKeyButton, geminiStatus])
     ]),
     h('div', {class: 'card'}, [
       h('h3', {}, ['OpenRouter']),
@@ -1657,7 +1751,7 @@ async function renderNewSession(main: HTMLElement) {
   });
   const cancelButton = h('button', {class: 'btn'}, ['cancel']);
   cancelButton.addEventListener('click', () => navigate({name: 'sessions'}));
-  main.append(h('div', {class: 'toolbar'}, [h('span', {}, []), h('div', {}, [cancelButton, startButton])]));
+  main.append(h('div', {class: 'toolbar'}, [h('span', {}, []), h('div', {class: 'actions'}, [cancelButton, startButton])]));
 }
 
 // --- Active session ------------------------------------------------------------
@@ -1668,6 +1762,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
   const banner = h('div', {});
   const review = h('div', {class: 'review-panel'});
   const terminalContainer = h('div', {id: 'terminal'});
+  let currentRun: Run | undefined;
   main.append(header, banner, review, terminalContainer);
 
   const terminal = new Terminal({
@@ -1754,6 +1849,8 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         h('span', {class: 'pill status-default'}, [summary.provider]),
         h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
         h('span', {class: `pill status-${summary.status}`}, [summary.status]),
+        ...(currentRun ? [h('span', {class: `pill status-${currentRun.state}`}, [`run · ${currentRun.state}${currentRun.delivery === 'unknown' ? ' · delivery review' : ''}`])] : []),
+        ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),
         verificationPill(summary.verification),
         h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
       ]),
@@ -1848,9 +1945,12 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
 
   const {snapshot, unsubscribe} = subscribeSession(sessionId, {
     onOutput: chunk => terminal.write(chunk),
-    onStatus: summary => renderHeader(summary)
+    onStatus: summary => {
+      void api.getRun(sessionId).then(run => { currentRun = run; renderHeader(summary); }, () => renderHeader(summary));
+    }
   });
   const initial = await snapshot;
+  currentRun = await api.getRun(sessionId).catch(() => undefined);
   renderHeader(initial);
   terminal.write(initial.output);
 
@@ -1890,7 +1990,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
 // --- Credentials ------------------------------------------------------------
 
 async function renderCredentials(main: HTMLElement) {
-  const providerLabels: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex'};
+  const providerLabels: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI'};
   main.append(
     h('h1', {class: 'section-title'}, [markEl(), `${providerLabels[credentialProvider]} credentials`]),
     h('p', {class: 'section-sub'}, ['fluent uses these in order — the highest connected credential runs your sessions'])
@@ -1934,7 +2034,9 @@ async function renderCredentials(main: HTMLElement) {
         h('span', {class: 'label'}, [`${index + 1}. ${account.label}`]),
         h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, connection, isActive ? 'active now' : ''].filter(Boolean).join(' · ')])
       ]);
-      const controls = h('div', {});
+      // Only append a third flex child when there is actually a control to show — an always-present
+      // empty div throws off `.option-row`'s space-between distribution on the first row (index 0),
+      // which has no "move up" button and would otherwise get pushed out of its right-aligned slot.
       if (index > 0) {
         const up = h('button', {class: 'btn'}, ['↑']);
         up.addEventListener('click', async () => {
@@ -1944,9 +2046,8 @@ async function renderCredentials(main: HTMLElement) {
           chain.chain = reordered;
           renderList();
         });
-        controls.append(up);
+        row.append(up);
       }
-      row.append(controls);
       list.append(row);
       // Subscription and Console credits are both OAuth logins the CLI owns, so Fluent shows the
       // command rather than running it: the browser flow is the user's business with Anthropic
