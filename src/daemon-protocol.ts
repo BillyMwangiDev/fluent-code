@@ -1,6 +1,7 @@
 import type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {AssignedIssue, OpenPullRequest, RepoStatus} from './source-control.js';
+export type {CatalogPlugin, MarketplaceEntry, McpServerEntry} from './catalog-manager.js';
 
 export type ProviderId = 'claude' | 'codex';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
@@ -280,6 +281,12 @@ export type RpcRequest =
   | {id: string; method: 'sourceControl.repoStatus'; params: {directory: string}}
   | {id: string; method: 'sourceControl.assignedIssues'}
   | {id: string; method: 'sourceControl.myOpenPullRequests'}
+  | {id: string; method: 'catalog.plugins'}
+  | {id: string; method: 'catalog.installPlugin'; params: {target: ProviderId; pluginId: string}}
+  | {id: string; method: 'catalog.marketplaces'}
+  | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string}}
+  | {id: string; method: 'catalog.mcpServers'}
+  | {id: string; method: 'catalog.addMcpServer'; params: {target: ProviderId; name: string; commandOrUrl: string}}
   | {id: string; method: 'providers.list'}
   | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}

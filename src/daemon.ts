@@ -1,5 +1,5 @@
 import {createServer, type Socket} from 'node:net';
-import {unlink} from 'node:fs/promises';
+import {chmod, unlink} from 'node:fs/promises';
 import {daemonSocketPath, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
 import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
@@ -22,6 +22,7 @@ import {AdmissionAdvisor} from './admission.js';
 import {installSkill, skillStatus} from './collab-skill.js';
 import {EvalRunner, planEvals} from './eval-runner.js';
 import * as sourceControl from './source-control.js';
+import * as catalog from './catalog-manager.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -470,6 +471,12 @@ async function dispatch(request: RpcRequest) {
     case 'sourceControl.repoStatus': return sourceControl.repoStatus(request.params.directory);
     case 'sourceControl.assignedIssues': return sourceControl.assignedIssues();
     case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
+    case 'catalog.plugins': return catalog.allPlugins();
+    case 'catalog.installPlugin': return catalog.installPlugin(request.params.target, request.params.pluginId);
+    case 'catalog.marketplaces': return catalog.claudeMarketplaceList();
+    case 'catalog.addMarketplace': return catalog.addMarketplace(request.params.target, request.params.source);
+    case 'catalog.mcpServers': return catalog.mcpServers();
+    case 'catalog.addMcpServer': return catalog.addMcpServer(request.params.target, request.params.name, request.params.commandOrUrl);
     case 'providers.list': return providerHealth();
     case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);
@@ -574,7 +581,13 @@ async function main() {
       }
     });
   });
-  server.listen(socketPath, () => console.log(`fluentd listening on ${socketPath}`));
+  server.listen({path: socketPath, readableAll: false, writableAll: false}, () => {
+    // `readableAll` / `writableAll` make the initial Unix socket owner-only. chmod is a
+    // belt-and-suspenders assertion for platforms whose IPC socket defaults follow umask.
+    void chmod(socketPath, 0o600)
+      .then(() => console.log(`fluentd listening on ${socketPath}`))
+      .catch(error => console.error(`fluentd could not secure its socket: ${error.message}`));
+  });
   const shutdown = () => {
     hardware.stop();
     resources.stop();

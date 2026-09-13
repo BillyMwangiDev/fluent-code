@@ -26,6 +26,7 @@ import {
   type VerificationStatus
 } from './api';
 import type {AssignedIssue, OpenPullRequest, PullRequestStatus, RepoStatus} from './api';
+import type {CatalogPlugin, McpServerEntry} from './api';
 
 const root = document.getElementById('app')!;
 
@@ -39,6 +40,7 @@ type Route =
   | {name: 'usage'}
   | {name: 'spend'}
   | {name: 'source-control'}
+  | {name: 'catalog'}
   | {name: 'themes'}
   | {name: 'orchestration'}
   | {name: 'design'}
@@ -211,6 +213,9 @@ async function render() {
       case 'source-control':
         await renderSourceControl(main);
         break;
+      case 'catalog':
+        await renderCatalog(main);
+        break;
       case 'themes':
         await renderThemes(main);
         break;
@@ -234,22 +239,30 @@ async function render() {
 }
 
 function renderTopbar(): HTMLElement {
-  const nav = h('nav', {}, [
+  const primary = h('nav', {class: 'primary-nav'}, [
     navButton('sessions', 'sessions'),
     navButton('new session', 'new-session'),
+    navButton('orchestrate', 'orchestration'),
+    navButton('remote', 'remote')
+  ]);
+  const more = document.createElement('details');
+  more.className = 'nav-more';
+  const summary = document.createElement('summary');
+  const secondaryRoutes: Route['name'][] = ['credentials', 'usage', 'spend', 'source-control', 'catalog', 'themes', 'design', 'preview'];
+  summary.textContent = secondaryRoutes.includes(route.name) ? route.name.replace('-', ' ') : 'more';
+  more.append(summary, h('nav', {class: 'secondary-nav'}, [
     navButton('credentials', 'credentials'),
     navButton('usage', 'usage'),
     navButton('spend', 'spend'),
     navButton('source control', 'source-control'),
+    navButton('catalog', 'catalog'),
     navButton('themes', 'themes'),
-    navButton('orchestrate', 'orchestration'),
     navButton('design', 'design'),
-    navButton('preview', 'preview'),
-    navButton('remote', 'remote')
-  ]);
+    navButton('preview', 'preview')
+  ]));
   return h('div', {class: 'topbar'}, [
     h('div', {class: 'brand'}, [markEl(), 'fluent code']),
-    h('div', {class: 'topbar-right'}, [activeRemoteSocket() ? h('span', {class: 'target-pill'}, ['● remote target']) : h('span', {class: 'target-pill local'}, ['● local target']), nav])
+    h('div', {class: 'topbar-right'}, [activeRemoteSocket() ? h('span', {class: 'target-pill'}, ['● remote target']) : h('span', {class: 'target-pill local'}, ['● local target']), primary, more])
   ]);
 }
 
@@ -692,6 +705,186 @@ async function renderSourceControl(main: HTMLElement) {
         : [h('p', {class: 'section-sub'}, [pullRequestsResult.error])])
     ])
   );
+}
+
+// --- Catalog --------------------------------------------------------------------
+// Browse and one-click install Claude Code / Codex skills, plugins, MCP servers — orchestrating
+// each CLI's own plugin/marketplace/MCP subcommands rather than reimplementing them (see
+// src/catalog-manager.ts). "Favor installing what already exists" applied to the whole agent
+// ecosystem, not just provider sessions.
+
+function pluginRow(plugin: CatalogPlugin, onInstall: () => void): HTMLElement {
+  const meta = [providerLabel[plugin.target], plugin.marketplace, plugin.version ? `v${plugin.version}` : null].filter(Boolean).join(' · ');
+  const installButton = h('button', {class: `btn${plugin.installed ? '' : ' primary'}`}, [plugin.installed ? 'installed' : 'install']);
+  installButton.toggleAttribute('disabled', plugin.installed);
+  if (!plugin.installed) installButton.addEventListener('click', onInstall);
+  return h('div', {class: 'option-row'}, [
+    h('div', {}, [
+      h('div', {class: 'label'}, [plugin.name]),
+      h('div', {class: 'meta'}, [plugin.description ? `${plugin.description} — ${meta}` : meta])
+    ]),
+    installButton
+  ]);
+}
+
+function mcpServerRow(server: McpServerEntry): HTMLElement {
+  const meta = [providerLabel[server.target], server.transport, server.command ?? server.url].filter(Boolean).join(' · ');
+  const status = server.needsAuth
+    ? h('span', {class: 'pill status-default'}, ['needs auth'])
+    : server.connected === false
+      ? h('span', {class: 'pill status-failed'}, ['disabled'])
+      : h('span', {class: 'pill status-running'}, ['connected']);
+  return h('div', {class: 'option-row'}, [h('div', {}, [h('div', {class: 'label'}, [server.name]), h('div', {class: 'meta'}, [meta])]), status]);
+}
+
+async function renderCatalog(main: HTMLElement) {
+  let targetFilter: ProviderId | 'all' = 'all';
+  let installedFilter: 'all' | 'installed' | 'available' = 'all';
+  let search = '';
+  const container = h('div', {});
+  main.append(container);
+  container.append(h('div', {class: 'empty-state'}, ['reading installed plugins, marketplaces, and MCP servers…']));
+
+  let plugins: CatalogPlugin[];
+  let servers: McpServerEntry[];
+  try {
+    [plugins, servers] = await Promise.all([api.catalogPlugins(), api.catalogMcpServers()]);
+  } catch (error) {
+    container.innerHTML = '';
+    container.append(h('div', {class: 'empty-state'}, [error instanceof Error ? error.message : String(error)]));
+    return;
+  }
+
+  function draw() {
+    container.innerHTML = '';
+    container.append(
+      h('div', {class: 'toolbar'}, [
+        h('div', {}, [
+          h('h1', {class: 'section-title'}, [markEl(), 'catalog']),
+          h('p', {class: 'section-sub'}, ['browse and install Claude Code / Codex skills, plugins, and MCP servers — orchestrated through each CLI\'s own catalog'])
+        ])
+      ])
+    );
+
+    // Plugins card: search + target/installed filters over the full merged catalog.
+    const pluginsCard = h('div', {class: 'card'});
+    pluginsCard.append(h('h3', {}, [`plugins (${plugins.length})`]));
+
+    const targetToggle = h('div', {class: 'segmented'});
+    for (const option of ['all', 'claude', 'codex'] as const) {
+      const button = h('button', {class: `btn${targetFilter === option ? ' primary' : ''}`}, [option === 'all' ? 'all' : providerLabel[option]]);
+      button.addEventListener('click', () => {
+        targetFilter = option;
+        draw();
+      });
+      targetToggle.append(button);
+    }
+    const installedToggle = h('div', {class: 'segmented'});
+    for (const option of ['all', 'installed', 'available'] as const) {
+      const button = h('button', {class: `btn${installedFilter === option ? ' primary' : ''}`}, [option]);
+      button.addEventListener('click', () => {
+        installedFilter = option;
+        draw();
+      });
+      installedToggle.append(button);
+    }
+    const searchInput = h('input', {type: 'text', placeholder: 'search plugins…', value: search});
+    searchInput.addEventListener('input', () => {
+      search = searchInput.value;
+      draw();
+    });
+    pluginsCard.append(h('div', {class: 'toolbar'}, [targetToggle, installedToggle]), searchInput);
+
+    const needle = search.trim().toLowerCase();
+    const filtered = plugins.filter(plugin => {
+      if (targetFilter !== 'all' && plugin.target !== targetFilter) return false;
+      if (installedFilter === 'installed' && !plugin.installed) return false;
+      if (installedFilter === 'available' && plugin.installed) return false;
+      if (!needle) return true;
+      return plugin.name.toLowerCase().includes(needle) || (plugin.description ?? '').toLowerCase().includes(needle) || plugin.marketplace.toLowerCase().includes(needle);
+    });
+
+    const pluginList = h('div', {class: 'plugin-list'});
+    if (filtered.length === 0) {
+      pluginList.append(h('p', {class: 'section-sub'}, ['No plugins match.']));
+    } else {
+      const shown = filtered.slice(0, 200);
+      for (const plugin of shown) {
+        pluginList.append(
+        pluginRow(plugin, async () => {
+            if (!confirm(`Install ${plugin.name} from ${plugin.marketplace} for ${providerLabel[plugin.target]}? This runs the provider CLI and may add third-party code.`)) return;
+            const result = await api.installCatalogPlugin(plugin.target, plugin.id);
+            if (result.ok) {
+              plugin.installed = true;
+              draw();
+            } else {
+              alert(`Install failed: ${result.output}`);
+            }
+          })
+        );
+      }
+      if (filtered.length > shown.length) {
+        pluginList.append(h('p', {class: 'section-sub'}, [`+${filtered.length - shown.length} more — narrow your search to see them.`]));
+      }
+    }
+    pluginsCard.append(pluginList);
+    container.append(pluginsCard);
+
+    // MCP servers card.
+    const mcpCard = h('div', {class: 'card'}, [h('h3', {}, [`MCP servers (${servers.length})`])]);
+    if (servers.length === 0) {
+      mcpCard.append(h('p', {class: 'section-sub'}, ['No MCP servers configured yet.']));
+    } else {
+      for (const server of servers) mcpCard.append(mcpServerRow(server));
+    }
+    const mcpTargetSelect = h('select', {}, [h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex'])]);
+    const mcpNameInput = h('input', {type: 'text', placeholder: 'server name'});
+    const mcpCommandInput = h('input', {type: 'text', placeholder: 'command, or https:// url'});
+    const mcpAddButton = h('button', {class: 'btn primary'}, ['add']);
+    mcpAddButton.addEventListener('click', async () => {
+      const name = mcpNameInput.value.trim();
+      const commandOrUrl = mcpCommandInput.value.trim();
+      if (!name || !commandOrUrl) return;
+      const target = mcpTargetSelect.value as ProviderId;
+      if (!confirm(`Add MCP server “${name}” for ${providerLabel[target]}? It may execute ${commandOrUrl} when used by the provider.`)) return;
+      const result = await api.addCatalogMcpServer(target, name, commandOrUrl);
+      if (result.ok) {
+        servers = await api.catalogMcpServers();
+        draw();
+      } else {
+        alert(`Add MCP server failed: ${result.output}`);
+      }
+    });
+    mcpCard.append(h('div', {class: 'override-form'}, [mcpTargetSelect, mcpNameInput, mcpCommandInput, mcpAddButton]));
+    container.append(mcpCard);
+
+    // Add-marketplace card — a new marketplace source unlocks more plugins in the list above.
+    const marketplaceCard = h('div', {class: 'card'}, [
+      h('h3', {}, ['add a marketplace']),
+      h('p', {class: 'section-sub'}, ['Point at a GitHub repo (owner/repo) or local path that publishes a Claude Code or Codex plugin marketplace.'])
+    ]);
+    const marketplaceTargetSelect = h('select', {}, [h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex'])]);
+    const marketplaceSourceInput = h('input', {type: 'text', placeholder: 'owner/repo or path'});
+    const marketplaceAddButton = h('button', {class: 'btn primary'}, ['add']);
+    marketplaceAddButton.addEventListener('click', async () => {
+      const source = marketplaceSourceInput.value.trim();
+      if (!source) return;
+      const target = marketplaceTargetSelect.value as ProviderId;
+      if (!confirm(`Add marketplace “${source}” for ${providerLabel[target]}? This lets the provider fetch and install third-party plugins.`)) return;
+      const result = await api.addCatalogMarketplace(target, source);
+      if (result.ok) {
+        plugins = await api.catalogPlugins();
+        marketplaceSourceInput.value = '';
+        draw();
+      } else {
+        alert(`Add marketplace failed: ${result.output}`);
+      }
+    });
+    marketplaceCard.append(h('div', {class: 'override-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]));
+    container.append(marketplaceCard);
+  }
+
+  draw();
 }
 
 // --- Parallel orchestration --------------------------------------------------
@@ -1138,7 +1331,10 @@ async function renderThemes(main: HTMLElement) {
 
 function navButton(label: string, name: Route['name']): HTMLButtonElement {
   const button = h('button', {}, [label]);
-  if (route.name === name) button.classList.add('active');
+  if (route.name === name) {
+    button.classList.add('active');
+    button.setAttribute('aria-current', 'page');
+  }
   button.addEventListener('click', () => navigate({name} as Route));
   return button;
 }

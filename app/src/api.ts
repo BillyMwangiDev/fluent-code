@@ -130,6 +130,12 @@ export type RepoStatus = {connected: boolean; owner?: string; repo?: string; bra
 export type AssignedIssue = {number: number; title: string; url: string; repo: string};
 export type OpenPullRequest = {number: number; title: string; url: string; repo: string; isDraft: boolean};
 
+// Mirrors src/catalog-manager.ts.
+export type CatalogPlugin = {id: string; name: string; marketplace: string; target: ProviderId; description?: string; category?: string; homepage?: string; installed: boolean; enabled?: boolean; version?: string};
+export type MarketplaceEntry = {name: string; target: ProviderId; source: string};
+export type McpServerEntry = {name: string; target: ProviderId; transport: string; command?: string; url?: string; connected?: boolean; needsAuth?: boolean};
+export type CatalogActionResult = {ok: boolean; output: string};
+
 export type ProviderHealth = {id: ProviderId; label: string; installed: boolean; executable?: string; version?: string};
 export type CoordinationState = {
   project: string;
@@ -249,6 +255,12 @@ export const api = {
   repoStatus: (directory: string) => daemonRequest<RepoStatus>('sourceControl.repoStatus', {directory}),
   assignedIssues: () => daemonRequest<AssignedIssue[] | {error: string}>('sourceControl.assignedIssues'),
   myOpenPullRequests: () => daemonRequest<OpenPullRequest[] | {error: string}>('sourceControl.myOpenPullRequests'),
+  catalogPlugins: () => daemonRequest<CatalogPlugin[]>('catalog.plugins'),
+  installCatalogPlugin: (target: ProviderId, pluginId: string) => daemonRequest<CatalogActionResult>('catalog.installPlugin', {target, pluginId}),
+  catalogMarketplaces: () => daemonRequest<MarketplaceEntry[]>('catalog.marketplaces'),
+  addCatalogMarketplace: (target: ProviderId, source: string) => daemonRequest<CatalogActionResult>('catalog.addMarketplace', {target, source}),
+  catalogMcpServers: () => daemonRequest<McpServerEntry[]>('catalog.mcpServers'),
+  addCatalogMcpServer: (target: ProviderId, name: string, commandOrUrl: string) => daemonRequest<CatalogActionResult>('catalog.addMcpServer', {target, name, commandOrUrl}),
   setPriceOverride: (model: string, override: PriceOverride) => daemonRequest<{ok: boolean}>('spend.setPriceOverride', {model, override}),
   clearPriceOverride: (model: string) => daemonRequest<{ok: boolean}>('spend.clearPriceOverride', {model}),
   listProviders: () => daemonRequest<ProviderHealth[]>('providers.list'),
