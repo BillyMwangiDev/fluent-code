@@ -27,6 +27,9 @@ out of scope; see the spec's Non-goals section.
 
 - [`AGENTS.md`](./AGENTS.md) — product, brand, vocabulary.
 - [`docs/superpowers/specs/2026-09-13-fluent-code-design.md`](./docs/superpowers/specs/2026-09-13-fluent-code-design.md) — the spec.
+- [`docs/research/2026-09-13-agent-orchestration.md`](./docs/research/2026-09-13-agent-orchestration.md) —
+  orchestration research (field survey + sourced findings) and the ranked recommendations that
+  come out of it. Read alongside the spec before changing the coordination or credential layers.
 - [`design/`](./design/) — pen.dev source + PNG previews, source of truth for UI.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
