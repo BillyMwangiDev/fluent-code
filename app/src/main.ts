@@ -7,6 +7,7 @@ import '@fontsource/ibm-plex-mono/700.css';
 import {
   activeRemoteSocket,
   api,
+  onAdmissionWarning,
   onCredentialNotice,
   onCredentialSwitched,
   onSessionVerification,
@@ -117,6 +118,13 @@ function h<K extends keyof HTMLElementTagNameMap>(
   }
   for (const child of children) element.append(child);
   return element;
+}
+
+/** The headline of the headroom advice — what the user needs before deciding, in one line. */
+function admissionLabel(verdict: {decision: 'clear' | 'tight' | 'over'; recommendedLanes: number}) {
+  if (verdict.decision === 'over') return 'no headroom for another lane';
+  if (verdict.decision === 'tight') return 'room for about one more lane';
+  return `room for about ${verdict.recommendedLanes} more lanes`;
 }
 
 /** One provider-reported quota window, labelled by its own duration rather than by either
@@ -1217,6 +1225,7 @@ async function renderNewSession(main: HTMLElement) {
       for (const sibling of providerCards.children) sibling.classList.remove('selected');
       card.classList.add('selected');
       renderAccounts();
+      void renderHeadroom();
     });
     providerCards.append(card);
   }
@@ -1232,6 +1241,27 @@ async function renderNewSession(main: HTMLElement) {
     h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['working directory']), dirInput]),
     h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['starting task (optional)']), taskInput, isolateLabel, h('p', {class: 'section-sub'}, ['recommended for parallel agents — creates a separate checkout beside the project'])])
   );
+
+  // Headroom is shown where the decision is made, and it never blocks the button: the advice is
+  // Fluent's, the call is the user's (spec §2 principle 4, §13).
+  const headroom = h('div', {class: 'field'});
+  main.append(headroom);
+  const renderHeadroom = async () => {
+    headroom.innerHTML = '';
+    try {
+      const verdict = await api.assessAdmission(selectedProvider, selectedAccountId);
+      headroom.append(
+        h('div', {class: 'option-row'}, [
+          h('span', {class: 'label'}, [admissionLabel(verdict)]),
+          h('span', {class: verdict.decision === 'over' ? 'error' : 'meta'}, [`${verdict.runningLanes} running · ${verdict.estimateSource === 'observed' ? 'measured here' : 'estimated'}`])
+        ]),
+        ...verdict.reasons.map(reason => h('p', {class: 'section-sub'}, [reason]))
+      );
+    } catch {
+      // Headroom advice is never the reason a session cannot be started.
+    }
+  };
+  void renderHeadroom();
 
   const startButton = h('button', {class: 'btn primary'}, ['start session']);
   startButton.addEventListener('click', async () => {
@@ -1451,6 +1481,11 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     if (event.sessionId !== sessionId) return;
     showVerification(event.result);
   });
+  // The lane is already running by the time this arrives — it is a warning, not a gate.
+  const unlistenAdmission = await onAdmissionWarning(event => {
+    if (event.sessionId !== sessionId) return;
+    showBanner(`started without headroom — ${event.verdict.reasons[0]}`);
+  });
   const unlistenSwitched = await onCredentialSwitched(event => {
     if (event.provider !== initial.provider) return;
     showBanner(`switched to ${accountLabel(event.accountId, chains)} (${event.reason})`);
@@ -1462,6 +1497,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     unlistenNotice();
     unlistenSwitched();
     unlistenVerification();
+    unlistenAdmission();
     terminal.dispose();
   };
 }

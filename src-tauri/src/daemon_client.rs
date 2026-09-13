@@ -81,6 +81,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("merge.outcome") => {
             let _ = app.emit("merge-outcome", event);
         }
+        Some("admission.warning") => {
+            let _ = app.emit("admission-warning", event);
+        }
         _ => {}
     }
 }

@@ -17,6 +17,8 @@ export type SessionSummary = {
   /** The credential account active for this provider at the moment the session was created — a
    * historical record for the session list, not a live pointer (spec screen 4's account column). */
   accountId?: string;
+  /** PTY process id while the lane runs, so its whole process tree can be costed (see admission.ts). */
+  pid?: number;
   /** Original Git project when this session runs in an isolated worktree. */
   projectDirectory?: string;
   worktreePath?: string;
@@ -133,6 +135,28 @@ export type MergeOutcome = {
   mergeCommit?: string;
 };
 
+/**
+ * Whether there is room for another lane. Advisory by design: spec §2 principle 4 and §13 keep
+ * resource intelligence to a recommendation in v1, so this is shown before a lane is opened and
+ * never used to refuse one.
+ */
+export type AdmissionVerdict = {
+  provider: ProviderId;
+  decision: 'clear' | 'tight' | 'over';
+  /** Roughly how many more lanes the free memory would carry. */
+  recommendedLanes: number;
+  runningLanes: number;
+  freeBytes: number;
+  reserveBytes: number;
+  perLaneBytes: number;
+  /** Whether the per-lane figure came from this machine or from a starting-point default. */
+  estimateSource: 'observed' | 'default';
+  quotaUsedPercent?: number;
+  quotaResetsAt?: string;
+  accountId?: string;
+  reasons: string[];
+};
+
 export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
 /**
  * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
@@ -196,6 +220,7 @@ export type RpcRequest =
   | {id: string; method: 'spend.setPriceOverride'; params: {model: string; override: PriceOverride}}
   | {id: string; method: 'spend.clearPriceOverride'; params: {model: string}}
   | {id: string; method: 'providers.list'}
+  | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}
   | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; sessionId?: string}}
   | {id: string; method: 'coordination.task.update'; params: {project: string; taskId: string; status: 'todo' | 'active' | 'done'; sessionId?: string}}
@@ -240,7 +265,9 @@ export type RpcEvent =
   | {event: 'sessions.verification'; sessionId: string; result: VerificationResult}
   /** Pushed when the set of overlaps in a project changes — a quiet sweep stays quiet. */
   | {event: 'coordination.conflicts'; project: string; conflicts: RankedConflict[]}
-  | {event: 'merge.outcome'; outcome: MergeOutcome};
+  | {event: 'merge.outcome'; outcome: MergeOutcome}
+  /** Pushed when a lane starts with no headroom — a warning after the fact, never a refusal. */
+  | {event: 'admission.warning'; sessionId: string; verdict: AdmissionVerdict};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

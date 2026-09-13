@@ -18,6 +18,7 @@ import {ClaimObserver, type Lane} from './claim-observer.js';
 import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
 import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
+import {AdmissionAdvisor} from './admission.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -36,6 +37,7 @@ const claimObserver = new ClaimObserver(coordination);
 const merges = new MergeQueue(verification);
 /** One structured control channel per running Codex lane, alongside its PTY (R1). */
 const codexChannels = new Map<string, CodexAppServer>();
+const admission = new AdmissionAdvisor();
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -75,6 +77,15 @@ manager.on('status', (sessionId: string, summary) => {
   for (const socket of sessionSubscribers.get(sessionId) ?? []) pushEvent(socket, {event: 'sessions.status', sessionId, summary});
   // A lane that is no longer running cannot act on its claims, so it should not hold them. Without
   // this the lease below still frees them, but only after it lapses — this makes it immediate.
+  if (summary.status === 'running') {
+    // Advisory, and after the fact on purpose: spec §2 principle 4 and §13 keep this a warning in
+    // v1, so the lane is already running by the time this is said. It is said anyway, because a
+    // machine quietly thrashing is worse than being told why.
+    const verdict = assessAdmission(summary.provider, summary.accountId);
+    if (verdict.decision === 'over') {
+      for (const socket of streamingSockets) pushEvent(socket, {event: 'admission.warning', sessionId, verdict});
+    }
+  }
   if (summary.provider === 'codex' && summary.status === 'running') {
     void startCodexChannel(sessionId, summary.directory, summary.accountId).catch(error => console.error(`fluentd could not open a Codex channel for ${sessionId}: ${error.message}`));
   }
@@ -211,6 +222,35 @@ function observableLanes(): Lane[] {
   return manager.list()
     .filter(session => (session.status === 'running' || session.status === 'starting') && session.worktreePath && session.projectDirectory)
     .map(session => ({sessionId: session.id, project: session.projectDirectory!, directory: session.directory}));
+}
+
+/**
+ * What this machine and this credential have room for. Reads the quota from whichever lane on this
+ * provider reported most recently — quota belongs to the account, not to the lane, so any lane's
+ * report is the account's state.
+ */
+function assessAdmission(provider: 'claude' | 'codex', accountId?: string) {
+  const hardwareSample = hardware.snapshot().current;
+  const lanes = manager.list().filter(session => session.status === 'running' || session.status === 'starting');
+  const reporting = usage.snapshot().sessions.find(session => session.provider === provider && session.quota);
+  return admission.assess({
+    provider,
+    runningLanes: lanes.filter(session => session.provider === provider).length,
+    memoryTotalBytes: hardwareSample.memoryTotalBytes,
+    memoryUsedBytes: hardwareSample.memoryUsedBytes,
+    // The five-hour-shaped window is the one that bites during a working session; the weekly one
+    // is a slower problem and is already on the observatory.
+    quota: {window: reporting?.quota?.primary, accountId: accountId ?? broker.list().find(state => state.provider === provider)?.activeAccountId}
+  });
+}
+
+/** Records what each running lane currently costs, so the per-lane estimate becomes this machine's
+ * own number rather than a constant (spec §14 asked for a real heuristic; this is how it gets one). */
+async function sampleLaneCost() {
+  const lanes = manager.list().filter(session => session.status === 'running' && session.pid !== undefined);
+  if (lanes.length === 0) return;
+  const snapshot = await resources.sampleNow();
+  admission.sample(lanes.map(lane => ({provider: lane.provider, pid: lane.pid})), snapshot.processes);
 }
 
 /**
@@ -377,6 +417,7 @@ async function dispatch(request: RpcRequest) {
     case 'spend.setPriceOverride': await spend.setPriceOverride(request.params.model, request.params.override); return {ok: true};
     case 'spend.clearPriceOverride': await spend.clearPriceOverride(request.params.model); return {ok: true};
     case 'providers.list': return providerHealth();
+    case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);
     case 'coordination.task.create': return coordination.task(request.params.project, request.params.title, request.params.sessionId);
     case 'coordination.task.update': return coordination.updateTask(request.params.project, request.params.taskId, request.params.status, request.params.sessionId);
@@ -427,6 +468,10 @@ async function main() {
   // isolated lane).
   const observeClaims = setInterval(() => void claimObserver.sweep(observableLanes()).catch(error => console.error(`fluentd claim observation failed: ${error.message}`)), 20_000);
   observeClaims.unref();
+  // Slower than the claim sweep: a lane's memory footprint settles, and the estimate wants a
+  // spread of lanes over time rather than many readings of the same minute.
+  const costSampler = setInterval(() => void sampleLaneCost().catch(() => undefined), 60_000);
+  costSampler.unref();
   try {
     await unlink(socketPath);
   } catch (error: unknown) {

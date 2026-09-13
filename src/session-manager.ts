@@ -114,11 +114,13 @@ export class SessionManager extends EventEmitter {
       rows: 40
     });
     session.terminal = terminal;
+    session.summary.pid = terminal.pid;
     this.append(session, `$ ${adapter.executable}\n`);
     terminal.onData(chunk => this.append(session, chunk));
     this.setStatus(session, 'running');
     terminal.onExit(({exitCode}) => {
       session.terminal = undefined;
+      session.summary.pid = undefined;
       session.summary.exitCode = exitCode;
       this.setStatus(session, session.summary.status === 'stopped' ? 'stopped' : 'exited');
     });

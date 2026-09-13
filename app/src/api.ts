@@ -54,6 +54,21 @@ export type MergeOutcome = {
   mergeCommit?: string;
 };
 
+export type AdmissionVerdict = {
+  provider: ProviderId;
+  decision: 'clear' | 'tight' | 'over';
+  recommendedLanes: number;
+  runningLanes: number;
+  freeBytes: number;
+  reserveBytes: number;
+  perLaneBytes: number;
+  estimateSource: 'observed' | 'default';
+  quotaUsedPercent?: number;
+  quotaResetsAt?: string;
+  accountId?: string;
+  reasons: string[];
+};
+
 export type VerificationStatus = 'running' | 'passed' | 'failed' | 'unavailable';
 export type VerificationResult = {
   sessionId: string;
@@ -174,6 +189,7 @@ export const api = {
   mergePlan: (sessionId: string) => daemonRequest<MergePlan>('merge.plan', {sessionId}),
   mergeIntegrate: (sessionId: string) => daemonRequest<MergeOutcome>('merge.integrate', {sessionId}),
   mergePending: (project: string) => daemonRequest<string[]>('merge.pending', {project}),
+  assessAdmission: (provider: ProviderId, accountId?: string) => daemonRequest<AdmissionVerdict>('admission.assess', {provider, accountId}),
   setVerifyCommand: (project: string, command?: string) => daemonRequest<{command?: string}>('verification.setCommand', {project, command}),
   resize: (sessionId: string, cols: number, rows: number) => daemonRequest<{resized: boolean}>('sessions.resize', {sessionId, cols, rows}),
   hardwareSnapshot: () => daemonRequest<HardwareSnapshot>('hardware.snapshot'),
@@ -249,6 +265,10 @@ export function onCredentialSwitched(handler: (event: {provider: ProviderId; acc
 
 export function onCredentialNotice(handler: (event: {provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}) => void) {
   return listen<{provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}>('credential-notice', event => handler(event.payload));
+}
+
+export function onAdmissionWarning(handler: (event: {sessionId: string; verdict: AdmissionVerdict}) => void) {
+  return listen<{sessionId: string; verdict: AdmissionVerdict}>('admission-warning', event => handler(event.payload));
 }
 
 export function onMergeOutcome(handler: (event: {outcome: MergeOutcome}) => void) {
