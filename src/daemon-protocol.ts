@@ -172,6 +172,17 @@ export type RpcRequest =
   | {id: string; method: 'merge.plan'; params: {sessionId: string}}
   | {id: string; method: 'merge.integrate'; params: {sessionId: string}}
   | {id: string; method: 'merge.pending'; params: {project: string}}
+  /**
+   * The agent-facing surface. Every method identifies its lane by the working directory it was run
+   * from, so an agent never has to know or pass a session id — it just runs a command where it is
+   * already working (see coord-cli.ts).
+   */
+  | {id: string; method: 'agent.status'; params: {cwd: string; since?: string}}
+  | {id: string; method: 'agent.claim'; params: {cwd: string; paths: string[]}}
+  | {id: string; method: 'agent.release'; params: {cwd: string; paths: string[]}}
+  | {id: string; method: 'agent.note'; params: {cwd: string; summary: string}}
+  | {id: string; method: 'agent.task'; params: {cwd: string; action: 'add' | 'start' | 'done'; title?: string; taskId?: string}}
+  | {id: string; method: 'agent.handoff'; params: {cwd: string; to: string; summary: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}

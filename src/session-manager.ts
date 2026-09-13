@@ -8,6 +8,7 @@ import * as pty from 'node-pty';
 import {providerAdapter, resolveProviderExecutable} from './providers.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
+import {briefingArgs} from './agent-briefing.js';
 import type {ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 
 const run = promisify(execFile);
@@ -96,8 +97,10 @@ export class SessionManager extends EventEmitter {
       await ensureClaudeHooks(sessionDirectory).catch(error => console.error(`fluentd could not configure Claude Code hooks: ${error.message}`));
     }
 
-    // node-pty creates the terminal; Fluent still launches the provider CLI unchanged.
-    const terminal = pty.spawn(executable, [...adapter.args], {
+    // node-pty creates the terminal; Fluent still launches the provider CLI unchanged apart from
+    // the coordination briefing, which goes in through that CLI's own flag for project direction
+    // (spec §7.5) — never by rewriting what the CLI does or what it prints.
+    const terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider)], {
       cwd: sessionDirectory,
       env: {
         ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),

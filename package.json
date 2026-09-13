@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "fluent": "dist/index.js",
-    "fluentd": "dist/daemon.js"
+    "fluentd": "dist/daemon.js",
+    "fluent-coord": "dist/coord-cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

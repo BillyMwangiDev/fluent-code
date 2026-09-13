@@ -18,6 +18,12 @@ import {
   type SessionSummary
 } from './daemon-protocol.js';
 
+/** The one-shot RPC every client here is built on, exported so the agent-facing CLI (coord-cli.ts)
+ * can use it without going through the app-shaped `daemonClient` surface below. */
+export async function daemonRequest<T>(method: RpcRequest['method'], params?: Record<string, unknown>): Promise<T> {
+  return request<T>(method, params);
+}
+
 async function request<T>(method: RpcRequest['method'], params?: Record<string, unknown>): Promise<T> {
   return new Promise((resolve, reject) => {
     const socket = connect(daemonSocketPath());

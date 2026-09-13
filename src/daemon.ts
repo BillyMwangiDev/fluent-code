@@ -17,6 +17,7 @@ import {VerificationRunner} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
 import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
+import {renderAgentView, renderClaimResult, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -212,6 +213,71 @@ function observableLanes(): Lane[] {
     .map(session => ({sessionId: session.id, project: session.projectDirectory!, directory: session.directory}));
 }
 
+/**
+ * Resolves the lane a coordination command was run from. An agent knows where it is working and
+ * nothing else about fluentd, so the working directory is the whole identity — the same
+ * correlation the Claude Code hook relay already relies on.
+ */
+function laneFor(cwd: string) {
+  const session = manager.findActiveByDirectory(cwd);
+  if (!session) throw new Error(`No running Fluent lane is working in ${cwd}`);
+  return {session, project: session.projectDirectory ?? session.directory};
+}
+
+async function agentView(cwd: string): Promise<AgentView> {
+  const {session, project} = laneFor(cwd);
+  const state = coordination.get(project);
+  const conflicts = await claimObserver.rank(project, coordination.conflicts(project));
+  const branch = await gitBranch(project);
+  const partial = {
+    lane: {sessionId: session.id, provider: session.provider, project, branch},
+    // Done tasks are history; a lane asking what is going on needs what is still open.
+    tasks: state.tasks.filter(task => task.status !== 'done'),
+    claims: state.claims,
+    conflicts,
+    handoffs: state.handoffs
+  };
+  return {...partial, cursor: viewCursor(partial)};
+}
+
+async function gitBranch(project: string) {
+  const {execFile} = await import('node:child_process');
+  const {promisify} = await import('node:util');
+  return promisify(execFile)('git', ['-C', project, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {timeout: 5_000})
+    .then(result => result.stdout.trim() || undefined, () => undefined);
+}
+
+/**
+ * Answers an agent's combined status query. `since` is the cursor from its own last check: when
+ * nothing has changed it gets one short line back instead of the whole picture again, which is the
+ * difference between a lane that can afford to check often and one that cannot (spec §11).
+ */
+async function agentStatus(cwd: string, since?: string) {
+  const view = await agentView(cwd);
+  if (since && since === view.cursor) return {text: `unchanged ${view.cursor}`, view};
+  return {text: renderAgentView(view), view};
+}
+
+async function agentClaim(cwd: string, paths: string[]) {
+  const {session, project} = laneFor(cwd);
+  if (paths.length === 0) throw new Error('Name at least one path to claim');
+  const refused: Array<{path: string; conflicts: Awaited<ReturnType<typeof claimObserver.rank>>}> = [];
+  const claimed: string[] = [];
+  for (const path of paths) {
+    const result = await coordination.claim(project, path, session.id, 'declared');
+    if (result.granted) claimed.push(path);
+    else refused.push({path, conflicts: await claimObserver.rank(project, result.conflicts)});
+  }
+  if (refused.length === 0) return {text: renderClaimResult(claimed, true, [])};
+  // Report the refusals; anything that was granted alongside them is still granted and is listed
+  // so the agent does not re-claim it.
+  const text = [
+    renderClaimResult(refused.map(entry => entry.path), false, refused.flatMap(entry => entry.conflicts)),
+    ...(claimed.length > 0 ? [`claimed ${claimed.join(' ')}`] : [])
+  ].join('\n');
+  return {text};
+}
+
 /** Sessions still holding a credential for this provider — they keep the one they started with,
  * which is precisely why a switch is not the rescue it looks like. */
 function activeSessionCount(provider: 'claude' | 'codex') {
@@ -268,6 +334,39 @@ async function dispatch(request: RpcRequest) {
     case 'merge.plan': return merges.plan(manager.get(request.params.sessionId));
     case 'merge.integrate': return integrateSession(request.params.sessionId);
     case 'merge.pending': return merges.pending(request.params.project);
+    case 'agent.status': return agentStatus(request.params.cwd, request.params.since);
+    case 'agent.claim': return agentClaim(request.params.cwd, request.params.paths);
+    case 'agent.release': {
+      const {session, project} = laneFor(request.params.cwd);
+      for (const path of request.params.paths) await coordination.releaseClaim(project, path, session.id);
+      return {text: `released ${request.params.paths.join(' ')}`};
+    }
+    case 'agent.note': {
+      const {session, project} = laneFor(request.params.cwd);
+      await coordination.decision(project, request.params.summary, session.id);
+      return {text: 'noted'};
+    }
+    case 'agent.task': {
+      const {session, project} = laneFor(request.params.cwd);
+      if (request.params.action === 'add') {
+        if (!request.params.title?.trim()) throw new Error('A task needs a title');
+        const state = await coordination.task(project, request.params.title.trim());
+        return {text: `added ${shortId(state.tasks[0]!.id)}`};
+      }
+      if (!request.params.taskId) throw new Error('Name the task to update');
+      const task = resolveId(coordination.get(project).tasks, request.params.taskId);
+      await coordination.updateTask(project, task.id, request.params.action === 'start' ? 'active' : 'done', session.id);
+      return {text: `${request.params.action === 'start' ? 'started' : 'done'} ${shortId(task.id)}`};
+    }
+    case 'agent.handoff': {
+      const {session, project} = laneFor(request.params.cwd);
+      const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
+      if (!target) throw new Error(`No lane matches ${request.params.to}`);
+      await coordination.handoff(project, session.id, target.id, request.params.summary);
+      // Deliberately only proposed: a handoff is an explicit, visible action the user accepts
+      // (spec §11), never something one lane can impose on another.
+      return {text: `proposed handoff to ${shortId(target.id)} — waiting for the user to accept it`};
+    }
     case 'sessions.resize': manager.resize(request.params.sessionId, request.params.cols, request.params.rows); return {resized: true};
     case 'hardware.snapshot': return hardware.snapshot();
     case 'software.snapshot': return software.snapshot();
