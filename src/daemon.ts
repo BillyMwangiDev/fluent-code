@@ -14,6 +14,7 @@ import {SpendTracker} from './spend-tracker.js';
 import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
 import {VerificationRunner} from './verification.js';
+import {ClaimObserver, type Lane} from './claim-observer.js';
 
 const socketPath = daemonSocketPath();
 const manager = new SessionManager();
@@ -28,6 +29,7 @@ const spend = new SpendTracker();
 const openDesign = new OpenDesignManager();
 const designTools = new DesignToolManager();
 const verification = new VerificationRunner();
+const claimObserver = new ClaimObserver(coordination);
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
@@ -118,6 +120,18 @@ async function sweepClaimLeases() {
   return {renewed: live.length, expired};
 }
 
+claimObserver.on('conflicts', (project: string, conflicts) => {
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'coordination.conflicts', project, conflicts});
+});
+
+/** Isolated lanes whose working tree is worth reading: a lane sharing the user's own checkout would
+ * report the user's uncommitted work as the lane's, which is not a claim anyone made. */
+function observableLanes(): Lane[] {
+  return manager.list()
+    .filter(session => (session.status === 'running' || session.status === 'starting') && session.worktreePath && session.projectDirectory)
+    .map(session => ({sessionId: session.id, project: session.projectDirectory!, directory: session.directory}));
+}
+
 /** Sessions still holding a credential for this provider — they keep the one they started with,
  * which is precisely why a switch is not the rescue it looks like. */
 function activeSessionCount(provider: 'claude' | 'codex') {
@@ -186,6 +200,7 @@ async function dispatch(request: RpcRequest) {
     case 'coordination.task.update': return coordination.updateTask(request.params.project, request.params.taskId, request.params.status, request.params.sessionId);
     case 'coordination.claim': return coordination.claim(request.params.project, request.params.path, request.params.sessionId);
     case 'coordination.claims.sweep': return sweepClaimLeases();
+    case 'coordination.conflicts': return claimObserver.rank(request.params.project, coordination.conflicts(request.params.project));
     case 'coordination.claim.release': return coordination.releaseClaim(request.params.project, request.params.path, request.params.sessionId);
     case 'coordination.decision.add': return coordination.decision(request.params.project, request.params.summary, request.params.sessionId);
     case 'coordination.handoff.create': return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
@@ -225,6 +240,11 @@ async function main() {
   // Half the lease, so a live lane is always renewed well before its claims could lapse.
   const claimSweep = setInterval(() => void sweepClaimLeases().catch(error => console.error(`fluentd claim sweep failed: ${error.message}`)), 7 * 60_000);
   claimSweep.unref();
+  // Frequent enough that an overlap surfaces while both lanes are still working on it, which is
+  // the only time it is cheap to resolve; cheap enough to run continuously (one `git status` per
+  // isolated lane).
+  const observeClaims = setInterval(() => void claimObserver.sweep(observableLanes()).catch(error => console.error(`fluentd claim observation failed: ${error.message}`)), 20_000);
+  observeClaims.unref();
   try {
     await unlink(socketPath);
   } catch (error: unknown) {

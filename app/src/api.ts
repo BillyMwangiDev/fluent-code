@@ -96,6 +96,7 @@ export type CoordinationState = {
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
 };
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
+export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
@@ -165,6 +166,7 @@ export const api = {
   updateTask: (project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.update', {project, taskId, status, sessionId}),
   claimFile: (project: string, path: string, sessionId: string) => daemonRequest<ClaimResult>('coordination.claim', {project, path, sessionId}),
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
+  conflicts: (project: string) => daemonRequest<RankedConflict[]>('coordination.conflicts', {project}),
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),
   acceptHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.accept', {project, handoffId}),
@@ -223,6 +225,10 @@ export function onCredentialSwitched(handler: (event: {provider: ProviderId; acc
 
 export function onCredentialNotice(handler: (event: {provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}) => void) {
   return listen<{provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}>('credential-notice', event => handler(event.payload));
+}
+
+export function onConflicts(handler: (event: {project: string; conflicts: RankedConflict[]}) => void) {
+  return listen<{project: string; conflicts: RankedConflict[]}>('coordination-conflicts', event => handler(event.payload));
 }
 
 /** A claim never disappears from the coordination column without a reason — this is the reason. */

@@ -120,6 +120,68 @@ export class CoordinationManager {
     return {granted, state, conflicts};
   }
 
+  /**
+   * Records what a lane has *actually* changed, as distinct from what it announced it intends to
+   * change. An observed claim is a fact rather than a request, so unlike `claim` it is never
+   * refused: two lanes that have both already edited a file is exactly the situation worth
+   * showing, and refusing to record the second one would hide it.
+   *
+   * The lane's observed claims are replaced wholesale, so a path it has since reverted stops being
+   * claimed. Declared claims are left alone — an agent's stated intent outlives one sweep of its
+   * working tree.
+   */
+  async observe(project: string, sessionId: string, paths: readonly string[]) {
+    const state = this.ensure(project);
+    const now = new Date();
+    const lease = {renewedAt: now.toISOString(), expiresAt: new Date(now.getTime() + claimLeaseMs).toISOString()};
+    const normalized = new Set<string>();
+    for (const path of paths) {
+      try {
+        normalized.add(normalizeClaimPath(path));
+      } catch {
+        // A path that normalizes to nothing is not worth failing a sweep over.
+      }
+    }
+
+    const others = state.claims.filter(claim => claim.sessionId !== sessionId);
+    const mineDeclared = state.claims
+      .filter(claim => claim.sessionId === sessionId && claim.origin === 'declared')
+      .map(claim => ({...claim, ...lease}));
+    const declaredPaths = new Set(mineDeclared.map(claim => claim.path));
+    // Keep the original createdAt for a path this lane was already touching: conflict ordering
+    // depends on who arrived first, and re-observing the same file is not a new arrival.
+    const previouslyObserved = new Map(state.claims.filter(claim => claim.sessionId === sessionId).map(claim => [claim.path, claim.createdAt]));
+    const observed: FileClaim[] = [...normalized]
+      .filter(path => !declaredPaths.has(path))
+      .map(path => ({path, sessionId, origin: 'observed', createdAt: previouslyObserved.get(path) ?? now.toISOString(), ...lease}));
+
+    state.claims = [...others, ...mineDeclared, ...observed];
+
+    await this.persist();
+    return {state, conflicts: this.conflicts(project)};
+  }
+
+  /**
+   * Every pair of overlapping claims held by different lanes. Each overlap is reported once, from
+   * the perspective of the more recently created claim — the lane that arrived second is the one
+   * that needs to know.
+   */
+  conflicts(project: string): ClaimConflict[] {
+    const state = this.ensure(project);
+    const ordered = [...state.claims].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const conflicts: ClaimConflict[] = [];
+    for (let index = 0; index < ordered.length; index++) {
+      const claim = ordered[index]!;
+      for (let earlier = 0; earlier < index; earlier++) {
+        const existing = ordered[earlier]!;
+        if (existing.sessionId === claim.sessionId) continue;
+        const overlap = claimsOverlap(claim.path, existing.path);
+        if (overlap) conflicts.push({path: claim.path, claimedPath: existing.path, sessionId: existing.sessionId, overlap});
+      }
+    }
+    return conflicts;
+  }
+
   async releaseClaim(project: string, path: string, sessionId: string) {
     const state = this.ensure(project);
     const claimPath = normalizeClaimPath(path);

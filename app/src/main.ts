@@ -615,6 +615,7 @@ async function renderOrchestration(main: HTMLElement) {
     return;
   }
   const state = await api.coordination(project);
+  const conflicts = await api.conflicts(project);
   const live = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
   const taskInput = h('input', {type: 'text', placeholder: 'add a shared task'});
   const addTask = h('button', {class: 'btn primary'}, ['add task']);
@@ -656,6 +657,8 @@ async function renderOrchestration(main: HTMLElement) {
     metricCard('live agent lanes', String(live.length), live.map(session => `${session.provider} · ${session.id.slice(0, 6)}`).join('  ' ) || 'none'),
     metricCard('shared tasks', String(state.tasks.length), `${state.tasks.filter(task => task.status === 'active').length} active`),
     metricCard('file claims', String(state.claims.length), 'advisory only'),
+    // An explicit zero, not an absent card: "0 open conflicts" is information, a missing row is not.
+    metricCard('overlaps', String(conflicts.length), conflicts.some(conflict => conflict.hotspot) ? 'includes a collision hotspot' : conflicts.length === 0 ? 'none detected' : 'none on hotspot files'),
     metricCard('handoffs', String(state.handoffs.filter(handoff => handoff.status === 'open').length), 'waiting for review')
   ]));
   const taskRows = state.tasks.map(task => {
@@ -676,8 +679,17 @@ async function renderOrchestration(main: HTMLElement) {
     release.addEventListener('click', async () => { await api.releaseClaim(project, claim.path, claim.sessionId); void render(); });
     return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [claim.path]), h('span', {class: 'meta'}, [`${claim.sessionId.slice(0, 8)} · ${claim.origin}`]), release]);
   });
+  // Overlaps read as their own card rather than as decoration on the claims list: an overlap is a
+  // thing to act on now, while both lanes are still working, not a property of one claim.
+  const conflictRows = conflicts.length === 0
+    ? [h('p', {class: 'section-sub'}, ['0 open conflicts — no two lanes are touching the same paths.'])]
+    : conflicts.map(conflict => h('div', {class: 'option-row'}, [
+        h('span', {class: 'label'}, [conflict.overlap === 'same' ? conflict.path : `${conflict.path} ↔ ${conflict.claimedPath}`]),
+        h('span', {class: conflict.hotspot ? 'error' : 'meta'}, [conflict.hotspot ? `hotspot · also held by ${conflict.sessionId.slice(0, 8)}` : `also held by ${conflict.sessionId.slice(0, 8)}`])
+      ]));
   main.append(h('div', {class: 'cards-row'}, [
     h('div', {class: 'card'}, [h('h3', {}, ['shared task board']), ...taskRows, h('div', {class: 'field'}, [taskInput, addTask])]),
+    h('div', {class: 'card'}, [h('h3', {}, ['file overlaps']), ...conflictRows]),
     h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimButton, claimNotice])]),
     h('div', {class: 'card'}, [h('h3', {}, ['project memory']), ...state.decisions.map(decision => h('p', {class: 'section-sub'}, [decision.summary || 'no decisions yet'])), h('div', {class: 'field'}, [decisionInput, decisionButton])]),
     h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffButton])])

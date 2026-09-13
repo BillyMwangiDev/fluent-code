@@ -106,6 +106,9 @@ export type FileClaim = {path: string; sessionId: string; origin: 'declared' | '
  * not necessarily the same string — `src/` and `src/daemon.ts` overlap without matching. */
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
 export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
+/** A conflict plus whether it lands on a file the project's own history says everything touches —
+ * the collision hotspots that make late-discovered conflicts expensive. */
+export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type Decision = {id: string; summary: string; sessionId?: string; createdAt: string};
 export type Handoff = {id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'};
 export type CoordinationState = {project: string; tasks: CoordinationTask[]; claims: FileClaim[]; decisions: Decision[]; handoffs: Handoff[]};
@@ -146,6 +149,7 @@ export type RpcRequest =
   | {id: string; method: 'coordination.task.update'; params: {project: string; taskId: string; status: 'todo' | 'active' | 'done'; sessionId?: string}}
   | {id: string; method: 'coordination.claim'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.claims.sweep'}
+  | {id: string; method: 'coordination.conflicts'; params: {project: string}}
   | {id: string; method: 'coordination.claim.release'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.decision.add'; params: {project: string; summary: string; sessionId?: string}}
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
@@ -181,7 +185,9 @@ export type RpcEvent =
   /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes
    * from the orchestration column without a visible reason (spec §2 principle 3). */
   | {event: 'coordination.claimsExpired'; claims: Array<FileClaim & {project: string}>}
-  | {event: 'sessions.verification'; sessionId: string; result: VerificationResult};
+  | {event: 'sessions.verification'; sessionId: string; result: VerificationResult}
+  /** Pushed when the set of overlaps in a project changes — a quiet sweep stays quiet. */
+  | {event: 'coordination.conflicts'; project: string; conflicts: RankedConflict[]};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';

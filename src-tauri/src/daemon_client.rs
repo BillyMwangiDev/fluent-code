@@ -75,6 +75,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("sessions.verification") => {
             let _ = app.emit("session-verification", event);
         }
+        Some("coordination.conflicts") => {
+            let _ = app.emit("coordination-conflicts", event);
+        }
         _ => {}
     }
 }
