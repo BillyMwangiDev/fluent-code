@@ -88,7 +88,8 @@ before(async () => {
   });
   await waitFor(async () => (await daemonRequest<{ok: boolean}>('ping')).ok, 'fluentd to start');
 
-  laneA = await daemonRequest<SessionSummary>('sessions.create', {provider: 'claude', directory: project, isolate: true, task: 'lane A work'});
+  const claudeHookApproval = await daemonRequest<{id: string}>('approvals.issue', {action: 'project.configure', target: project, command: 'configure Claude hooks'});
+  laneA = await daemonRequest<SessionSummary>('sessions.create', {provider: 'claude', directory: project, isolate: true, task: 'lane A work', approvalId: claudeHookApproval.id});
   // Deliberately a different provider: the point of the surface is that a Codex lane and a Claude
   // lane are peers, so the test's two lanes must not both be Claude.
   laneB = await daemonRequest<SessionSummary>('sessions.create', {provider: 'codex', directory: project, isolate: true, task: 'lane B work'});

@@ -1,5 +1,4 @@
 import {EventEmitter} from 'node:events';
-import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -14,6 +13,7 @@ import type {
   ProviderId
 } from './daemon-protocol.js';
 import {SecretStore} from './secret-store.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 const execute = promisify(execFile);
 
@@ -54,8 +54,8 @@ export class CredentialBroker extends EventEmitter {
 
   async restore() {
     try {
-      const raw = await readFile(this.stateFile, 'utf8');
-      const stored = JSON.parse(raw) as Array<CredentialChainState & {accounts: Array<CredentialAccount & {apiKey?: string}>}>;
+      const stored = await readPrivateJson<Array<CredentialChainState & {accounts: Array<CredentialAccount & {apiKey?: string}>}>>(this.stateFile);
+      if (!stored) return;
       let migrated = false;
       for (const state of stored) {
         const accounts: CredentialAccount[] = [];
@@ -91,6 +91,7 @@ export class CredentialBroker extends EventEmitter {
    * business with their provider.
    */
   loginCommand(provider: ProviderId, account: CredentialAccount) {
+    if (provider === 'gemini') return account.mode === 'api-key' ? undefined : 'gemini';
     if (provider !== 'claude') return undefined;
     if (account.mode === 'api-key') return undefined;
     // Verified against Claude Code 2.1.270: `--claudeai` is the subscription, `--console` is
@@ -125,6 +126,11 @@ export class CredentialBroker extends EventEmitter {
     if (!account) return empty;
 
     if (account.mode !== 'api-key') {
+      if (provider === 'gemini') {
+        // The selected interactive Gemini profile must not be shadowed by a key or custom endpoint
+        // that happened to be present in fluentd's inherited shell environment.
+        return {set: {}, unset: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GEMINI_BASE_URL']};
+      }
       if (provider !== 'claude') return empty;
       return {
         set: {CLAUDE_CONFIG_DIR: this.configDirectory(provider, account.id)},
@@ -138,6 +144,13 @@ export class CredentialBroker extends EventEmitter {
     if (!apiKey) throw new Error(`The API key for ${account.label} is unavailable in the system credential store`);
     // Codex's own key variable; unconfirmed against a real Codex install (spec §7.5).
     if (provider === 'codex') return {set: {OPENAI_API_KEY: apiKey}, unset: []};
+    // Gemini CLI documents GEMINI_API_KEY for direct Gemini API access. Its browser/Google Cloud
+    // credentials stay with the Gemini CLI, so Fluent never copies OAuth or ADC material.
+    if (provider === 'gemini') {
+      const set: Record<string, string> = {GEMINI_API_KEY: apiKey};
+      if (account.baseUrl) set.GOOGLE_GEMINI_BASE_URL = account.baseUrl;
+      return {set, unset: ['GOOGLE_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS']};
+    }
     if (provider !== 'claude') return empty;
     if (account.baseUrl === 'https://openrouter.ai/api') {
       // OpenRouter authenticates on the bearer token, so the key variable must be gone rather than
@@ -381,10 +394,6 @@ export class CredentialBroker extends EventEmitter {
   }
 
   private async persistNow() {
-    await mkdir(dirname(this.stateFile), {recursive: true});
-    const serialized = JSON.stringify(this.list(), null, 2);
-    const temporary = `${this.stateFile}.tmp`;
-    await writeFile(temporary, serialized, 'utf8');
-    await rename(temporary, this.stateFile);
+    await writePrivateJson(this.stateFile, this.list());
   }
 }

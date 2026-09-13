@@ -1,9 +1,10 @@
 import {execFile} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import {promisify} from 'node:util';
 import type {VerificationResult, VerificationSource} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 const run = promisify(execFile);
 
@@ -113,8 +114,9 @@ export class VerificationRunner {
 
   async restore() {
     try {
-      const stored = JSON.parse(await readFile(this.stateFile, 'utf8')) as {results?: VerificationResult[]; commands?: Record<string, string>};
-      for (const result of stored.results ?? []) this.results.set(result.sessionId, result);
+      const stored = await readPrivateJson<{results?: Array<Omit<VerificationResult, 'output'> & {output?: string}>; commands?: Record<string, string>}>(this.stateFile);
+      if (!stored) return;
+      for (const result of stored.results ?? []) this.results.set(result.sessionId, {...result, output: ''});
       for (const [project, command] of Object.entries(stored.commands ?? {})) this.commands.set(project, command);
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -245,12 +247,13 @@ export class VerificationRunner {
 
   private async persist() {
     const operation = this.queue.then(async () => {
-      await mkdir(dirname(this.stateFile), {recursive: true});
-      const temporary = `${this.stateFile}.tmp`;
       // A run interrupted by a daemon restart must not come back claiming to still be running.
-      const results = [...this.results.values()].map(result => result.status === 'running' ? {...result, status: 'unavailable' as const, detail: 'interrupted before it finished'} : result);
-      await writeFile(temporary, JSON.stringify({results, commands: Object.fromEntries(this.commands)}, null, 2));
-      await rename(temporary, this.stateFile);
+      const results = [...this.results.values()].map(result => {
+        const safe = result.status === 'running' ? {...result, status: 'unavailable' as const, detail: 'interrupted before it finished'} : result;
+        const {output: _output, ...withoutOutput} = safe;
+        return withoutOutput;
+      });
+      await writePrivateJson(this.stateFile, {results, commands: Object.fromEntries(this.commands)});
     });
     this.queue = operation.catch(() => undefined);
     return operation;

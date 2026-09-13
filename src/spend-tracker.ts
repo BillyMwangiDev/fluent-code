@@ -1,7 +1,8 @@
-import {mkdir, readFile, readdir, rename, stat, writeFile} from 'node:fs/promises';
+import {readFile, readdir, stat} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 import type {ProviderId} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 /**
  * Token/cost telemetry, forked from T3 Code's usage system (github.com/pingdotgg/t3code,
@@ -416,12 +417,13 @@ export class SpendTracker {
 
   async restore() {
     try {
-      this.overrides = JSON.parse(await readFile(this.overridesPath, 'utf8')) as Record<string, PriceOverride>;
+      this.overrides = await readPrivateJson<Record<string, PriceOverride>>(this.overridesPath) ?? {};
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     try {
-      const cached = JSON.parse(await readFile(this.ratesCachePath, 'utf8')) as {fetchedAtMs: number; document: unknown};
+      const cached = await readPrivateJson<{fetchedAtMs: number; document: unknown}>(this.ratesCachePath);
+      if (!cached) return undefined;
       this.rateTable = parseRateTable(cached.document);
       this.ratesUpdatedAt = new Date(cached.fetchedAtMs).toISOString();
     } catch (error: unknown) {
@@ -439,10 +441,7 @@ export class SpendTracker {
       this.rateTable = parseRateTable(document);
       this.ratesUpdatedAt = new Date().toISOString();
       this.ratesError = undefined;
-      await mkdir(dirname(this.ratesCachePath), {recursive: true});
-      const temporary = `${this.ratesCachePath}.tmp`;
-      await writeFile(temporary, JSON.stringify({fetchedAtMs: Date.now(), document}), 'utf8');
-      await rename(temporary, this.ratesCachePath);
+      await writePrivateJson(this.ratesCachePath, {fetchedAtMs: Date.now(), document});
     } catch (error: unknown) {
       // Advisory: keep whatever rate table (possibly empty) is already loaded, note why it's stale.
       this.ratesError = error instanceof Error ? error.message : 'failed to fetch LiteLLM rates';
@@ -460,10 +459,7 @@ export class SpendTracker {
   }
 
   private async persistOverrides() {
-    await mkdir(dirname(this.overridesPath), {recursive: true});
-    const temporary = `${this.overridesPath}.tmp`;
-    await writeFile(temporary, JSON.stringify(this.overrides, null, 2), 'utf8');
-    await rename(temporary, this.overridesPath);
+    await writePrivateJson(this.overridesPath, this.overrides);
   }
 
   async summary(rangeDays = 30): Promise<SpendSummary> {

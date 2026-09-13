@@ -1,9 +1,18 @@
 import type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {AssignedIssue, OpenPullRequest, RepoStatus} from './source-control.js';
-export type {CatalogPlugin, MarketplaceEntry, McpServerEntry} from './catalog-manager.js';
+export type {CatalogPlugin, MarketplaceEntry, McpInstallResult, McpServerConfig, McpServerEntry, McpTransport} from './catalog-manager.js';
+export type {CapabilitySet, Run, RunEvent, RunEventType, RunState, TimingMap, TimingValue, WorkClass} from './execution/types.js';
+export type {ApprovalAction, ApprovalRecord} from './security/approval-records.js';
+import type {Run, RunEvent} from './execution/types.js';
+import type {ApprovalAction, ApprovalRecord} from './security/approval-records.js';
 
-export type ProviderId = 'claude' | 'codex';
+/**
+ * A provider is an agent runtime Fluent can launch directly. Keep this distinct from MCP: MCP is
+ * the portable tool layer shared by runtimes, whereas each provider owns its own login, terminal,
+ * transcript and optional structured-control protocol.
+ */
+export type ProviderId = 'claude' | 'codex' | 'gemini';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 
 export type SessionSummary = {
@@ -230,23 +239,24 @@ export type RemoteProfile = {id: string; name: string; host: string; port: numbe
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 export type DesignToolId = 'pen' | 'open-design';
-export type McpTarget = 'claude' | 'codex';
+export type McpTarget = ProviderId;
 export type DesignTool = {id: DesignToolId; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
 
 export type RpcRequest =
   | {id: string; method: 'ping'}
   | {id: string; method: 'sessions.list'}
-  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean}}
+  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
-  | {id: string; method: 'sessions.removeWorktree'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.removeWorktree'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'sessions.diff'; params: {sessionId: string}}
-  | {id: string; method: 'sessions.verify'; params: {sessionId: string; force?: boolean}}
+  | {id: string; method: 'sessions.verify'; params: {sessionId: string; force?: boolean; approvalId?: string}}
   | {id: string; method: 'verification.list'}
-  | {id: string; method: 'verification.setCommand'; params: {project: string; command?: string}}
+  | {id: string; method: 'verification.plan'; params: {directory: string; project?: string}}
+  | {id: string; method: 'verification.setCommand'; params: {project: string; command?: string; approvalId?: string}}
   | {id: string; method: 'merge.plan'; params: {sessionId: string}}
-  | {id: string; method: 'merge.integrate'; params: {sessionId: string}}
+  | {id: string; method: 'merge.integrate'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'merge.pending'; params: {project: string}}
   /**
    * The agent-facing surface. Every method identifies its lane by the working directory it was run
@@ -262,13 +272,17 @@ export type RpcRequest =
   | {id: string; method: 'agent.send'; params: {cwd: string; to: string; body: string}}
   | {id: string; method: 'agent.inbox'; params: {cwd: string; peek?: boolean}}
   | {id: string; method: 'skills.status'}
-  | {id: string; method: 'skills.install'}
+  | {id: string; method: 'skills.install'; params?: {approvalId?: string}}
   | {id: string; method: 'evals.latest'}
   | {id: string; method: 'evals.readiness'}
-  | {id: string; method: 'evals.run'; params: {maxCostUsd?: number; caseGlob?: string}}
+  | {id: string; method: 'evals.run'; params: {maxCostUsd?: number; caseGlob?: string; approvalId?: string}}
   | {id: string; method: 'sessions.resize'; params: {sessionId: string; cols: number; rows: number}}
   | {id: string; method: 'sessions.subscribe'; params: {sessionId: string}}
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
+  | {id: string; method: 'runs.list'}
+  | {id: string; method: 'runs.get'; params: {runId: string}}
+  | {id: string; method: 'runs.subscribe'; params: {runId: string; afterSequence?: number}}
+  | {id: string; method: 'runs.unsubscribe'; params: {runId: string}}
   | {id: string; method: 'stream.open'}
   | {id: string; method: 'hardware.snapshot'}
   | {id: string; method: 'software.snapshot'}
@@ -282,11 +296,11 @@ export type RpcRequest =
   | {id: string; method: 'sourceControl.assignedIssues'}
   | {id: string; method: 'sourceControl.myOpenPullRequests'}
   | {id: string; method: 'catalog.plugins'}
-  | {id: string; method: 'catalog.installPlugin'; params: {target: ProviderId; pluginId: string}}
+  | {id: string; method: 'catalog.installPlugin'; params: {target: ProviderId; pluginId: string; approvalId?: string}}
   | {id: string; method: 'catalog.marketplaces'}
-  | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string}}
+  | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string; approvalId?: string}}
   | {id: string; method: 'catalog.mcpServers'}
-  | {id: string; method: 'catalog.addMcpServer'; params: {target: ProviderId; name: string; commandOrUrl: string}}
+  | {id: string; method: 'catalog.addMcpServer'; params: {targets: ProviderId[]; config: import('./catalog-manager.js').McpServerConfig; approvalId?: string}}
   | {id: string; method: 'providers.list'}
   | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}
@@ -301,22 +315,23 @@ export type RpcRequest =
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
   | {id: string; method: 'coordination.handoff.accept'; params: {project: string; handoffId: string}}
   | {id: string; method: 'remote.list'}
-  | {id: string; method: 'remote.save'; params: {name: string; host: string; port?: number; remoteSocket?: string}}
-  | {id: string; method: 'remote.connect'; params: {profileId: string}}
+  | {id: string; method: 'remote.save'; params: {name: string; host: string; port?: number; remoteSocket?: string; approvalId?: string}}
+  | {id: string; method: 'remote.connect'; params: {profileId: string; approvalId?: string}}
   | {id: string; method: 'remote.disconnect'; params: {profileId: string}}
   | {id: string; method: 'openDesign.get'}
   | {id: string; method: 'openDesign.save'; params: {url: string}}
   | {id: string; method: 'openDesign.status'}
   | {id: string; method: 'designTools.list'}
-  | {id: string; method: 'designTools.installOpenDesignMcp'; params: {target: McpTarget}}
+  | {id: string; method: 'designTools.installOpenDesignMcp'; params: {target: McpTarget; approvalId?: string}}
   | {id: string; method: 'credentials.list'}
-  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string}}
-  | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]}}
-  | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy}}
+  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; approvalId?: string}}
+  | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]; approvalId?: string}}
+  | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy; approvalId?: string}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
   | {id: string; method: 'credentials.guidance'; params: {provider: ProviderId}}
   | {id: string; method: 'credentials.authStatus'}
-  | {id: string; method: 'hooks.report'; params: {cwd: string; event: string; payload: Record<string, unknown>}};
+  | {id: string; method: 'hooks.report'; params: {cwd: string; event: string; payload: Record<string, unknown>}}
+  | {id: string; method: 'approvals.issue'; params: {action: ApprovalAction; target: string; command?: string; baseSha?: string; ttlMs?: number}};
 
 export type RpcResponse =
   | {id: string; ok: true; result: unknown}
@@ -340,7 +355,9 @@ export type RpcEvent =
   | {event: 'admission.warning'; sessionId: string; verdict: AdmissionVerdict}
   /** A lane sent another lane a message — surfaced so cross-lane traffic is never invisible. */
   | {event: 'coordination.message'; project: string; message: LaneMessage}
-  | {event: 'evals.finished'; run: EvalRun};
+  | {event: 'evals.finished'; run: EvalRun}
+  | {event: 'runs.event'; runId: string; data: RunEvent}
+  | {event: 'runs.resync_required'; runId: string; from: number; snapshot: Run; terminalGap: boolean};
 
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 

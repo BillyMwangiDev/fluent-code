@@ -117,6 +117,19 @@ describe('putting a session on one account', () => {
 
     assert.deepEqual(await instance.resolveEnv('claude', 'not-an-account'), {set: {}, unset: []});
   });
+
+  it('uses Gemini CLI\'s documented API-key environment without inheriting a different Google key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    const instance = new CredentialBroker(directory);
+    await instance.upsertAccount('gemini', 'studio', 'api-key', 'Gemini API', 'AIza-test');
+
+    const environment = await instance.resolveEnv('gemini', 'studio');
+
+    assert.equal(environment.set.GEMINI_API_KEY, 'AIza-test');
+    assert.ok(environment.unset.includes('GOOGLE_API_KEY'));
+    assert.ok(environment.unset.includes('GOOGLE_APPLICATION_CREDENTIALS'));
+  });
 });
 
 describe('fallback guidance', () => {

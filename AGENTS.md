@@ -2,7 +2,14 @@
 
 ## Project
 
-Fluent Code is an open-source, terminal-first coding-agent client. It lets a developer operate Claude Code, Codex, and OpenRouter-backed models from one TUI. It is a fork of T3 Code's orchestration engine with a new interface.
+Fluent Code is an open-source, terminal-first coding-agent client. It lets a developer operate
+Claude Code and Codex from one Tauri desktop interface; OpenRouter is currently a Claude Code
+compatibility preset, not a third agent runtime. It uses ideas from adjacent projects but is not a
+fork or dependency of T3 Code.
+
+The repository currently ships a local `fluentd` daemon plus a Tauri frontend. Treat this document
+as product direction and [`README.md`](README.md) as the implemented-surface reference when they
+differ. [`cloud.md`](cloud.md) records the local-only runtime and remote-tunnel boundary.
 
 Primary product goals:
 
@@ -15,15 +22,15 @@ Primary product goals:
 
 ## Product vocabulary
 
-- **Provider**: Claude Code, Codex, or OpenRouter. Open question (see the design spec's open
-  risks): whether OpenRouter is only an alternate billing/routing path for Claude Code or Codex's
-  own model family, or a genuinely model-agnostic third provider — resolve before building it.
+- **Provider**: Claude Code or Codex. OpenRouter is an API-key/base-URL preset for Claude Code;
+  it is not a model-agnostic third provider.
 - **Account**: the subscription, platform-credits, or API-key identity used by a provider.
 - **Credential chain**: a provider's ordered precedence across subscription / platform API credits / API key, with automatic fallback and revert on a usage-limit hit.
 - **Session / thread**: an in-progress agent conversation and its terminal context.
 - **Agent lane**: one concurrent terminal session in the orchestration view.
 - **File claim**: a non-destructive reservation that signals an agent intends to edit a file.
-- **Coordination**: shared task board, project memory, decisions, handoffs, reviews, and conflict resolution across agent lanes.
+- **Coordination**: shared task board, project memory, decisions, handoffs, advisory file claims,
+  observed-path conflicts, verification, and user-requested merge planning across agent lanes.
 
 ## Current design direction
 
@@ -103,3 +110,6 @@ A local Pen working copy may exist, but do not rely on it for implementation. Up
 - Keep provider and account information explicit wherever sessions are shown.
 - Treat agent collaboration as inspectable and user-controlled: show claims, conflicts, handoffs, and decisions rather than hiding coordination.
 - Require explicit approval before risky terminal or file-system actions in the product UI.
+- Keep the daemon local and owner-only. New RPCs that install extensions, alter credentials,
+  remove worktrees, or configure remote access need a daemon-side validation/confirmation boundary,
+  not only a frontend affordance.

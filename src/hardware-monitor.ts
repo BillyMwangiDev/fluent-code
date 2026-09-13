@@ -5,6 +5,13 @@ import type {HardwareSample, HardwareSnapshot} from './daemon-protocol.js';
 
 const run = promisify(execFile);
 
+/** Some sandboxed or containerized Node runtimes deny uv_uptime(). Observability must remain
+ * advisory: losing one host metric must never prevent fluentd from starting. */
+function safeUptime(): number {
+  try { return uptime(); }
+  catch { return 0; }
+}
+
 export class HardwareMonitor {
   private history: HardwareSample[] = [];
   private lastCpu = process.cpuUsage();
@@ -40,7 +47,7 @@ export class HardwareMonitor {
       memoryUsedBytes: totalmem() - freemem(),
       memoryTotalBytes: totalmem(),
       processRssBytes: process.memoryUsage().rss,
-      uptimeSeconds: uptime(),
+      uptimeSeconds: safeUptime(),
       platform: platform(),
       arch: arch()
     };

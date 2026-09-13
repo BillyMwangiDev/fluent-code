@@ -4,13 +4,20 @@ Fluent connects to a user-run instance of [OpenDesign](https://open-design.ai/of
 
 ## Scope
 
-- Fluent stores only a loopback OpenDesign URL (default `http://127.0.0.1:7456`) and probes it from `fluentd`.
+- Fluent stores only a loopback OpenDesign **origin** (default `http://127.0.0.1:7456`) and probes
+  it from `fluentd`. Paths, query strings, fragments, and URL credentials are deliberately not
+  retained, so a custom health-check path cannot currently be configured.
 - When reachable, the Design workspace can show OpenDesign in its existing desktop surface and creates Fluent coordination tasks for build handoff.
 - OpenDesign remains its own local service. It owns its agents, model credentials, and design-file protocol; Fluent does not install it, start it, proxy its traffic, or copy its code.
 
 ## Boundary
 
-The connector accepts only `localhost`, `127.0.0.1`, or `[::1]` HTTP(S) origins. For a remote machine, run OpenDesign beside the remote Fluent daemon and use an authenticated tunnel before extending this connector. This keeps a locally configured design service from becoming an arbitrary network request channel.
+The connector accepts only `localhost`, `127.0.0.1`, or `[::1]` HTTP(S) origins. For a remote
+machine, run OpenDesign beside the remote Fluent daemon and use an authenticated tunnel before
+extending this connector. This keeps a locally configured design service from becoming an arbitrary
+network request channel. The Tauri content-security policy is still permissive while the embedded
+design surface is being completed; do not widen the connector beyond loopback until that policy is
+tightened and tested.
 
 ## Completion check
 

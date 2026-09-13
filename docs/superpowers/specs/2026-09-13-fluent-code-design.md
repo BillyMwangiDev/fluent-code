@@ -1,6 +1,6 @@
 # Fluent Code — end-to-end design spec
 
-Status: brainstorming complete, pending your review before we move to an implementation plan.
+Status: implemented incrementally through 2026-09-13. This remains the design and decision record; the implementation baseline and explicit gaps below take precedence over aspirational screen copy.
 Companion docs: [`AGENTS.md`](../../../AGENTS.md) (product/brand, kept in sync with this spec),
 [`CLAUDE.md`](../../../CLAUDE.md) (condensed engineering reference).
 
@@ -18,6 +18,23 @@ tool-calling loop, context management, sandboxing. Fluent Code runs them as real
 processes and never re-implements what happens inside a turn. Everything in this document is
 about the layer *around* those processes: which one runs, with which credential, how many at
 once, how they share a project, and what the user can see about all of it.
+
+### Implementation baseline (2026-09-13)
+
+`fluentd` and the Tauri desktop app now implement real Claude and Codex PTY sessions, streamed
+session output, provider/account selection, credential-chain state, Claude hooks, local usage and
+spend parsing, SSH Unix-socket forwarding, OpenDesign loopback configuration, source-control
+status, worktrees, checks, merge planning/integration, and coordination (tasks, claims, observed
+path conflicts, decisions, handoffs, agent-to-agent messages, and a `fluent-coord` CLI). Codex
+also has an app-server control channel for quota updates where the installed CLI supports it.
+
+This does not mean every Pen artboard is shipped. Structured cross-provider approval cards, the
+full Preview & Visual Check implementation, production-ready remote recovery, GPU/network
+observability, automatic conflict resolution, and model-agnostic OpenRouter remain incomplete.
+Usage is locally derived from provider transcripts and provider status signals; it is not an
+authoritative provider billing API. Credential changes apply to future sessions, never an already
+running provider process. The catalog screen confirms each user-initiated mutation, but its RPCs
+still lack daemon-side input validation and a trust policy for third-party sources.
 
 ## 2. Product principles
 
@@ -229,21 +246,15 @@ it.
 
 ### 7.4 Current implementation status
 
-A prototype already exists in `src/` (Ink + `node-pty`, ~650 lines total):
+`src/daemon.ts`, `daemon-protocol.ts`, `daemon-client.ts`, and `session-manager.ts` are the live
+Node daemon and JSON-RPC protocol. Streaming is implemented via `sessions.subscribe` and
+`stream.open`; the Tauri frontend is the active application surface. `src/index.tsx` and
+`src/theme.ts` are retained Ink-prototype reference material, not a supported client path.
 
-- `daemon.ts`, `daemon-protocol.ts`, `daemon-client.ts`, `session-manager.ts` — this **is** the
-  real `fluentd`: a working Unix-socket JSON-RPC server (`sessions.list/create/get/send/stop`)
-  backed by real PTY sessions. Verified directly; this is sound and should keep being built on
-  regardless of client technology.
-- `index.tsx`, `theme.ts` — the Ink rendering of New Session, Session List, and Active Session,
-  already wired to the daemon above. This is superseded by the Tauri frontend (§7.3): port the
-  *RPC wiring* (which calls each screen makes, in what order) into the new frontend rather than
-  the JSX itself.
-
-**Protocol gap to close first:** the current protocol is request/response only —
-`sessions.get` returns a point-in-time output string. Live-updating terminal panes need a
-push/subscribe method (e.g. `sessions.subscribe` streaming output chunks) instead of polling.
-Small additive change, not a rewrite.
+The local socket is owner-only (`0600`) but the control plane is intentionally same-user and
+unauthenticated. `cloud.md` is the deployment/security companion: do not expose the socket through
+an unauthenticated network tunnel. The Tauri CSP remains an open hardening item because the Design
+workspace embeds a user-selected loopback origin.
 
 ### 7.5 Provider adapters
 
@@ -307,7 +318,8 @@ When the active credential hits a usage limit:
 - Per the user's configured preference (always ask / always switch / never switch — the
   three-way control on screen 10), Fluent either prompts — *"claude-code subscription resets in
   47m — switch to platform API credits and keep going?"* — or switches automatically, and either
-  way starts a countdown to auto-revert.
+  way starts a countdown to auto-revert. The change selects the credential environment for future
+  sessions; it does not migrate an active provider process or preserve its prompt cache.
 - When the reset window passes, it switches back to the higher-precedence credential
   automatically.
 
@@ -406,8 +418,9 @@ Screen 12 is the product spec for this, not just a settings UI:
   design leans on Claude Code's `StopFailure` hook; if Codex has no equivalent, its adapter may
   need a documented, weaker fallback (output pattern-matching) — decide explicitly rather than
   silently assuming parity.
-- **The daemon's RPC protocol needs a streaming/subscribe method before live terminal panes work**
-  (§7.4) — small, but blocking for the first real Tauri screen.
+- **The Tauri CSP needs a tested restrictive policy.** The Design workspace currently embeds a
+  loopback service and the configuration is permissive; turn the runtime boundary documented in
+  `cloud.md` into enforced webview policy before expanding embedded content.
 - **Hardware-advisory thresholds are undefined** — "safe concurrent-agent count" needs an actual
   heuristic (e.g. free-RAM-per-agent-estimate), not just a stated intention. Needs a first pass and
   will need real-world tuning.

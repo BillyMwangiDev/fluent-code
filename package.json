@@ -6,7 +6,8 @@
   "bin": {
     "fluent": "dist/index.js",
     "fluentd": "dist/daemon.js",
-    "fluent-coord": "dist/coord-cli.js"
+    "fluent-coord": "dist/coord-cli.js",
+    "fluent-coord-mcp": "dist/fluent-coord-mcp.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -19,6 +20,7 @@
     "test": "node --import tsx --test 'src/**/*.test.ts'",
     "evals": "tsx scripts/run-evals.mts",
     "evals:check": "tsx scripts/run-evals.mts --validate-only",
+    "benchmark": "tsx scripts/benchmark.mts",
     "check:frontend": "tsc --noEmit -p app/tsconfig.json",
     "build:frontend": "esbuild app/src/main.ts --bundle --outdir=app/dist --format=esm --platform=browser --target=es2022 --loader:.woff=file --loader:.woff2=file",
     "tauri": "tauri"

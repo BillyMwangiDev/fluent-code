@@ -17,7 +17,8 @@ export type ProviderAdapter = {
 
 const adapters: Record<ProviderId, ProviderAdapter> = {
   claude: {id: 'claude', label: 'Claude Code', executable: 'claude', args: []},
-  codex: {id: 'codex', label: 'Codex', executable: 'codex', args: []}
+  codex: {id: 'codex', label: 'Codex', executable: 'codex', args: []},
+  gemini: {id: 'gemini', label: 'Gemini CLI', executable: 'gemini', args: []}
 };
 
 export function providerAdapter(provider: ProviderId) {

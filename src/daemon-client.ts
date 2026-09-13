@@ -13,6 +13,8 @@ import {
   type RpcEvent,
   type RpcRequest,
   type RpcResponse,
+  type Run,
+  type RunEvent,
   type SessionSnapshot,
   type SessionDiff,
   type SessionSummary
@@ -84,6 +86,43 @@ function subscribeSession(sessionId: string, handlers: {onSnapshot?: (snapshot: 
 }
 
 /**
+ * Resumable execution subscription. Unlike the legacy terminal stream, this is a durable cursor
+ * over redacted run events; callers must treat `resync-required` as a snapshot boundary, not as
+ * missing terminal text they can reconstruct.
+ */
+function subscribeRun(runId: string, afterSequence: number | undefined, handlers: {onSnapshot?: (snapshot: Run, events: RunEvent[]) => void; onEvent?: (event: RunEvent) => void; onResyncRequired?: (value: {from: number; snapshot: Run; terminalGap: boolean}) => void; onError?: (error: Error) => void}) {
+  const socket = connect(daemonSocketPath());
+  const requestId = randomUUID();
+  let buffer = '';
+  let gotAck = false;
+  socket.once('error', error => handlers.onError?.(new Error(`fluentd unavailable: ${error.message}. Start it with pnpm daemon.`)));
+  socket.once('connect', () => socket.write(`${JSON.stringify({id: requestId, method: 'runs.subscribe', params: {runId, ...(afterSequence === undefined ? {} : {afterSequence})}})}\n`));
+  socket.on('data', chunk => {
+    buffer += chunk.toString();
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as RpcResponse | RpcEvent;
+      if (!gotAck && 'id' in parsed) {
+        gotAck = true;
+        if (parsed.ok) {
+          const result = parsed.result as {snapshot: Run; events: RunEvent[]; resyncRequired: boolean; floor: number};
+          handlers.onSnapshot?.(result.snapshot, result.events);
+          if (result.resyncRequired) handlers.onResyncRequired?.({from: result.floor, snapshot: result.snapshot, terminalGap: true});
+        } else handlers.onError?.(new Error(parsed.error));
+        continue;
+      }
+      const event = parsed as RpcEvent;
+      if (event.event === 'runs.event' && event.runId === runId) handlers.onEvent?.(event.data);
+      if (event.event === 'runs.resync_required' && event.runId === runId) handlers.onResyncRequired?.({from: event.from, snapshot: event.snapshot, terminalGap: event.terminalGap});
+    }
+  });
+  return {unsubscribe: () => { socket.write(`${JSON.stringify({id: randomUUID(), method: 'runs.unsubscribe', params: {runId}})}\n`); socket.end(); }};
+}
+
+/**
  * Long-lived connection for provider-wide events (currently `credential.switched` /
  * `credential.notice`) that aren't scoped to one session — used by screens like Credentials that
  * want fallback notices without subscribing to a specific session's output.
@@ -114,6 +153,8 @@ export const daemonClient = {
   listSessions: () => request<SessionSummary[]>('sessions.list'),
   createSession: (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean}) => request<SessionSummary>('sessions.create', params),
   getSession: (sessionId: string) => request<SessionSnapshot>('sessions.get', {sessionId}),
+  listRuns: () => request<Run[]>('runs.list'),
+  getRun: (runId: string) => request<Run>('runs.get', {runId}),
   send: (sessionId: string, input: string) => request<{sent: boolean}>('sessions.send', {sessionId, input}),
   stop: (sessionId: string) => request<SessionSummary>('sessions.stop', {sessionId}),
   sessionDiff: (sessionId: string) => request<SessionDiff>('sessions.diff', {sessionId}),
@@ -127,6 +168,7 @@ export const daemonClient = {
   claimFile: (project: string, path: string, sessionId: string) => request<import('./daemon-protocol.js').ClaimResult>('coordination.claim', {project, path, sessionId}),
   resize: (sessionId: string, cols: number, rows: number) => request<{resized: boolean}>('sessions.resize', {sessionId, cols, rows}),
   subscribeSession,
+  subscribeRun,
   openEventStream,
   listCredentials: () => request<CredentialChainState[]>('credentials.list'),
   upsertAccount: (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string}) => request<CredentialChainState>('credentials.upsertAccount', params),

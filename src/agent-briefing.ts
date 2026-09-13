@@ -52,10 +52,11 @@ export function coordinationBriefing(command = coordCommand()) {
  * How to pass the briefing to a provider, using that CLI's own convention for project direction
  * (spec §7.5) rather than intercepting anything.
  *
- * Claude Code takes `--append-system-prompt`. Codex has no confirmed equivalent flag, and writing
- * an AGENTS.md into the lane's worktree would put a Fluent file into the user's diff and then into
- * their merge — so Codex lanes get no briefing until there is a confirmed mechanism, rather than a
- * guessed one. That is a real gap, and it is why `coordCommand` is also documented for humans.
+ * Claude Code takes `--append-system-prompt`. Codex and Gemini lanes receive the discoverable,
+ * user-scoped `fluent_coord` MCP tool plus the portable `fluent-collab` skill when the user has
+ * installed Fluent's coordination bundle. Neither runtime has a launch flag we can rely on here,
+ * and writing an AGENTS.md into the lane's worktree would put a Fluent file into the user's diff.
+ * Keep the terminal command as the fallback rather than guessing a prompt-injection mechanism.
  */
 export function briefingArgs(provider: ProviderId, briefing = coordinationBriefing()): string[] {
   return provider === 'claude' ? ['--append-system-prompt', briefing] : [];

@@ -1,9 +1,16 @@
 import {mkdir, readFile, writeFile} from 'node:fs/promises';
+import {execFile} from 'node:child_process';
+import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
+import {promisify} from 'node:util';
+import {fileURLToPath} from 'node:url';
 import {coordCommand} from './agent-briefing.js';
 
 export const skillName = 'fluent-collab';
+export const coordinationMcpName = 'fluent-coord';
+const run = promisify(execFile);
+const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 /**
  * Where each provider looks for user-scope skills.
@@ -13,12 +20,14 @@ export const skillName = 'fluent-collab';
  * once per machine keeps every lane briefed and the repository untouched.
  *
  * Paths confirmed against each provider's own documentation rather than assumed: Claude Code reads
- * `~/.claude/skills/<name>/SKILL.md`, Codex reads `~/.codex/skills/<name>/SKILL.md`.
+ * `~/.claude/skills/<name>/SKILL.md`, Codex reads `~/.codex/skills/<name>/SKILL.md`, and Gemini
+ * CLI reads `~/.gemini/skills/<name>/SKILL.md`. User scope keeps Fluent out of a project's diff.
  */
 export function skillTargets(home = homedir()) {
   return [
     {provider: 'claude' as const, path: join(home, '.claude', 'skills', skillName, 'SKILL.md')},
-    {provider: 'codex' as const, path: join(home, '.codex', 'skills', skillName, 'SKILL.md')}
+    {provider: 'codex' as const, path: join(home, '.codex', 'skills', skillName, 'SKILL.md')},
+    {provider: 'gemini' as const, path: join(home, '.gemini', 'skills', skillName, 'SKILL.md')}
   ];
 }
 
@@ -38,7 +47,7 @@ export function skillTargets(home = homedir()) {
 export function skillContent(command = coordCommand()) {
   return `---
 name: ${skillName}
-description: Coordinate with the other AI coding agents working on this same repository right now. Use when starting work, before editing files others may be touching, when you have a message or question for another agent, or when you need to know what the other agents are doing. Works across Claude Code, Codex and any other agent Fluent Code is running.
+description: Coordinate with the other AI coding agents working on this same repository right now. Use when starting work, before editing files others may be touching, when you have a message or question for another agent, or when you need to know what the other agents are doing. Works across Claude Code, Codex, Gemini CLI and any other agent Fluent Code is running.
 ---
 
 # Working alongside other agents
@@ -123,7 +132,7 @@ can they to you.
 `;
 }
 
-export type SkillInstallState = {provider: 'claude' | 'codex'; path: string; installed: boolean; current: boolean};
+export type SkillInstallState = {provider: 'claude' | 'codex' | 'gemini'; path: string; installed: boolean; current: boolean};
 
 /** What is installed where, so the UI can offer an install without guessing and can tell a stale
  * copy from a missing one. */
@@ -149,4 +158,67 @@ export async function installSkill(home = homedir()) {
     written.push({...target, installed: true, current: true});
   }
   return written;
+}
+
+export type CollaborationInstallState = SkillInstallState & {
+  mcpConfigured: boolean;
+  mcpDetail?: string;
+};
+
+/** The compiled command is intentionally absolute: user-scoped MCP registrations must work from
+ * every project, even when Fluent itself is running from a source checkout. */
+export function coordinationMcpCommand() {
+  return {command: process.execPath, args: [join(packageRoot, 'dist', 'fluent-coord-mcp.js')]};
+}
+
+export function collaborationMcpAddArgs(provider: SkillInstallState['provider']) {
+  const {command, args} = coordinationMcpCommand();
+  if (provider === 'claude') return ['mcp', 'add', '--scope', 'user', coordinationMcpName, '--', command, ...args];
+  if (provider === 'gemini') return ['mcp', 'add', '--scope', 'user', coordinationMcpName, command, ...args];
+  // Codex owns its config location. Its CLI's `mcp add` is the compatibility boundary; Fluent
+  // does not write Codex config files or guess their schema.
+  return ['mcp', 'add', coordinationMcpName, '--', command, ...args];
+}
+
+async function installMcp(provider: SkillInstallState['provider']) {
+  const {args} = coordinationMcpCommand();
+  if (!existsSync(args[0]!)) {
+    return {mcpConfigured: false, mcpDetail: 'Build Fluent Code before installing the MCP tool (`pnpm build`); providers run the compiled server, never TypeScript source.'};
+  }
+  try {
+    const {stdout, stderr} = await run(provider, collaborationMcpAddArgs(provider), {timeout: 30_000});
+    return {mcpConfigured: true, mcpDetail: (stdout + stderr).trim() || 'configured'};
+  } catch (error) {
+    return {mcpConfigured: false, mcpDetail: error instanceof Error ? error.message : String(error)};
+  }
+}
+
+async function mcpStatus(provider: SkillInstallState['provider']) {
+  try {
+    const args = provider === 'codex' ? ['mcp', 'list', '--json'] : ['mcp', 'list'];
+    const {stdout, stderr} = await run(provider, args, {timeout: 8_000});
+    const detail = (stdout + stderr).trim();
+    return {mcpConfigured: new RegExp(`\\b${coordinationMcpName}\\b`).test(detail), mcpDetail: detail || undefined};
+  } catch (error) {
+    return {mcpConfigured: false, mcpDetail: error instanceof Error ? error.message : String(error)};
+  }
+}
+
+/** Read both halves of the portable bundle. MCP is checked through each host CLI rather than by
+ * reading private configuration files whose schema or location may change independently. */
+export async function collaborationStatus(home = homedir()): Promise<CollaborationInstallState[]> {
+  const skills = await skillStatus(home);
+  const mcp = await Promise.all(skills.map(skill => mcpStatus(skill.provider)));
+  return skills.map((skill, index) => ({...skill, ...mcp[index]!}));
+}
+
+/**
+ * Installs Fluent's portable collaboration bundle at user scope for every supported host. Native
+ * marketplace plugins deliberately do not pass through here: their formats and permissions belong
+ * to their runtime. A failure on one missing CLI never prevents the others from getting the bundle.
+ */
+export async function installCollaboration(home = homedir()): Promise<CollaborationInstallState[]> {
+  const skills = await installSkill(home);
+  const mcp = await Promise.all(skills.map(skill => installMcp(skill.provider)));
+  return skills.map((skill, index) => ({...skill, ...mcp[index]!}));
 }

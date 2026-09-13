@@ -1,6 +1,6 @@
 # Fluent Code
 
-Desktop orchestration for Claude Code, Codex, and OpenRouter-backed coding agents — `fluentd`
+Desktop orchestration for Claude Code, Codex, Gemini CLI, and OpenRouter-backed coding agents — `fluentd`
 owns real PTY sessions and a credential broker; `fluent` is a Tauri app that renders and
 coordinates them. See [`docs/superpowers/specs/2026-09-13-fluent-code-design.md`](docs/superpowers/specs/2026-09-13-fluent-code-design.md)
 for the full design; this file covers the desktop implementation that exists today and calls out
@@ -21,7 +21,8 @@ pnpm tauri dev
 
 `fluentd` owns provider processes, so closing the app window does not stop a running session —
 check what's still running with `pnpm daemon:status`. The Tauri app talks to `fluentd` only over
-its Unix socket (`/tmp/fluent-code.sock` by default; override both sides with `FLUENT_SOCKET`);
+its Unix socket (`$XDG_RUNTIME_DIR/fluent-code.sock`, or `/tmp/fluent-code.sock` when that
+directory is unavailable; override both sides with `FLUENT_SOCKET`);
 there is no other channel between them.
 
 First run: the splash screen routes you to onboarding if no provider account is connected yet.
@@ -31,16 +32,19 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
 **credentials** manages the precedence chain and fallback policy for when one hits a usage limit.
 
 **Current limitations**, called out here rather than left silent:
-- Claude Code and Codex launch as their real installed CLIs. OpenRouter is a Claude Code
-  compatibility preset, not a separate agent executable.
+- Claude Code, Codex, and Gemini CLI launch as their real installed CLIs. OpenRouter is a Claude
+  Code compatibility preset, not a separate agent executable. Gemini's Google login and Vertex
+  credentials remain owned by Gemini CLI; Fluent supports the explicit `GEMINI_API_KEY` account
+  path without copying browser or ADC credentials.
 - `.fluent/credentials.json` stores only account metadata, precedence, and fallback state.
   API-key material is held in the OS credential store under its provider/account id and is never
   returned by the daemon's credential-list RPC.
 - Provider approval prompts are still rendered by the underlying CLI; Fluent does not yet turn
   them into structured, cross-provider approval cards.
-- The usage screen has live local CPU, memory, disk, uptime, and session signals. It deliberately
-  does not fabricate token, cache, quota, or cost data while provider adapters lack an official
-  telemetry signal.
+- The usage and spend screens read local provider transcripts and provider-reported status data.
+  They show tokens, cache fields, reported cost, and quota only where the provider emits them;
+  missing values mean unavailable data, not zero. Transcript-derived totals can include sessions
+  started outside Fluent and are estimates, not billing records.
 - SSH remote profiles forward a remote `fluentd` Unix socket and can become the active desktop
   target. Remote setup, credential broadcasts, and reconnect recovery still need fuller UX.
 - The Design workspace can optionally embed a user-run local [OpenDesign](https://open-design.ai/official/)
@@ -49,9 +53,26 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
 - The Design workspace also discovers the `pen` and OpenDesign CLIs. It can run OpenDesign's
   documented MCP installer for Claude Code or Codex only after an in-app confirmation; pen.dev’s
   local MCP toggle remains owned by the pen.dev desktop app.
-- Coordination stores tasks, claims, decisions, and handoffs, but claims are advisory and there
-  is no diff-review or automated conflict-resolution workflow yet. New sessions can opt into a
-  detached Git worktree, which is only removable after its session stops.
+- Coordination stores tasks, claims, decisions, and handoffs. Claims remain advisory; Fluent can
+  observe changed paths, run project checks, predict merge conflicts, and serialize user-requested
+  worktree integration, but it does not resolve conflicts automatically. New sessions can opt into
+  a detached Git worktree, which is only removable after its session stops.
+- The catalog screen distinguishes native provider plugins from portable MCP servers. Native
+  marketplace plugins remain host-specific; a structured MCP declaration and Fluent's
+  collaboration skill can be installed at user scope across Claude Code, Codex, and Gemini CLI
+  with one explicit approval. The daemon validates executable/argument/URL structure, but a
+  trusted-source policy is still needed for third-party extension sources.
+
+## Security and local data
+
+`fluentd` is a local, owner-only Unix-socket service. It can start provider CLIs, manage account
+metadata, create/remove Fluent worktrees, and invoke provider extension commands; do not expose
+its socket through a shared directory or an unauthenticated network tunnel. API keys stay in the
+OS credential store; `.fluent/` holds non-secret state such as credential metadata, remote
+profiles, usage, coordination state, and OpenDesign configuration. Provider hooks add managed
+entries to a project's `.claude/settings.json` when a Claude session is created, so review that
+project-local change before committing it. See [`cloud.md`](cloud.md) for the runtime boundary and
+remote-connection notes.
 
 ## Architecture
 
@@ -69,6 +90,14 @@ fluent    src-tauri/ (Rust) + app/ (vanilla TS/HTML, esbuild-bundled, no framewo
 the design spec §7.5). `sessions.subscribe`/`stream.open` keep their socket open and push
 `sessions.output` / `sessions.status` / `credential.switched` / `credential.notice` events;
 every other method is a plain one-shot request/response.
+
+For cross-runtime coordination, `fluent-coord` is the universal terminal fallback and
+`fluent-coord-mcp` provides one compact MCP tool (`fluent_coord`). The tool resolves its lane from
+the provider's working directory and reads/writes only the generated task/claim/mail summary; it
+never injects other agents' terminal transcripts into context. The **install coordination bundle**
+action writes a user-scoped `fluent-collab` skill and registers that MCP tool through each
+provider's own CLI. Build once with `pnpm build` before installing it so hosts invoke the compiled
+server.
 
 Run `pnpm build` at least once before real hook usage — `hooks-config.ts` points Claude Code's
 hooks at the *compiled* `dist/hook-relay.js` (it has to; Claude Code invokes it with plain `node`,

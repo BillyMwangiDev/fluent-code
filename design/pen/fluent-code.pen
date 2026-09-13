@@ -23516,6 +23516,154 @@
           ]
         }
       ]
+    },
+    {
+      "type": "frame",
+      "id": "Y0000",
+      "x": 18346,
+      "y": 0,
+      "name": "13 — Premium Shell & Theme Contract",
+      "clip": true,
+      "width": 1440,
+      "height": 900,
+      "fill": "$ground",
+      "layout": "none",
+      "children": [
+        {
+          "type": "frame",
+          "id": "Z0000",
+          "x": 0,
+          "y": 0,
+          "name": "Desktop Title Bar",
+          "width": 1440,
+          "height": 46,
+          "fill": "#1b1a18",
+          "stroke": "$dark-line",
+          "strokeWidth": {"bottom": 1},
+          "layout": "none",
+          "children": [
+            {"id": "Y0001", "type": "ref", "ref": "IaxZQ", "x": 16, "y": 10, "name": "Fluent Mark", "width": 26, "height": 26},
+            {"type": "text", "id": "Y0002", "x": 54, "y": 15, "name": "Wordmark", "fill": "$canvas", "content": "fluent code", "fontFamily": "$font-heading", "fontSize": 16, "fontWeight": "700"},
+            {"type": "text", "id": "Y0003", "x": 160, "y": 17, "name": "Window Context", "fill": "$dark-muted", "content": "agent control surface  /  ~/WORK/fluent-code", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "normal"},
+            {"type": "frame", "id": "Y0004", "x": 1276, "y": 11, "name": "Local Target Chip", "width": 142, "height": 24, "fill": "$dark-card", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 999, "layout": "none", "children": [
+              {"type": "ellipse", "id": "Y0005", "x": 11, "y": 9, "name": "Status Dot", "width": 6, "height": 6, "fill": "$success"},
+              {"type": "text", "id": "Y0006", "x": 25, "y": 6, "name": "Target Label", "fill": "$canvas", "content": "local · owner only", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+            ]}
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "Z0008",
+          "x": 0,
+          "y": 46,
+          "name": "Persistent Project Rail",
+          "width": 224,
+          "height": 854,
+          "fill": "$dark-surface",
+          "stroke": "$dark-line",
+          "strokeWidth": {"right": 1},
+          "layout": "none",
+          "children": [
+            {"type": "text", "id": "Y0007", "x": 16, "y": 20, "name": "Project Label", "fill": "$dark-muted", "content": "CURRENT PROJECT", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+            {"type": "frame", "id": "Y0008", "x": 12, "y": 40, "name": "Project Context", "width": 200, "height": 60, "fill": "$dark-inset", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 12, "layout": "none", "children": [
+              {"type": "text", "id": "Y0009", "x": 12, "y": 12, "name": "Project Name", "fill": "$canvas", "content": "fluent-code", "fontFamily": "$font-mono", "fontSize": 12, "fontWeight": "700"},
+              {"type": "text", "id": "Y0010", "x": 12, "y": 33, "name": "Project Path", "fill": "$dark-muted", "content": "~/WORK/fluent-code", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+            ]},
+            {"type": "text", "id": "Y0011", "x": 20, "y": 126, "name": "Workspace Label", "fill": "$dark-muted", "content": "WORKSPACE", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+            {"type": "frame", "id": "Y0012", "x": 12, "y": 146, "name": "Active Orchestration Nav", "width": 200, "height": 32, "fill": "$dark-elevated", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 8, "layout": "none", "children": [
+              {"type": "frame", "id": "Y0013", "x": 0, "y": 7, "name": "Active Accent", "width": 2, "height": 18, "fill": "$coral", "cornerRadius": 2},
+              {"type": "text", "id": "Y0014", "x": 12, "y": 8, "name": "Active Nav Label", "fill": "$canvas", "content": "orchestrate", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "500"}
+            ]},
+            {"type": "text", "id": "Y0015", "x": 24, "y": 192, "name": "Sessions Nav", "fill": "$dark-muted", "content": "sessions", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "normal"},
+            {"type": "text", "id": "Y0016", "x": 24, "y": 220, "name": "New Session Nav", "fill": "$dark-muted", "content": "new session", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "normal"},
+            {"type": "text", "id": "Y0017", "x": 24, "y": 248, "name": "Remote Nav", "fill": "$dark-muted", "content": "remote", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "normal"},
+            {"type": "text", "id": "Y0018", "x": 20, "y": 292, "name": "Control Label", "fill": "$dark-muted", "content": "CONTROL PLANE", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+            {"type": "text", "id": "Y0019", "x": 24, "y": 316, "name": "Control Navigation", "fill": "$dark-muted", "content": "usage   spend   source control", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+            {"type": "text", "id": "Y0020", "x": 20, "y": 362, "name": "Tools Label", "fill": "$dark-muted", "content": "TOOLS", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+            {"type": "text", "id": "Y0021", "x": 24, "y": 386, "name": "Tools Navigation", "fill": "$dark-muted", "content": "design workspace\npreview\nthemes", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+            {"type": "text", "id": "Y0022", "x": 16, "y": 814, "name": "Rail Footer", "fill": "$dark-muted", "content": "5 live lanes  ·  1 needs review", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "Z0025",
+          "x": 224,
+          "y": 46,
+          "name": "Active Work Plane",
+          "width": 1216,
+          "height": 854,
+          "fill": "$ground",
+          "layout": "none",
+          "children": [
+            {"type": "text", "id": "Y0023", "x": 30, "y": 26, "name": "Page Eyebrow", "fill": "$dark-muted", "content": "PROJECT / MULTI-AGENT", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+            {"type": "text", "id": "Y0024", "x": 30, "y": 46, "name": "Page Title", "fill": "$canvas", "content": "parallel orchestration", "fontFamily": "$font-heading", "fontSize": 24, "fontWeight": "700"},
+            {"type": "text", "id": "Y0025", "x": 30, "y": 78, "name": "Page Subtitle", "fill": "$dark-muted", "content": "active work leads · coordination stays one glance away", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "normal"},
+            {"type": "frame", "id": "Y0026", "x": 1038, "y": 38, "name": "Primary Action", "width": 144, "height": 32, "fill": "$coral", "cornerRadius": 8, "layout": "none", "children": [
+              {"type": "text", "id": "Y0027", "x": 16, "y": 8, "name": "Primary Action Label", "fill": "$ink", "content": "+ add agent", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "700"}
+            ]},
+            {"type": "frame", "id": "Y0028", "x": 30, "y": 116, "name": "Active Agent Lane", "width": 760, "height": 506, "fill": "$dark-card", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 12, "layout": "none", "children": [
+              {"type": "ellipse", "id": "Y0029", "x": 16, "y": 16, "name": "Live Lane Dot", "width": 8, "height": 8, "fill": "$success"},
+              {"type": "text", "id": "Y0030", "x": 34, "y": 12, "name": "Lane Name", "fill": "$canvas", "content": "agent-1  /  codex", "fontFamily": "$font-mono", "fontSize": 12, "fontWeight": "700"},
+              {"type": "text", "id": "Y0031", "x": 604, "y": 12, "name": "Lane Meta", "fill": "$dark-muted", "content": "18.4k / 128k", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+              {"type": "frame", "id": "Y0032", "x": 14, "y": 42, "name": "Lane Task Strip", "width": 732, "height": 52, "fill": "$dark-inset", "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0033", "x": 12, "y": 10, "name": "Task Title", "fill": "$canvas", "content": "refactor orchestration shell", "fontFamily": "$font-mono", "fontSize": 12, "fontWeight": "500"},
+                {"type": "text", "id": "Y0034", "x": 12, "y": 30, "name": "Task Files", "fill": "$dark-muted", "content": "app/src/main.ts  ·  app/styles.css  ·  claimed", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+              ]},
+              {"type": "text", "id": "Y0035", "x": 22, "y": 122, "name": "Terminal Output", "fill": "$canvas", "content": "› read current shell and theme bundles\n\n  keeping provider and coordination state visible\n  extracting shared elevation and focus tokens\n\n› edit app/src/main.ts\n\n  + persistent desktop rail\n  + overflow-safe mobile navigation\n  + active work plane hierarchy\n\n› pnpm check:frontend\n\n  ✓ typecheck passed", "fontFamily": "$font-mono", "fontSize": 12, "fontWeight": "normal"},
+              {"type": "frame", "id": "Y0036", "x": 14, "y": 454, "name": "Lane Footer", "width": 732, "height": 38, "fill": "$dark-inset", "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0037", "x": 12, "y": 11, "name": "Lane State", "fill": "$success", "content": "● working", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+                {"type": "text", "id": "Y0038", "x": 110, "y": 11, "name": "Lane Footer Meta", "fill": "$dark-muted", "content": "ready 1.2s · warm paths: 2", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+              ]}
+            ]},
+            {"type": "frame", "id": "Y0039", "x": 814, "y": 116, "name": "Coordination Rail", "width": 370, "height": 506, "fill": "$dark-card", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 12, "layout": "none", "children": [
+              {"type": "text", "id": "Y0040", "x": 16, "y": 16, "name": "Coordination Title", "fill": "$canvas", "content": "coordination", "fontFamily": "$font-heading", "fontSize": 16, "fontWeight": "700"},
+              {"type": "text", "id": "Y0041", "x": 16, "y": 40, "name": "Coordination Subtitle", "fill": "$dark-muted", "content": "shared, inspectable, advisory", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+              {"type": "frame", "id": "Y0042", "x": 14, "y": 68, "name": "Task Board", "width": 342, "height": 128, "fill": "$dark-inset", "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0043", "x": 12, "y": 12, "name": "Task Board Title", "fill": "$canvas", "content": "shared task board  ·  5", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "700"},
+                {"type": "text", "id": "Y0044", "x": 12, "y": 39, "name": "Task Board Rows", "fill": "$dark-muted", "content": "● refactor shell                 agent-1\n● verify all bundles             agent-2\n◌ visual check                   agent-3", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+              ]},
+              {"type": "frame", "id": "Y0045", "x": 14, "y": 210, "name": "File Claims", "width": 342, "height": 118, "fill": "$dark-inset", "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0046", "x": 12, "y": 12, "name": "File Claims Title", "fill": "$canvas", "content": "file claims  ·  0 overlap", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "700"},
+                {"type": "text", "id": "Y0047", "x": 12, "y": 39, "name": "File Claims Rows", "fill": "$dark-muted", "content": "app/src/main.ts        agent-1\napp/styles.css          agent-1\ndesign/pen/fluent-code.pen  agent-2", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"}
+              ]},
+              {"type": "frame", "id": "Y0048", "x": 14, "y": 342, "name": "Handoff", "width": 342, "height": 146, "fill": "#2b211d", "stroke": "$coral", "strokeWidth": 1, "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0049", "x": 12, "y": 12, "name": "Handoff Title", "fill": "$coral", "content": "review ready", "fontFamily": "$font-mono", "fontSize": 11, "fontWeight": "700"},
+                {"type": "text", "id": "Y0050", "x": 12, "y": 40, "name": "Handoff Text", "fill": "$canvas", "content": "agent-1 → reviewer\nshared shell implementation\nverification: frontend typecheck", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+                {"type": "frame", "id": "Y0051", "x": 12, "y": 103, "name": "Review Action", "width": 116, "height": 28, "fill": "$coral", "cornerRadius": 8, "layout": "none", "children": [
+                  {"type": "text", "id": "Y0052", "x": 12, "y": 7, "name": "Review Action Label", "fill": "$ink", "content": "open review", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"}
+                ]}
+              ]}
+            ]},
+            {"type": "frame", "id": "Y0053", "x": 30, "y": 646, "name": "Cross Mode Theme Contract", "width": 1154, "height": 174, "fill": "$dark-card", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 12, "layout": "none", "children": [
+              {"type": "text", "id": "Y0054", "x": 16, "y": 14, "name": "Theme Contract Title", "fill": "$canvas", "content": "same hierarchy, complete bundle", "fontFamily": "$font-heading", "fontSize": 16, "fontWeight": "700"},
+              {"type": "text", "id": "Y0055", "x": 16, "y": 38, "name": "Theme Contract Subtitle", "fill": "$dark-muted", "content": "appearance resolves a saved light or dark bundle; it never mixes colour roles", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+              {"type": "frame", "id": "Y0056", "x": 16, "y": 66, "name": "Fluent Dark Mode", "width": 352, "height": 92, "fill": "$dark-inset", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0057", "x": 12, "y": 10, "name": "Dark Mode Label", "fill": "$canvas", "content": "DARK / Fluent Dark", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+                {"type": "frame", "id": "Y0058", "x": 12, "y": 34, "name": "Dark Ground", "width": 56, "height": 24, "fill": "$ground", "stroke": "$dark-line", "strokeWidth": 1, "cornerRadius": 5},
+                {"type": "frame", "id": "Y0059", "x": 76, "y": 34, "name": "Dark Surface", "width": 56, "height": 24, "fill": "$dark-surface", "cornerRadius": 5},
+                {"type": "frame", "id": "Y0060", "x": 140, "y": 34, "name": "Dark Elevated", "width": 56, "height": 24, "fill": "$dark-elevated", "cornerRadius": 5},
+                {"type": "frame", "id": "Y0061", "x": 204, "y": 34, "name": "Dark Focus", "width": 56, "height": 24, "fill": "$coral", "cornerRadius": 5},
+                {"type": "text", "id": "Y0062", "x": 12, "y": 68, "name": "Dark Mode Note", "fill": "$dark-muted", "content": "ground / surface / elevation / action", "fontFamily": "$font-mono", "fontSize": 9, "fontWeight": "normal"}
+              ]},
+              {"type": "frame", "id": "Y0063", "x": 384, "y": 66, "name": "Fluent Light Mode", "width": 352, "height": 92, "fill": "$surface", "stroke": "$border", "strokeWidth": 1, "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0064", "x": 12, "y": 10, "name": "Light Mode Label", "fill": "$ink", "content": "LIGHT / Fluent Light", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+                {"type": "frame", "id": "Y0065", "x": 12, "y": 34, "name": "Light Ground", "width": 56, "height": 24, "fill": "$canvas", "stroke": "$border", "strokeWidth": 1, "cornerRadius": 5},
+                {"type": "frame", "id": "Y0066", "x": 76, "y": 34, "name": "Light Surface", "width": 56, "height": 24, "fill": "$surface", "stroke": "$border", "strokeWidth": 1, "cornerRadius": 5},
+                {"type": "frame", "id": "Y0067", "x": 140, "y": 34, "name": "Light Elevated", "width": 56, "height": 24, "fill": "#ffffff", "stroke": "$border", "strokeWidth": 1, "cornerRadius": 5},
+                {"type": "frame", "id": "Y0068", "x": 204, "y": 34, "name": "Light Focus", "width": 56, "height": 24, "fill": "$coral", "cornerRadius": 5},
+                {"type": "text", "id": "Y0069", "x": 12, "y": 68, "name": "Light Mode Note", "fill": "$ink-3", "content": "same roles / independent bundle", "fontFamily": "$font-mono", "fontSize": 9, "fontWeight": "normal"}
+              ]},
+              {"type": "frame", "id": "Y0070", "x": 752, "y": 66, "name": "High Contrast Mode", "width": 386, "height": 92, "fill": "#000000", "stroke": "#8b8b8b", "strokeWidth": 1, "cornerRadius": 8, "layout": "none", "children": [
+                {"type": "text", "id": "Y0071", "x": 12, "y": 10, "name": "High Contrast Label", "fill": "#ffffff", "content": "HIGH CONTRAST / accessibility", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "700"},
+                {"type": "text", "id": "Y0072", "x": 12, "y": 38, "name": "High Contrast Note", "fill": "#ffffff", "content": "focus stays visible · data is not colour-only", "fontFamily": "$font-mono", "fontSize": 10, "fontWeight": "normal"},
+                {"type": "frame", "id": "Y0073", "x": 12, "y": 62, "name": "High Contrast Focus", "width": 140, "height": 20, "fill": "#000000", "stroke": "$coral", "strokeWidth": 2, "cornerRadius": 5, "layout": "none", "children": [
+                  {"type": "text", "id": "Y0074", "x": 8, "y": 4, "name": "High Contrast Focus Label", "fill": "#ffffff", "content": "visible focus state", "fontFamily": "$font-mono", "fontSize": 8, "fontWeight": "normal"}
+                ]}
+              ]}
+            ]}
+          ]
+        }
+      ]
     }
   ],
   "variables": {
@@ -23606,6 +23754,26 @@
     "dark-elevated": {
       "type": "color",
       "value": "#353433"
+    },
+    "dark-card": {
+      "type": "color",
+      "value": "#22211f"
+    },
+    "dark-inset": {
+      "type": "color",
+      "value": "#11110f"
+    },
+    "dark-line": {
+      "type": "color",
+      "value": "#34322e"
+    },
+    "dark-muted": {
+      "type": "color",
+      "value": "#a29f96"
+    },
+    "success": {
+      "type": "color",
+      "value": "#87bd90"
     }
   },
   "fileToken": "cf8e6dec-f595-431d-b7b9-00a8925e90a9"

@@ -1,0 +1,1 @@
+{"schemaVersion":1,"name":"full-app-change","runtime":"node","lockfile":"pnpm-lock.yaml","acceptance":"pnpm test","browser":{"viewport":"1440x900"}}

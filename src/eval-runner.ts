@@ -1,11 +1,12 @@
 import {execFile} from 'node:child_process';
-import {cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile} from 'node:fs/promises';
+import {cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {skillContent, skillName} from './collab-skill.js';
 import type {EvalCaseResult, EvalPlan, EvalRun} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 const run = promisify(execFile);
 const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -118,7 +119,7 @@ export class EvalRunner {
 
   async restore() {
     try {
-      this.latest = JSON.parse(await readFile(this.stateFile, 'utf8')) as EvalRun;
+      this.latest = await readPrivateJson<EvalRun>(this.stateFile);
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -184,9 +185,6 @@ export class EvalRunner {
   }
 
   private async persist() {
-    await mkdir(dirname(this.stateFile), {recursive: true});
-    const temporary = `${this.stateFile}.tmp`;
-    await writeFile(temporary, JSON.stringify(this.latest, null, 2), 'utf8');
-    await rename(temporary, this.stateFile);
+    await writePrivateJson(this.stateFile, this.latest ?? null);
   }
 }

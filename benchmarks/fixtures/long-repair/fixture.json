@@ -1,0 +1,1 @@
+{"schemaVersion":1,"name":"long-repair","runtime":"node","lockfile":"pnpm-lock.yaml","acceptance":"pnpm test","browser":null}

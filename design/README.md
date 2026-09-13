@@ -16,6 +16,7 @@
 | 10 — Claude Code Credentials | `htKKf` | `previews/htKKf.png` |
 | 11 — Usage Observatory | `hNqHb` | `previews/hNqHb.png` |
 | 12 — Themes & Appearance | `qLHqC` | `previews/qLHqC.png` |
+| 13 — Premium Shell & Theme Contract | `Y0000` | `previews/FCshell13.png` |
 
 ## Implementation notes
 
@@ -24,3 +25,8 @@
 - Themes have a strict two-level model: first choose appearance mode (`System`, `Light`, or `Dark`), then choose a theme filtered to that mode. A light theme and a dark theme are independent complete bundles; never mix them into one gallery.
 - In System mode, persist independent light and dark selections, e.g. `dark → Fluent Dark`, `light → Fluent Light`. Each bundle owns semantic colors, terminal ANSI colors, syntax colors, font size, and density.
 - Fluent Dark is the default. Every Fluent theme retains the exact mark and reserves Coral for actions, active selection, warnings, and anomalies.
+- Screen 13 is the shared implementation reference for all shipped routes, including Spend, Source
+  Control, and Catalog which do not have standalone product artboards. It defines the persistent
+  desktop rail, active-work-plane hierarchy, and the semantic roles that must remain complete in
+  Fluent Dark, Fluent Light, and high-contrast modes. It supplements rather than replaces screens
+  1–12.

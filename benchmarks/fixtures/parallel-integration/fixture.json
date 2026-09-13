@@ -1,0 +1,1 @@
+{"schemaVersion":1,"name":"parallel-integration","runtime":"node","lockfile":"pnpm-lock.yaml","acceptance":"pnpm test","browser":null}

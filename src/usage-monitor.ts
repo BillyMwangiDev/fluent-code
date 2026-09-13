@@ -1,6 +1,6 @@
-import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
 import type {ProviderId, ProviderQuota, QuotaWindow, UsageSnapshot} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 type Point = {capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number};
 type SessionUsage = {sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Point[]};
@@ -38,7 +38,11 @@ export class UsageMonitor {
   private stateFile: string;
   constructor(stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent')) { this.stateFile = join(stateDirectory, 'usage.json'); }
   async restore() {
-    try { for (const item of JSON.parse(await readFile(this.stateFile, 'utf8')) as SessionUsage[]) this.sessions.set(item.sessionId, item); }
+    try {
+      const stored = await readPrivateJson<SessionUsage[]>(this.stateFile);
+      if (!stored) return;
+      for (const item of stored) this.sessions.set(item.sessionId, item);
+    }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
   snapshot(): UsageSnapshot { return {sessions: [...this.sessions.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))}; }
@@ -80,6 +84,6 @@ export class UsageMonitor {
     await this.persist();
   }
 
-  private async persist() { await mkdir(dirname(this.stateFile), {recursive: true}); const temporary = `${this.stateFile}.tmp`; await writeFile(temporary, JSON.stringify([...this.sessions.values()], null, 2)); await rename(temporary, this.stateFile); }
+  private async persist() { await writePrivateJson(this.stateFile, [...this.sessions.values()]); }
 }
 function epoch(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? new Date(value * 1000).toISOString() : undefined; }

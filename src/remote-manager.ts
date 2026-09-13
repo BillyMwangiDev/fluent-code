@@ -1,10 +1,11 @@
 import {spawn, type ChildProcess} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
-import {mkdir, readFile, rename, unlink, writeFile} from 'node:fs/promises';
+import {unlink} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {connect} from 'node:net';
 import type {RemoteProfile} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 export class RemoteManager {
   private profiles: RemoteProfile[] = [];
@@ -15,7 +16,7 @@ export class RemoteManager {
     this.stateFile = join(stateDirectory, 'remotes.json');
   }
   async restore() {
-    try { this.profiles = JSON.parse(await readFile(this.stateFile, 'utf8')) as RemoteProfile[]; }
+    try { this.profiles = await readPrivateJson<RemoteProfile[]>(this.stateFile) ?? []; }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     this.profiles = this.profiles.map(profile => ({...profile, status: 'disconnected', error: undefined}));
   }
@@ -74,7 +75,6 @@ export class RemoteManager {
     return false;
   }
   private async persist() {
-    await mkdir(dirname(this.stateFile), {recursive: true});
-    const temporary = `${this.stateFile}.tmp`; await writeFile(temporary, JSON.stringify(this.profiles, null, 2)); await rename(temporary, this.stateFile);
+    await writePrivateJson(this.stateFile, this.profiles);
   }
 }

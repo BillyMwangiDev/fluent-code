@@ -3,7 +3,7 @@ import {mkdtemp, readFile, rm, writeFile, mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {after, describe, it} from 'node:test';
-import {installSkill, skillContent, skillStatus, skillTargets} from './collab-skill.js';
+import {collaborationMcpAddArgs, coordinationMcpName, installSkill, skillContent, skillStatus, skillTargets} from './collab-skill.js';
 
 const directories: string[] = [];
 
@@ -18,12 +18,13 @@ after(async () => {
 });
 
 describe('where the skill goes', () => {
-  it('targets both providers\' user-scope skill directories', async () => {
+  it('targets every supported provider\'s user-scope skill directory', async () => {
     const targets = skillTargets('/home/dev');
 
     assert.deepEqual(targets, [
       {provider: 'claude', path: '/home/dev/.claude/skills/fluent-collab/SKILL.md'},
-      {provider: 'codex', path: '/home/dev/.codex/skills/fluent-collab/SKILL.md'}
+      {provider: 'codex', path: '/home/dev/.codex/skills/fluent-collab/SKILL.md'},
+      {provider: 'gemini', path: '/home/dev/.gemini/skills/fluent-collab/SKILL.md'}
     ]);
   });
 
@@ -48,7 +49,7 @@ describe('what the skill says', () => {
     const [, frontmatter] = skillContent('fluent-coord').split('---');
 
     assert.match(frontmatter!, /other AI coding agents working on this same repository/);
-    assert.match(frontmatter!, /Claude Code, Codex/);
+    assert.match(frontmatter!, /Claude Code, Codex, Gemini CLI/);
   });
 
   it('teaches the command it was generated for, not a hardcoded name', () => {
@@ -81,7 +82,7 @@ describe('installing it', () => {
 
     const written = await installSkill(root);
 
-    assert.equal(written.length, 2);
+    assert.equal(written.length, 3);
     for (const target of skillTargets(root)) {
       assert.equal(await readFile(target.path, 'utf8'), skillContent());
     }
@@ -89,10 +90,10 @@ describe('installing it', () => {
 
   it('reports what is missing, stale, and current', async () => {
     const root = await home();
-    assert.deepEqual((await skillStatus(root)).map(state => state.installed), [false, false]);
+    assert.deepEqual((await skillStatus(root)).map(state => state.installed), [false, false, false]);
 
     await installSkill(root);
-    assert.deepEqual((await skillStatus(root)).map(state => [state.installed, state.current]), [[true, true], [true, true]]);
+    assert.deepEqual((await skillStatus(root)).map(state => [state.installed, state.current]), [[true, true], [true, true], [true, true]]);
 
     await writeFile(skillTargets(root)[0]!.path, 'an older version\n');
     const stale = await skillStatus(root);
@@ -107,7 +108,7 @@ describe('installing it', () => {
 
     await installSkill(root);
 
-    assert.deepEqual((await skillStatus(root)).map(state => state.current), [true, true]);
+    assert.deepEqual((await skillStatus(root)).map(state => state.current), [true, true, true]);
   });
 
   it('leaves the user\'s own skills alone', async () => {
@@ -119,5 +120,13 @@ describe('installing it', () => {
     await installSkill(root);
 
     assert.equal(await readFile(mine, 'utf8'), 'mine\n');
+  });
+});
+
+describe('the portable MCP registration', () => {
+  it('uses each runtime CLI and keeps the registration in user scope where the host supports it', () => {
+    assert.deepEqual(collaborationMcpAddArgs('claude').slice(0, 5), ['mcp', 'add', '--scope', 'user', coordinationMcpName]);
+    assert.deepEqual(collaborationMcpAddArgs('gemini').slice(0, 5), ['mcp', 'add', '--scope', 'user', coordinationMcpName]);
+    assert.deepEqual(collaborationMcpAddArgs('codex').slice(0, 3), ['mcp', 'add', coordinationMcpName]);
   });
 });

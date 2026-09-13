@@ -48,6 +48,9 @@ out of scope; see the spec's Non-goals section.
   subscription and platform credits are *both* OAuth logins (`--claudeai` vs `--console`), so they
   are told apart by `CLAUDE_CONFIG_DIR`, not by an env var. Only subscription is proven end to end;
   the doc lists what to check when credits or a key arrive.
+- [`cloud.md`](./cloud.md) — the local runtime, state locations, socket permissions, and the
+  constrained SSH-tunnel remote path. Read it before changing network, socket, or persistence
+  behavior.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
   prototype (spec §7.4) — port their RPC wiring to the Tauri frontend, not their JSX.

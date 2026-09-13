@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "local-control-plane-v1",
+  "fixture": "control-plane",
+  "provider": "none",
+  "cachePolicy": "not-applicable",
+  "startClock": "local-process-entry",
+  "endClock": "local-process-complete",
+  "acceptanceEvaluator": "JSON round-trip",
+  "publication": "local-only"
+}

@@ -1,5 +1,5 @@
-import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
@@ -21,7 +21,8 @@ export class OpenDesignManager {
 
   async restore() {
     try {
-      const parsed = JSON.parse(await readFile(this.stateFile, 'utf8')) as Partial<OpenDesignProfile>;
+      const parsed = await readPrivateJson<Partial<OpenDesignProfile>>(this.stateFile);
+      if (!parsed) return;
       if (parsed.url) this.profile = {url: normalizeLocalUrl(parsed.url)};
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -32,10 +33,7 @@ export class OpenDesignManager {
 
   async save(url: string) {
     this.profile = {url: normalizeLocalUrl(url)};
-    await mkdir(dirname(this.stateFile), {recursive: true});
-    const temporary = `${this.stateFile}.tmp`;
-    await writeFile(temporary, JSON.stringify(this.profile, null, 2));
-    await rename(temporary, this.stateFile);
+    await writePrivateJson(this.stateFile, this.profile);
     return this.get();
   }
 

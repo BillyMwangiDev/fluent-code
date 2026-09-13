@@ -1,7 +1,8 @@
 import {randomUUID} from 'node:crypto';
-import {mkdir, readFile, rename, writeFile} from 'node:fs/promises';
+import {realpathSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import type {ClaimConflict, ClaimResult, CoordinationState, FileClaim, LaneMessage} from './daemon-protocol.js';
+import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 /**
  * How long a claim survives without its lane renewing it. A claim is a *signal of intent*, never
@@ -48,7 +49,8 @@ export class CoordinationManager {
 
   async restore() {
     try {
-      const parsed = JSON.parse(await readFile(this.stateFile, 'utf8')) as CoordinationState[];
+      const parsed = await readPrivateJson<CoordinationState[]>(this.stateFile);
+      if (!parsed) return;
       for (const state of parsed) {
         // Claims written before leases existed carry no expiry. Give them one starting now rather
         // than dropping them: a restored claim from a lane that is still running gets renewed on
@@ -60,6 +62,7 @@ export class CoordinationManager {
           expiresAt: claim.expiresAt ?? new Date(Date.now() + claimLeaseMs).toISOString()
         }));
         state.messages ??= [];
+        state.project = this.canonicalProject(state.project);
         this.states.set(state.project, state);
       }
     } catch (error: unknown) {
@@ -306,20 +309,23 @@ export class CoordinationManager {
   }
 
   private ensure(project: string) {
-    let state = this.states.get(project);
+    const canonicalProject = this.canonicalProject(project);
+    let state = this.states.get(canonicalProject);
     if (!state) {
-      state = {project, tasks: [], claims: [], decisions: [], handoffs: [], messages: []};
-      this.states.set(project, state);
+      state = {project: canonicalProject, tasks: [], claims: [], decisions: [], handoffs: [], messages: []};
+      this.states.set(canonicalProject, state);
     }
     return state;
   }
 
+  /** `/var` and `/private/var` name the same macOS worktree. State must not fork by spelling. */
+  private canonicalProject(project: string) {
+    try { return realpathSync.native(project); } catch { return project; }
+  }
+
   private async persist() {
     const run = this.queue.then(async () => {
-      await mkdir(dirname(this.stateFile), {recursive: true});
-      const temporary = `${this.stateFile}.tmp`;
-      await writeFile(temporary, JSON.stringify([...this.states.values()], null, 2));
-      await rename(temporary, this.stateFile);
+      await writePrivateJson(this.stateFile, [...this.states.values()]);
     });
     this.queue = run.catch(() => undefined);
     return run;

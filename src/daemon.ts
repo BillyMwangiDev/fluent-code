@@ -1,6 +1,7 @@
 import {createServer, type Socket} from 'node:net';
 import {chmod, unlink} from 'node:fs/promises';
-import {daemonSocketPath, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
+import {join} from 'node:path';
+import {daemonSocketPath, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
 import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
 import {HardwareMonitor} from './hardware-monitor.js';
@@ -13,18 +14,21 @@ import {ResourceMonitorClient} from './resource-monitor-client.js';
 import {SpendTracker} from './spend-tracker.js';
 import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
-import {VerificationRunner} from './verification.js';
+import {VerificationRunner, discoverCommand} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
 import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
 import {renderAgentView, renderClaimResult, renderInbox, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
 import {AdmissionAdvisor} from './admission.js';
-import {installSkill, skillStatus} from './collab-skill.js';
+import {collaborationStatus, installCollaboration} from './collab-skill.js';
 import {EvalRunner, planEvals} from './eval-runner.js';
 import * as sourceControl from './source-control.js';
 import * as catalog from './catalog-manager.js';
+import {ApprovalRecords, type ApprovalAction} from './security/approval-records.js';
+import {RunEventBus} from './execution/event-bus.js';
 
 const socketPath = daemonSocketPath();
+const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
 const manager = new SessionManager();
 const broker = new CredentialBroker();
 const hardware = new HardwareMonitor();
@@ -43,12 +47,15 @@ const merges = new MergeQueue(verification);
 const codexChannels = new Map<string, CodexAppServer>();
 const admission = new AdmissionAdvisor();
 const evals = new EvalRunner();
+const approvals = new ApprovalRecords(stateDirectory);
+const runEvents = new RunEventBus(manager.runStore);
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
 // RpcEvents. A plain one-shot request/response socket (ping, sessions.list, ...) must never see
 // one interleaved with its reply — that was a real bug caught by the daemon smoke test.
 const streamingSockets = new Set<Socket>();
 const sessionSubscribers = new Map<string, Set<Socket>>();
+const runSubscribers = new Map<Socket, string>();
 
 function reply(socket: Socket, response: RpcResponse) {
   socket.write(`${JSON.stringify(response)}\n`);
@@ -73,6 +80,24 @@ function unsubscribe(socket: Socket, sessionId?: string) {
     return;
   }
   for (const subscribers of sessionSubscribers.values()) subscribers.delete(socket);
+}
+
+function unsubscribeRun(socket: Socket) {
+  const subscription = runSubscribers.get(socket);
+  if (subscription) runEvents.unsubscribe(subscription);
+  runSubscribers.delete(socket);
+}
+
+function subscribeRun(socket: Socket, runId: string, afterSequence?: number) {
+  unsubscribeRun(socket);
+  const subscription = runEvents.subscribe(runId, afterSequence, delivery => {
+    const event: RpcEvent = delivery.kind === 'event'
+      ? {event: 'runs.event', runId, data: delivery.event}
+      : {event: 'runs.resync_required', runId, from: delivery.from, snapshot: delivery.snapshot, terminalGap: delivery.terminalGap};
+    return socket.write(`${JSON.stringify(event)}\n`);
+  }, true);
+  runSubscribers.set(socket, subscription);
+  socket.on('drain', () => runEvents.resume(subscription));
 }
 
 manager.on('output', (sessionId: string, chunk: string) => {
@@ -104,9 +129,10 @@ manager.on('status', (sessionId: string, summary) => {
   // checkout is deliberately left alone: running their suite unprompted in their working tree is
   // intrusive in a way it is not in a lane opened for one task.
   if (summary.status === 'exited' && summary.worktreePath && summary.verification !== 'running') {
-    void verifySession(sessionId).catch(error => console.error(`fluentd could not verify ${sessionId}: ${error.message}`));
+    void verifySession(sessionId, false, undefined, true).catch(error => console.error(`fluentd could not verify ${sessionId}: ${error.message}`));
   }
 });
+manager.runStore.on('event', event => runEvents.publish(event));
 broker.on('switched', (provider, accountId, reason) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
 });
@@ -118,8 +144,16 @@ broker.on('notice', (provider, message, resetAt, guidance) => {
  * Runs the lane's project against its own checks and records the result on the session, so what
  * the session list shows is a check that ran rather than the agent's account of its own work.
  */
-async function verifySession(sessionId: string, force = false) {
+async function verifySession(sessionId: string, force = false, approvalId?: string, automatic = false) {
   const session = manager.get(sessionId);
+  const command = await discoverCommand(session.directory, verification.commandFor(session.projectDirectory ?? session.directory));
+  if (!automatic) await approvals.consume({
+    id: approvalId,
+    action: 'recipe.execute',
+    target: session.directory,
+    command: command?.command
+  });
+  await manager.beginVerification(sessionId);
   manager.setVerification(sessionId, 'running');
   const result = await verification.verify({
     sessionId,
@@ -128,6 +162,7 @@ async function verifySession(sessionId: string, force = false) {
     force
   });
   manager.setVerification(sessionId, result.status);
+  if (result.status !== 'running') await manager.finishVerification(sessionId, result.status);
   for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.verification', sessionId, result});
   return result;
 }
@@ -138,10 +173,17 @@ async function verifySession(sessionId: string, force = false) {
  * be planned against.
  */
 async function integrateSession(sessionId: string) {
-  const outcome = await merges.integrate(manager.get(sessionId), id => manager.get(id));
+  const session = manager.get(sessionId);
+  await manager.beginIntegration(sessionId);
+  const outcome = await merges.integrate(session, id => manager.get(id));
   if (outcome.status === 'merged') manager.setVerification(sessionId, outcome.verification?.status);
+  await manager.finishIntegration(sessionId, outcome.status === 'merged' ? 'merged' : outcome.status === 'failed' ? 'failed' : 'blocked');
   for (const socket of streamingSockets) pushEvent(socket, {event: 'merge.outcome', outcome});
   return outcome;
+}
+
+async function requireApproval(id: string | undefined, action: ApprovalAction, target: string, command?: string, baseSha?: string) {
+  return approvals.consume({id, action, target, command, baseSha});
 }
 
 /**
@@ -234,7 +276,7 @@ function observableLanes(): Lane[] {
  * provider reported most recently — quota belongs to the account, not to the lane, so any lane's
  * report is the account's state.
  */
-function assessAdmission(provider: 'claude' | 'codex', accountId?: string) {
+function assessAdmission(provider: ProviderId, accountId?: string) {
   const hardwareSample = hardware.snapshot().current;
   const lanes = manager.list().filter(session => session.status === 'running' || session.status === 'starting');
   const reporting = usage.snapshot().sessions.find(session => session.provider === provider && session.quota);
@@ -326,7 +368,7 @@ async function agentClaim(cwd: string, paths: string[]) {
 
 /** Sessions still holding a credential for this provider — they keep the one they started with,
  * which is precisely why a switch is not the rescue it looks like. */
-function activeSessionCount(provider: 'claude' | 'codex') {
+function activeSessionCount(provider: ProviderId) {
   return manager.list().filter(session => session.provider === provider && (session.status === 'running' || session.status === 'starting')).length;
 }
 
@@ -364,21 +406,42 @@ async function dispatch(request: RpcRequest) {
   switch (request.method) {
     case 'ping': return {ok: true, pid: process.pid};
     case 'sessions.list': return manager.list();
-    case 'sessions.create': return manager.create({
-      ...request.params,
-      env: await broker.resolveEnv(request.params.provider, request.params.accountId),
-      accountId: request.params.accountId ?? broker.list().find(state => state.provider === request.params.provider)?.activeAccountId
-    });
+    case 'sessions.create': {
+      // Claude's additive hook relay writes `.claude/settings.json` in the selected project.
+      // Creating a terminal is user-initiated, but that project configuration write still needs a
+      // daemon-issued, action-bound consent record rather than a frontend-only affordance.
+      if (request.params.provider === 'claude') {
+        await requireApproval(request.params.approvalId, 'project.configure', request.params.directory, 'configure Claude hooks');
+      }
+      return manager.create({
+        ...request.params,
+        env: await broker.resolveEnv(request.params.provider, request.params.accountId),
+        accountId: request.params.accountId ?? broker.list().find(state => state.provider === request.params.provider)?.activeAccountId
+      });
+    }
     case 'sessions.get': return manager.get(request.params.sessionId);
     case 'sessions.send': await manager.send(request.params.sessionId, request.params.input); return {sent: true};
     case 'sessions.stop': return manager.stop(request.params.sessionId);
-    case 'sessions.removeWorktree': return manager.removeWorktree(request.params.sessionId);
+    case 'sessions.removeWorktree': {
+      const session = manager.get(request.params.sessionId);
+      await requireApproval(request.params.approvalId, 'worktree.remove', session.worktreePath ?? session.directory, 'git worktree remove');
+      return manager.removeWorktree(request.params.sessionId);
+    }
     case 'sessions.diff': return manager.diff(request.params.sessionId);
-    case 'sessions.verify': return verifySession(request.params.sessionId, request.params.force ?? true);
+    case 'sessions.verify': return verifySession(request.params.sessionId, request.params.force ?? true, request.params.approvalId);
     case 'verification.list': return verification.list();
-    case 'verification.setCommand': return {command: await verification.setCommand(request.params.project, request.params.command)};
+    case 'verification.plan': return discoverCommand(request.params.directory, verification.commandFor(request.params.project ?? request.params.directory));
+    case 'verification.setCommand': {
+      await requireApproval(request.params.approvalId, 'project.configure', request.params.project, request.params.command);
+      return {command: await verification.setCommand(request.params.project, request.params.command)};
+    }
     case 'merge.plan': return merges.plan(manager.get(request.params.sessionId));
-    case 'merge.integrate': return integrateSession(request.params.sessionId);
+    case 'merge.integrate': {
+      const session = manager.get(request.params.sessionId);
+      const plan = await merges.plan(session);
+      await requireApproval(request.params.approvalId, 'integration.merge', session.projectDirectory ?? session.directory, `git merge ${session.id}`, plan.baseHead);
+      return integrateSession(request.params.sessionId);
+    }
     case 'merge.pending': return merges.pending(request.params.project);
     case 'agent.status': return agentStatus(request.params.cwd, request.params.since);
     case 'agent.claim': return agentClaim(request.params.cwd, request.params.paths);
@@ -419,8 +482,11 @@ async function dispatch(request: RpcRequest) {
       const {session, project} = laneFor(request.params.cwd);
       return {text: renderInbox(await coordination.inbox(project, session.id, {peek: request.params.peek}))};
     }
-    case 'skills.status': return skillStatus();
-    case 'skills.install': return installSkill();
+    case 'skills.status': return collaborationStatus();
+    case 'skills.install': {
+      await requireApproval(request.params?.approvalId, 'extension.install', 'fluent-collab', 'install collaboration skill');
+      return installCollaboration();
+    }
     case 'evals.latest': return {run: evals.last(), running: evals.isRunning()};
     case 'evals.readiness': {
       // The UI needs to ask for consent in the currency the active credential is actually spent in.
@@ -442,6 +508,7 @@ async function dispatch(request: RpcRequest) {
       // Never automatic: every case spawns real agent runs on the user's own credential.
       // Run the evaluator on the credential Fluent says is active, not on whatever `claude` itself
       // happens to be logged into — otherwise the app names one account and the run bills another.
+      await requireApproval(request.params.approvalId, 'recipe.execute', 'fluent-evals', `claude plugin eval max-cost=${request.params.maxCostUsd ?? 'default'}`);
       const result = await evals.run({
         maxCostUsd: request.params.maxCostUsd,
         caseGlob: request.params.caseGlob,
@@ -472,11 +539,24 @@ async function dispatch(request: RpcRequest) {
     case 'sourceControl.assignedIssues': return sourceControl.assignedIssues();
     case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
     case 'catalog.plugins': return catalog.allPlugins();
-    case 'catalog.installPlugin': return catalog.installPlugin(request.params.target, request.params.pluginId);
+    case 'catalog.installPlugin': {
+      await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.pluginId}`, `plugin install ${request.params.pluginId}`);
+      return catalog.installPlugin(request.params.target, request.params.pluginId);
+    }
     case 'catalog.marketplaces': return catalog.claudeMarketplaceList();
-    case 'catalog.addMarketplace': return catalog.addMarketplace(request.params.target, request.params.source);
+    case 'catalog.addMarketplace': {
+      await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.source}`, `marketplace add ${request.params.source}`);
+      return catalog.addMarketplace(request.params.target, request.params.source);
+    }
     case 'catalog.mcpServers': return catalog.mcpServers();
-    case 'catalog.addMcpServer': return catalog.addMcpServer(request.params.target, request.params.name, request.params.commandOrUrl);
+    case 'catalog.addMcpServer': {
+      const target = `mcp:${[...new Set(request.params.targets)].sort().join(',')}:${request.params.config.name}`;
+      const command = request.params.config.transport === 'stdio'
+        ? [request.params.config.command, ...(request.params.config.args ?? [])].filter(Boolean).join(' ')
+        : request.params.config.url;
+      await requireApproval(request.params.approvalId, 'extension.install', target, command);
+      return catalog.addMcpServerToTargets(request.params.targets, request.params.config);
+    }
     case 'providers.list': return providerHealth();
     case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);
@@ -491,24 +571,45 @@ async function dispatch(request: RpcRequest) {
     case 'coordination.handoff.create': return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
     case 'coordination.handoff.accept': return coordination.acceptHandoff(request.params.project, request.params.handoffId);
     case 'remote.list': return remotes.list();
-    case 'remote.save': return remotes.save(request.params);
-    case 'remote.connect': return remotes.connect(request.params.profileId);
+    case 'remote.save': {
+      await requireApproval(request.params.approvalId, 'remote.configure', `${request.params.host}:${request.params.port ?? 22}`, request.params.remoteSocket);
+      return remotes.save(request.params);
+    }
+    case 'remote.connect': {
+      await requireApproval(request.params.approvalId, 'remote.connect', request.params.profileId, 'ssh forward');
+      return remotes.connect(request.params.profileId);
+    }
     case 'remote.disconnect': return remotes.disconnect(request.params.profileId);
     case 'openDesign.get': return openDesign.get();
     case 'openDesign.save': return openDesign.save(request.params.url);
     case 'openDesign.status': return openDesign.status();
     case 'designTools.list': return designTools.list();
-    case 'designTools.installOpenDesignMcp': return designTools.installOpenDesignMcp(request.params.target);
+    case 'designTools.installOpenDesignMcp': {
+      await requireApproval(request.params.approvalId, 'extension.install', `open-design:${request.params.target}`, 'install OpenDesign MCP');
+      return designTools.installOpenDesignMcp(request.params.target);
+    }
     case 'credentials.list': return broker.list();
-    case 'credentials.upsertAccount': return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl);
-    case 'credentials.setChain': return broker.setChain(request.params.provider, request.params.accountIds);
-    case 'credentials.setFallbackPolicy': return broker.setFallbackPolicy(request.params.provider, request.params.policy);
+    case 'credentials.upsertAccount': {
+      await requireApproval(request.params.approvalId, 'credential.change', `${request.params.provider}:${request.params.id}`, `credential ${request.params.mode}`);
+      return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl);
+    }
+    case 'credentials.setChain': {
+      await requireApproval(request.params.approvalId, 'credential.change', request.params.provider, `chain ${request.params.accountIds.join(',')}`);
+      return broker.setChain(request.params.provider, request.params.accountIds);
+    }
+    case 'credentials.setFallbackPolicy': {
+      await requireApproval(request.params.approvalId, 'credential.change', request.params.provider, `fallback ${request.params.policy}`);
+      return broker.setFallbackPolicy(request.params.provider, request.params.policy);
+    }
     case 'credentials.confirmFallback': return broker.confirmFallback(request.params.provider, request.params.accept, {resetAt: request.params.resetAt});
     case 'credentials.guidance': return broker.guidance(request.params.provider, {activeSessions: activeSessionCount(request.params.provider)});
     case 'credentials.authStatus': return broker.authStatus('claude');
     case 'hooks.report': return handleHookReport(request.params);
+    case 'approvals.issue': return approvals.issue(request.params);
     // sessions.subscribe/unsubscribe/stream.open are handled before dispatch (need the socket).
-    case 'sessions.subscribe': case 'sessions.unsubscribe': case 'stream.open': throw new Error(`${request.method} must not reach dispatch`);
+    case 'sessions.subscribe': case 'sessions.unsubscribe': case 'runs.subscribe': case 'runs.unsubscribe': case 'stream.open': throw new Error(`${request.method} must not reach dispatch`);
+    case 'runs.list': return manager.runStore.list();
+    case 'runs.get': return manager.runStore.get(request.params.runId);
   }
 }
 
@@ -522,6 +623,7 @@ async function main() {
   await openDesign.restore();
   await verification.restore();
   await evals.restore();
+  await approvals.restore();
   resources.start(process.pid);
   hardware.start();
   // Half the lease, so a live lane is always renewed well before its claims could lapse.
@@ -546,6 +648,7 @@ async function main() {
     socket.on('close', () => {
       streamingSockets.delete(socket);
       unsubscribe(socket);
+      unsubscribeRun(socket);
     });
 
     let buffer = '';
@@ -566,6 +669,20 @@ async function main() {
           }
           if (request.method === 'sessions.unsubscribe') {
             unsubscribe(socket, request.params.sessionId);
+            reply(socket, {id: request.id, ok: true, result: {unsubscribed: true}});
+            continue;
+          }
+          if (request.method === 'runs.subscribe') {
+            const page = manager.runStore.eventsSince(request.params.runId, request.params.afterSequence);
+            // Subscribe before acknowledging but defer event delivery until after this write. Since
+            // Node processes this request synchronously, events after `page` are then delivered
+            // strictly after the snapshot/cursor receipt — no reconnect window is guessed at.
+            subscribeRun(socket, request.params.runId, page.events.at(-1)?.sequence ?? request.params.afterSequence);
+            reply(socket, {id: request.id, ok: true, result: {snapshot: manager.runStore.get(request.params.runId), ...page}});
+            continue;
+          }
+          if (request.method === 'runs.unsubscribe') {
+            unsubscribeRun(socket);
             reply(socket, {id: request.id, ok: true, result: {unsubscribed: true}});
             continue;
           }
