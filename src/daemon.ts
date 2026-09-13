@@ -591,7 +591,7 @@ async function dispatch(request: RpcRequest) {
     case 'credentials.list': return broker.list();
     case 'credentials.upsertAccount': {
       await requireApproval(request.params.approvalId, 'credential.change', `${request.params.provider}:${request.params.id}`, `credential ${request.params.mode}`);
-      return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl);
+      return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl, request.params.sameIdentityAs);
     }
     case 'credentials.setChain': {
       await requireApproval(request.params.approvalId, 'credential.change', request.params.provider, `chain ${request.params.accountIds.join(',')}`);

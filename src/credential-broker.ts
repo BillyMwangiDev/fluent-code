@@ -1,4 +1,5 @@
 import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
 import {dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -199,7 +200,7 @@ export class CredentialBroker extends EventEmitter {
     return state;
   }
 
-  async upsertAccount(provider: ProviderId, id: string, mode: CredentialMode, label: string, apiKey?: string, baseUrl?: string) {
+  async upsertAccount(provider: ProviderId, id: string, mode: CredentialMode, label: string, apiKey?: string, baseUrl?: string, sameIdentityAs?: string) {
     const state = this.ensure(provider);
     const existing = state.accounts.findIndex(candidate => candidate.id === id);
     const previous = existing >= 0 ? state.accounts[existing] : undefined;
@@ -210,6 +211,7 @@ export class CredentialBroker extends EventEmitter {
       provider,
       mode,
       label,
+      identityId: this.resolveIdentity(state, mode, previous, sameIdentityAs),
       baseUrl,
       hasSecret: mode === 'api-key' ? Boolean(apiKey) || previous?.hasSecret : undefined
     };
@@ -219,6 +221,25 @@ export class CredentialBroker extends EventEmitter {
     this.recomputeActive(state);
     await this.persist();
     return this.publicState(state);
+  }
+
+  /**
+   * Which login a credential belongs to. Editing an existing account never moves it to a
+   * different login. A new account joins an explicitly named one (`sameIdentityAs`) when given,
+   * otherwise defaults to the provider's sole existing identity — *except* a second
+   * subscription-mode credential, which structurally cannot be the same OAuth login as an
+   * existing one, and except when more than one identity already exists and the caller didn't say
+   * which — both get a fresh identity rather than a guess (spec §2.2).
+   */
+  private resolveIdentity(state: ProviderState, mode: CredentialMode, previous: CredentialAccount | undefined, sameIdentityAs?: string): string {
+    if (previous) return previous.identityId;
+    if (sameIdentityAs) {
+      const match = state.accounts.find(account => account.id === sameIdentityAs);
+      if (match) return match.identityId;
+    }
+    const identities = new Set(state.accounts.map(account => account.identityId));
+    if (mode !== 'subscription' && identities.size === 1) return [...identities][0]!;
+    return randomUUID();
   }
 
   async setChain(provider: ProviderId, accountIds: string[]) {

@@ -257,3 +257,50 @@ describe('usage limits', () => {
     assert.ok(captured[0]!.guidance, 'the advice is still worth showing even when nothing will act on it');
   });
 });
+
+describe('account identity', () => {
+  it('gives the first two credentials on a provider the same identity by default', async () => {
+    const instance = await broker();
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+
+    assert.ok(byId['work-sub']!.identityId, 'a real account must get a real identityId, not undefined');
+    assert.equal(byId['work-sub']!.identityId, byId['work-credits']!.identityId, 'a subscription and its own platform credits are one login');
+  });
+
+  it('gives a second subscription-mode credential a new identity by default', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription');
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+
+    assert.notEqual(byId['personal-sub']!.identityId, byId['work-sub']!.identityId, 'a second subscription cannot be the same login as the first');
+  });
+
+  it('honours an explicit sameIdentityAs even for a second subscription', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'linked-sub', 'subscription', 'linked', undefined, undefined, 'work-sub');
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+
+    assert.ok(byId['linked-sub']!.identityId, 'a real account must get a real identityId, not undefined');
+    assert.equal(byId['linked-sub']!.identityId, byId['work-sub']!.identityId);
+  });
+
+  it('defaults an ambiguous new credential to a fresh identity rather than guessing', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription');
+    // Two identities now exist (work-*, personal-sub). A third, untagged credential must not
+    // silently pick one of them.
+    await instance.upsertAccount('claude', 'mystery-key', 'api-key', 'mystery', 'sk-ant-test');
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+
+    assert.notEqual(byId['mystery-key']!.identityId, byId['work-sub']!.identityId);
+    assert.notEqual(byId['mystery-key']!.identityId, byId['personal-sub']!.identityId);
+  });
+});

@@ -324,7 +324,7 @@ export type RpcRequest =
   | {id: string; method: 'designTools.list'}
   | {id: string; method: 'designTools.installOpenDesignMcp'; params: {target: McpTarget; approvalId?: string}}
   | {id: string; method: 'credentials.list'}
-  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; approvalId?: string}}
+  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; sameIdentityAs?: string; approvalId?: string}}
   | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]; approvalId?: string}}
   | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy; approvalId?: string}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
@@ -391,6 +391,14 @@ export type CredentialAccount = {
   provider: ProviderId;
   mode: CredentialMode;
   label: string;
+  /**
+   * Groups credentials that belong to one real login, at the granularity the provider's own CLI
+   * uses (what `CLAUDE_CONFIG_DIR`/its equivalent actually isolates) — not "one human," since one
+   * person can deliberately hold two logins. Automatic fallback (setChain/fallbackPolicy) only
+   * ever moves within one identityId; moving work to a different one is always a manual, explicit
+   * action (docs/superpowers/specs/2026-09-13-account-identity-safety-design.md §2).
+   */
+  identityId: string;
   /** API key material is held in the operating system credential store, never in Fluent state. */
   hasSecret?: boolean;
   baseUrl?: string;
