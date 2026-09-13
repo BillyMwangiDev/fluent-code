@@ -1,7 +1,7 @@
 # Agent orchestration — research findings and recommendations
 
-Status: research complete. R2, R3, R4, R5, R6 and the Codex half of R1 are implemented; the rest
-are pending review.
+Status: research complete. R2, R3, R4, R5, R6, R7 and the Codex half of R1 are implemented; the
+rest are pending review.
 Implementation status is tracked per recommendation in the table below.
 Companion docs: [the design spec](../superpowers/specs/2026-09-13-fluent-code-design.md) (§§3, 7.5, 10, 11, 14 are
 the sections this report argues with), [`AGENTS.md`](../../AGENTS.md), [`CLAUDE.md`](../../CLAUDE.md).
@@ -47,7 +47,7 @@ Everything in the middle — the agent turn itself — is already excellent and 
 | R4 | Prompt-cache-aware credential switching | The credential broker, as specified, silently destroys the provider-side prefix cache | v1 | **done** |
 | R5 | Prewarmed lane pool + reflink/CoW worktrees | The single biggest wall-clock win available; target lane-ready < 1s | v2 | **CoW warming done**, lane-ready latency published; the warm pool remains |
 | R6 | Coordination state the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 | **done, as a CLI not an MCP server** — see the note below |
-| R7 | Admission scheduler over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 | not started |
+| R7 | Admission **advisory** over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 | **done, advisory only** — the queue was dropped, see below |
 | R8 | Race mode: heterogeneous best-of-N with a verifier | Only Fluent can run N across providers *and* credentials | v3 | not started (R3 supplies its verifier) |
 | R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 | not started |
 | R10 | OTel `gen_ai` semantic conventions for local traces | Makes the Usage Observatory a debugger, at no cost to local-first | v2 | not started |
@@ -549,6 +549,14 @@ in the MAST taxonomy is a whole category (task derailment, step repetition). Cod
 | **v2** | R5 (prewarm + CoW; the speed story) · R2 parts 1–3 (claims fix, derived claims, merge queue) · R7 (admission scheduler) · R10 (traces) · R11 (context packs) · R12 (checkpoints) |
 | **v3** | R6 (coordination MCP — pull the read path to v2 if the orchestrator screen slips) · R2 part 4 (build-conflict prediction) · R8 (race mode) · R9 (mailbox) |
 
+**Dropped while implementing: R7's queue.** The recommendation said "queue rather than block — a
+lane that can't start now starts automatically when headroom or quota returns," and called that the
+thing which makes it advisory rather than enforcement. It isn't: delaying a lane start *is*
+enforcement, and spec §2 principle 4, §10 and §13 all say resource intelligence stays advisory in
+v1 and that a hard scheduler is explicitly not a v1 commitment. So what shipped is the assessment
+and the advice; nothing refuses or delays a lane. The queue is a real option, but it is a change to
+a stated non-goal and belongs to a deliberate decision rather than to this one.
+
 **Changed while implementing: R6 shipped as a CLI, not an MCP server.** The recommendation said
 MCP because MCP is the tool layer of the stack (§2.6) and both CLIs consume it natively. Building
 it, a CLI turned out to be the better fit and the smaller change. Every coding agent already has a
@@ -572,10 +580,13 @@ boundary, never mid-turn." Reading the code, a credential switch cannot move a r
 all — env resolves once at spawn — so the real fix was disclosure of what a switch does and does
 not do, not timing.
 
-**Two open questions this research did not resolve**, both still live from spec §14: what
-"OpenRouter" means as a product concept, and the hardware-advisory thresholds (R7 proposes a shape,
-not tuned numbers). One question it *adds*: whether `usage.rate_limits` is present in the Codex
-version Fluent targets — check before the adapter leans on it.
+**Still open from spec §14:** what "OpenRouter" means as a product concept. The hardware-advisory
+thresholds are no longer undefined — R7 shipped a first pass (a default per-lane cost that the
+machine's own p90 replaces after three measured lanes, a reserve of max(2 GB, 12% of total), and
+quota as the second, differently failing kind of headroom) — but those numbers are a starting point
+and still need real-world tuning, exactly as §14 predicted. One question this research *adds*:
+whether `usage.rate_limits` is present in the Codex version Fluent targets — check before the
+adapter leans on it.
 
 **The metric to commit to.** "Fastest in the world" needs a definition or it is marketing. Propose
 two, both measurable locally and both surfaced in the product: **lane-ready latency** (p50/p95 from
