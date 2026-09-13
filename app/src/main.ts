@@ -113,6 +113,16 @@ function h<K extends keyof HTMLElementTagNameMap>(
   return element;
 }
 
+/** Lane-ready latency, shown per session rather than averaged away: this is the number the
+ * orchestrator's speed claim rests on, and a lane whose caches could not be warmed says so. */
+function laneReady(session: {prepareMs?: number; warmedPaths?: string[]; worktreePath?: string}) {
+  if (session.prepareMs === undefined) return session.worktreePath ? '—' : 'shared checkout';
+  const seconds = session.prepareMs / 1000;
+  const duration = seconds < 1 ? `${session.prepareMs}ms` : `${seconds.toFixed(1)}s`;
+  const warmed = session.warmedPaths ?? [];
+  return warmed.length > 0 ? `${duration} · warmed ${warmed.join(', ')}` : `${duration} · cold`;
+}
+
 function relativeTime(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
   const minutes = Math.round(diffMs / 60_000);
@@ -1098,7 +1108,7 @@ async function renderSessions(main: HTMLElement) {
 
   const table = h('table', {class: 'sessions'});
   table.append(
-    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checkout', 'last active'].map(label => h('th', {}, [label])))])
+    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checkout', 'ready in', 'last active'].map(label => h('th', {}, [label])))])
   );
   const tbody = h('tbody');
   for (const session of sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
@@ -1109,6 +1119,7 @@ async function renderSessions(main: HTMLElement) {
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
       h('td', {}, [session.worktreePath ? 'isolated' : 'shared']),
+      h('td', {}, [laneReady(session)]),
       h('td', {}, [relativeTime(session.updatedAt)])
     ]);
     row.addEventListener('click', () => navigate({name: 'active-session', sessionId: session.id}));

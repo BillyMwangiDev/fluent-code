@@ -22,6 +22,8 @@ export type SessionSummary = {
   accountId?: string;
   projectDirectory?: string;
   worktreePath?: string;
+  prepareMs?: number;
+  warmedPaths?: string[];
 };
 
 export type SessionSnapshot = SessionSummary & {output: string};

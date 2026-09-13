@@ -20,6 +20,12 @@ export type SessionSummary = {
   /** Original Git project when this session runs in an isolated worktree. */
   projectDirectory?: string;
   worktreePath?: string;
+  /** Lane-ready latency: how long preparing this session's isolated worktree actually took,
+   * including warming its caches. Measured so the orchestrator's speed claim stays falsifiable. */
+  prepareMs?: number;
+  /** Ignored cache directories reference-cloned into the worktree, empty when the filesystem
+   * cannot reflink — so a slow lane start is explainable rather than mysterious. */
+  warmedPaths?: string[];
 };
 
 export type SessionSnapshot = SessionSummary & {

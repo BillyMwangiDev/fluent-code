@@ -83,7 +83,9 @@ export class SessionManager extends EventEmitter {
       updatedAt: now,
       accountId,
       projectDirectory: worktree?.projectDirectory,
-      worktreePath: worktree?.path
+      worktreePath: worktree?.path,
+      prepareMs: worktree?.prepareMs,
+      warmedPaths: worktree?.warmedPaths
     };
     const session: LiveSession = {summary, output: '', directory: sessionDirectory};
     this.sessions.set(summary.id, session);
