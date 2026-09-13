@@ -1,7 +1,7 @@
 # Agent orchestration — research findings and recommendations
 
-Status: research complete. R2, R3, R4, R5, R6, R7 and the Codex half of R1 are implemented; the
-rest are pending review.
+Status: research complete. R2, R3, R4, R5, R6, R7, R9 and the Codex half of R1 are implemented;
+the rest are pending review.
 Implementation status is tracked per recommendation in the table below.
 Companion docs: [the design spec](../superpowers/specs/2026-09-13-fluent-code-design.md) (§§3, 7.5, 10, 11, 14 are
 the sections this report argues with), [`AGENTS.md`](../../AGENTS.md), [`CLAUDE.md`](../../CLAUDE.md).
@@ -49,7 +49,7 @@ Everything in the middle — the agent turn itself — is already excellent and 
 | R6 | Coordination state the lanes can actually read | Today it's a dashboard no agent can see; this makes it coordination | v3→pull to v2 | **done, as a CLI not an MCP server** — see the note below |
 | R7 | Admission **advisory** over RAM *and* quota headroom | Both inputs are already collected and thrown away | v2 | **done, advisory only** — the queue was dropped, see below |
 | R8 | Race mode: heterogeneous best-of-N with a verifier | Only Fluent can run N across providers *and* credentials | v3 | not started (R3 supplies its verifier) |
-| R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 | not started |
+| R9 | Durable ordered mailbox between lanes | MAST 2.4/2.5; fire-and-forget handoffs lose information | v3 | **done**, plus the `fluent-collab` skill that makes it work across providers |
 | R10 | OTel `gen_ai` semantic conventions for local traces | Makes the Usage Observatory a debugger, at no cost to local-first | v2 | not started |
 | R11 | Delta-injected, budgeted context packs per lane | Already specified in §11 — pull forward, because R6 makes it live | v2 | not started |
 | R12 | Per-turn git checkpoints on a lane ref | Makes R2, R3 and R8 retries safe; makes "undo that turn" a button | v2 | not started |
@@ -548,6 +548,16 @@ in the MAST taxonomy is a whole category (task derailment, step repetition). Cod
 | **v1** | R1 (structured channel; closes §14's Codex risk) · R3 (verification gate, single-lane) · R4 (cache-aware broker) |
 | **v2** | R5 (prewarm + CoW; the speed story) · R2 parts 1–3 (claims fix, derived claims, merge queue) · R7 (admission scheduler) · R10 (traces) · R11 (context packs) · R12 (checkpoints) |
 | **v3** | R6 (coordination MCP — pull the read path to v2 if the orchestrator screen slips) · R2 part 4 (build-conflict prediction) · R8 (race mode) · R9 (mailbox) |
+
+**Added while implementing: a skill, as the cross-provider briefing mechanism.** R6 shipped with a
+gap — Claude lanes learned about `fluent-coord` through `--append-system-prompt`, and Codex lanes
+learned nothing, because Codex has no confirmed equivalent flag. Skills turn out to be the
+mechanism both providers genuinely share: Claude Code reads `~/.claude/skills/<name>/SKILL.md` and
+Codex reads `~/.codex/skills/<name>/SKILL.md`, both paths confirmed against their own docs. So the
+`fluent-collab` skill teaches one protocol to every provider, and R9's mailbox is the thing it is
+mostly about. User scope rather than repo scope, so nothing Fluent writes ends up in the user's
+diff. This is also the answer to "can other providers' tools talk to Claude agents and vice versa":
+they can, because the protocol is a command rather than a provider feature.
 
 **Dropped while implementing: R7's queue.** The recommendation said "queue rather than block — a
 lane that can't start now starts automatically when headroom or quota returns," and called that the
