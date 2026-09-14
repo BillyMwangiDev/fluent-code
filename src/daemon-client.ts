@@ -171,7 +171,7 @@ export const daemonClient = {
   subscribeRun,
   openEventStream,
   listCredentials: () => request<CredentialChainState[]>('credentials.list'),
-  upsertAccount: (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string}) => request<CredentialChainState>('credentials.upsertAccount', params),
+  upsertAccount: (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; sameIdentityAs?: string}) => request<CredentialChainState>('credentials.upsertAccount', params),
   setCredentialChain: (provider: ProviderId, accountIds: string[]) => request<CredentialChainState>('credentials.setChain', {provider, accountIds}),
   setFallbackPolicy: (provider: ProviderId, policy: FallbackPolicy) => request<CredentialChainState>('credentials.setFallbackPolicy', {provider, policy}),
   confirmFallback: (provider: ProviderId, accept: boolean, resetAt?: string) => request<CredentialChainState>('credentials.confirmFallback', {provider, accept, resetAt})

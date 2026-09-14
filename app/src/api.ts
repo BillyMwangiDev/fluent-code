@@ -355,7 +355,7 @@ export const api = {
     return localDaemonRequest<{target: string; output: string}>('designTools.installOpenDesignMcp', {target, approvalId: approval.id});
   },
   listCredentials: () => daemonRequest<CredentialChainState[]>('credentials.list'),
-  upsertAccount: async (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string}) => {
+  upsertAccount: async (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; sameIdentityAs?: string}) => {
     const approval = await issueApproval('credential.change', `${params.provider}:${params.id}`, `credential ${params.mode}`);
     return daemonRequest<CredentialChainState>('credentials.upsertAccount', {...params, approvalId: approval.id});
   },
