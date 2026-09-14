@@ -55,18 +55,26 @@ export class CredentialBroker extends EventEmitter {
 
   async restore() {
     try {
-      const stored = await readPrivateJson<Array<CredentialChainState & {accounts: Array<CredentialAccount & {apiKey?: string}>}>>(this.stateFile);
+      const stored = await readPrivateJson<Array<CredentialChainState & {accounts: Array<CredentialAccount & {apiKey?: string; identityId?: string}>}>>(this.stateFile);
       if (!stored) return;
       let migrated = false;
       for (const state of stored) {
         const accounts: CredentialAccount[] = [];
+        // Every account stored before identityId existed was, by construction, one provider's
+        // one login — so one freshly-minted identity backfills all of them.
+        const legacyIdentityId = randomUUID();
         for (const account of state.accounts) {
           if (account.apiKey) {
             await this.secrets.set(account.provider, account.id, account.apiKey);
             migrated = true;
           }
+          if (!account.identityId) migrated = true;
           const {apiKey: _apiKey, ...safeAccount} = account;
-          accounts.push({...safeAccount, hasSecret: account.mode === 'api-key' ? Boolean(account.apiKey) || account.hasSecret : undefined});
+          accounts.push({
+            ...safeAccount,
+            identityId: account.identityId ?? legacyIdentityId,
+            hasSecret: account.mode === 'api-key' ? Boolean(account.apiKey) || account.hasSecret : undefined
+          });
         }
         this.providers.set(state.provider, {...state, accounts});
         if (state.revertAt) this.scheduleRevert(state.provider, new Date(state.revertAt).getTime() - Date.now());

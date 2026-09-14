@@ -5,6 +5,7 @@ import {after, describe, it} from 'node:test';
 import {CredentialBroker} from './credential-broker.js';
 import {join} from 'node:path';
 import type {FallbackGuidance, FallbackPolicy} from './daemon-protocol.js';
+import {writePrivateJson} from './security/secure-state.js';
 
 // The OS keyring is not available in every environment a test runs in (headless CI, containers).
 // The store already has an in-memory mode for exactly this; the key material below is fake.
@@ -347,5 +348,51 @@ describe('credential chains stay within one identity', () => {
 
     [state] = instance.list().filter(entry => entry.provider === 'claude');
     assert.deepEqual(state!.chain, ['work-sub', 'work-credits'], 're-upsert of different-identity account must not rejoin chain');
+  });
+});
+
+describe('migrating state written before identityId existed', () => {
+  it('backfills one identity per provider for every pre-existing account', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    // Shaped exactly like a v1 credentials.json, written before identityId was added.
+    await writePrivateJson(join(directory, 'credentials.json'), [{
+      provider: 'claude',
+      accounts: [
+        {id: 'work-sub', provider: 'claude', mode: 'subscription', label: 'work · subscription'},
+        {id: 'work-credits', provider: 'claude', mode: 'platform-credits', label: 'work · credits'}
+      ],
+      chain: ['work-sub', 'work-credits'],
+      fallbackPolicy: 'always-ask'
+    }]);
+
+    const instance = new CredentialBroker(directory);
+    await instance.restore();
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+    assert.ok(byId['work-sub']!.identityId, 'a backfilled account must get a real identityId, not undefined');
+    assert.equal(byId['work-sub']!.identityId, byId['work-credits']!.identityId, 'pre-existing accounts on one provider were one identity');
+  });
+
+  it('persists the backfilled identityId so it is stable across restarts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    await writePrivateJson(join(directory, 'credentials.json'), [{
+      provider: 'claude',
+      accounts: [{id: 'work-sub', provider: 'claude', mode: 'subscription', label: 'work · subscription'}],
+      chain: ['work-sub'],
+      fallbackPolicy: 'always-ask'
+    }]);
+
+    const first = new CredentialBroker(directory);
+    await first.restore();
+    const firstIdentity = first.list()[0]!.accounts[0]!.identityId;
+
+    const second = new CredentialBroker(directory);
+    await second.restore();
+    const secondIdentity = second.list()[0]!.accounts[0]!.identityId;
+
+    assert.equal(firstIdentity, secondIdentity, 'restoring twice from the same persisted file must not mint a new identity each time');
   });
 });
