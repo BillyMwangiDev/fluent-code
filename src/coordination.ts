@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {realpathSync} from 'node:fs';
 import {dirname, join} from 'node:path';
-import type {ClaimConflict, ClaimReleaseReason, ClaimResult, CoordinationEvent, CoordinationEventKind, CoordinationState, CoordinationTask, FileClaim, LaneMessage, ProviderId, TaskSource} from './daemon-protocol.js';
+import type {ClaimConflict, ClaimReleaseReason, ClaimResult, CoordinationEvent, CoordinationEventKind, CoordinationState, CoordinationTask, DesignHandoffSpec, FileClaim, LaneMessage, ProviderId, TaskSource} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 /**
@@ -14,16 +14,20 @@ const claimLeaseMs = 15 * 60_000;
 export const coordinationEventLimit = 500;
 
 const coordinationEventKinds: readonly CoordinationEventKind[] = [
-  'task.created', 'task.assigned', 'task.status_changed', 'master_brief.set', 'claim.declared', 'claim.observed', 'claim.conflicted',
+  'task.created', 'task.assigned', 'task.status_changed', 'task.dependencies_changed', 'master_brief.set', 'claim.declared', 'claim.observed', 'claim.conflicted',
   'claim.released', 'decision.recorded', 'handoff.requested', 'handoff.accepted', 'message.sent'
 ];
 const claimReleaseReasons: readonly ClaimReleaseReason[] = ['released', 'observed_cleared', 'session_ended', 'lease_expired'];
-const providers: readonly ProviderId[] = ['claude', 'codex', 'gemini'];
+const providers: readonly ProviderId[] = ['claude', 'codex', 'gemini', 'qwen', 'glm', 'nvidia'];
 const taskSources: readonly TaskSource[] = ['manual', 'spec', 'planner'];
 const taskTitleLimit = 240;
 const taskDescriptionLimit = 12_000;
 const taskRoleLimit = 100;
+const taskDependencyLimit = 100;
 const masterBriefLimit = 20_000;
+const designTextLimit = 4_000;
+const designPathLimit = 240;
+const designPathCountLimit = 100;
 
 export type TaskDraft = {
   title: string;
@@ -32,6 +36,8 @@ export type TaskDraft = {
   provider?: ProviderId;
   source?: TaskSource;
   sessionId?: string;
+  designHandoff?: DesignHandoffSpec;
+  dependsOn?: string[];
 };
 
 export type TaskAssignment = Pick<TaskDraft, 'sessionId' | 'provider' | 'role'>;
@@ -62,6 +68,65 @@ function cleanText(value: unknown, limit: number) {
   return text ? text.slice(0, limit) : undefined;
 }
 
+/** Repository-relative reference only; a design handoff may describe a file, never reach outside
+ * the project or smuggle a platform-dependent absolute path into a future lane's brief. */
+function cleanRepositoryPath(value: unknown) {
+  const text = cleanText(value, designPathLimit)?.replaceAll('\\', '/');
+  if (!text || text.startsWith('/') || text === '..' || text.startsWith('../') || text.includes('/../')) return undefined;
+  return text.replace(/^\.\//, '');
+}
+
+function cleanPreviewUrl(value: unknown) {
+  const text = cleanText(value, 2_000);
+  if (!text) return undefined;
+  try {
+    const url = new URL(text);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return undefined;
+    const host = url.hostname.toLowerCase();
+    if (host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]') return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function cleanedDesignHandoff(value: unknown): DesignHandoffSpec | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const sourceRef = cleanRepositoryPath(raw.sourceRef);
+  const componentSpec = cleanText(raw.componentSpec, designTextLimit);
+  const tokenSpec = cleanText(raw.tokenSpec, designTextLimit);
+  const previewUrl = cleanPreviewUrl(raw.previewUrl);
+  const implementationPaths = Array.isArray(raw.implementationPaths)
+    ? [...new Set(raw.implementationPaths.map(cleanRepositoryPath).filter((path): path is string => Boolean(path)))].slice(0, designPathCountLimit)
+    : [];
+  if (!sourceRef && !componentSpec && !tokenSpec && !previewUrl && implementationPaths.length === 0) return undefined;
+  return {
+    ...(sourceRef ? {sourceRef} : {}),
+    ...(componentSpec ? {componentSpec} : {}),
+    ...(tokenSpec ? {tokenSpec} : {}),
+    ...(previewUrl ? {previewUrl} : {}),
+    ...(implementationPaths.length > 0 ? {implementationPaths} : {})
+  };
+}
+
+/** The restore path may salvage the valid portion of an old or corrupted record. New RPC input is
+ * stricter: silently dropping a source, preview, or path a user thought they handed to a builder
+ * would be both surprising and unsafe. */
+function validateNewDesignHandoff(value: unknown) {
+  if (!value || typeof value !== 'object') return;
+  const raw = value as Record<string, unknown>;
+  const sourceRequested = cleanText(raw.sourceRef, designPathLimit);
+  if (sourceRequested && !cleanRepositoryPath(raw.sourceRef)) throw new Error('Design source mapping must be a repository-relative path');
+  const previewRequested = cleanText(raw.previewUrl, 2_000);
+  if (previewRequested && !cleanPreviewUrl(raw.previewUrl)) throw new Error('Design preview must be a credential-free loopback http(s) URL');
+  if (raw.implementationPaths !== undefined) {
+    if (!Array.isArray(raw.implementationPaths) || raw.implementationPaths.some(path => !cleanRepositoryPath(path))) {
+      throw new Error('Design implementation paths must be repository-relative');
+    }
+  }
+}
+
 /** Backward-compatible restore for the original bare `{title, status, sessionId}` board cards. */
 function restoredTask(value: unknown): CoordinationTask | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -73,13 +138,50 @@ function restoredTask(value: unknown): CoordinationTask | undefined {
   const task: CoordinationTask = {id, title, status: raw.status, createdAt};
   const description = cleanText(raw.description, taskDescriptionLimit);
   const role = cleanText(raw.role, taskRoleLimit);
+  const designHandoff = cleanedDesignHandoff(raw.designHandoff);
+  const dependsOn = Array.isArray(raw.dependsOn)
+    ? [...new Set(raw.dependsOn.filter((id): id is string => typeof id === 'string' && id.length > 0))].slice(0, taskDependencyLimit)
+    : [];
   if (typeof raw.sessionId === 'string' && raw.sessionId) task.sessionId = raw.sessionId;
   if (description) task.description = description;
+  if (designHandoff) task.designHandoff = designHandoff;
+  if (dependsOn.length > 0) task.dependsOn = dependsOn;
   if (role) task.role = role;
   if (validProvider(raw.provider)) task.provider = raw.provider;
   if (validTaskSource(raw.source)) task.source = raw.source;
   if (typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt))) task.updatedAt = raw.updatedAt;
   return task;
+}
+
+function pathExists(edges: ReadonlyMap<string, readonly string[]>, from: string, target: string, visited = new Set<string>()): boolean {
+  if (from === target) return true;
+  if (visited.has(from)) return false;
+  visited.add(from);
+  return (edges.get(from) ?? []).some(next => pathExists(edges, next, target, visited));
+}
+
+function sameIds(left: readonly string[], right: readonly string[]) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/** Restore never lets one malformed task graph make a whole board unavailable. References to
+ * vanished tasks, self-dependencies, and the final edge in each detected cycle are discarded. */
+function restoredDependencies(tasks: readonly CoordinationTask[]) {
+  const ids = new Set(tasks.map(task => task.id));
+  const edges = new Map<string, readonly string[]>();
+  return tasks.map(task => {
+    const safe: string[] = [];
+    for (const dependency of task.dependsOn ?? []) {
+      if (!ids.has(dependency) || dependency === task.id || safe.includes(dependency)) continue;
+      if (pathExists(edges, dependency, task.id)) continue;
+      safe.push(dependency);
+    }
+    edges.set(task.id, safe);
+    return {...task, ...(safe.length > 0 ? {dependsOn: safe} : {dependsOn: undefined})};
+  }).map(task => {
+    if (!task.dependsOn?.length) delete task.dependsOn;
+    return task;
+  });
 }
 
 function validConflict(value: unknown): value is ClaimConflict {
@@ -101,6 +203,7 @@ function restoredEvent(value: unknown): CoordinationEvent | undefined {
   const event: CoordinationEvent = {id: raw.id, at: raw.at, kind: raw.kind as CoordinationEventKind, sessionIds: compactSessionIds(raw.sessionIds as string[])};
   if (typeof raw.actorSessionId === 'string') event.actorSessionId = raw.actorSessionId;
   if (typeof raw.taskId === 'string') event.taskId = raw.taskId;
+  if (Array.isArray(raw.dependsOn) && raw.dependsOn.every(id => typeof id === 'string')) event.dependsOn = [...new Set(raw.dependsOn as string[])];
   if (typeof raw.claimId === 'string') event.claimId = raw.claimId;
   if (typeof raw.path === 'string') event.path = raw.path;
   if (raw.claimOrigin === 'declared' || raw.claimOrigin === 'observed') event.claimOrigin = raw.claimOrigin;
@@ -115,8 +218,8 @@ function restoredEvent(value: unknown): CoordinationEvent | undefined {
   if (Array.isArray(raw.conflicts) && raw.conflicts.every(validConflict)) event.conflicts = raw.conflicts;
 
   switch (event.kind) {
-    case 'task.created': return event.taskId ? event : undefined;
-    case 'task.assigned': return event.taskId ? event : undefined;
+    case 'task.created': case 'task.assigned': return event.taskId ? event : undefined;
+    case 'task.dependencies_changed': return event.taskId && event.dependsOn ? event : undefined;
     case 'task.status_changed': return event.taskId && event.fromStatus && event.toStatus ? event : undefined;
     case 'master_brief.set': return event;
     case 'claim.declared': case 'claim.observed': return event.claimId && event.path && event.claimOrigin ? event : undefined;
@@ -131,7 +234,7 @@ function restoredEvent(value: unknown): CoordinationEvent | undefined {
 function eventFingerprint(event: CoordinationEvent) {
   return JSON.stringify([
     event.id, event.at, event.kind, event.actorSessionId, event.sessionIds, event.taskId, event.claimId,
-    event.path, event.claimOrigin, event.fromStatus, event.toStatus, event.releaseReason, event.decisionId,
+    event.path, event.claimOrigin, event.fromStatus, event.toStatus, event.releaseReason, event.dependsOn, event.decisionId,
     event.handoffId, event.messageId, event.provider, event.role,
     event.conflicts?.map(conflict => [conflict.path, conflict.claimedPath, conflict.sessionId, conflict.overlap])
   ]);
@@ -193,6 +296,7 @@ export class CoordinationManager {
         state.tasks = (Array.isArray(originalTasks) ? originalTasks : [])
           .map(restoredTask)
           .filter((task): task is CoordinationTask => task !== undefined);
+        state.tasks = restoredDependencies(state.tasks);
         if (!Array.isArray(originalTasks) || originalTasks.length !== state.tasks.length
           || originalTasks.some((task, index) => JSON.stringify(task) !== JSON.stringify(state.tasks[index]))) migrated = true;
         const originalBrief = state.masterBrief;
@@ -271,10 +375,14 @@ export class CoordinationManager {
     const description = cleanText(draft.description, taskDescriptionLimit);
     const role = cleanText(draft.role, taskRoleLimit);
     const sessionId = cleanText(draft.sessionId, 200);
+    const dependsOn = this.resolveDependencies(state, draft.dependsOn);
+    if (sessionId) this.assertDependenciesComplete(state, dependsOn);
+    validateNewDesignHandoff(draft.designHandoff);
+    const designHandoff = cleanedDesignHandoff(draft.designHandoff);
     const createdAt = new Date().toISOString();
     const task: CoordinationTask = {
       id: randomUUID(), title, status: sessionId ? 'active' : 'todo', sessionId, createdAt,
-      description, role, provider: validProvider(draft.provider) ? draft.provider : undefined,
+      description, role, ...(dependsOn.length > 0 ? {dependsOn} : {}), ...(designHandoff ? {designHandoff} : {}), provider: validProvider(draft.provider) ? draft.provider : undefined,
       source: validTaskSource(draft.source) ? draft.source : 'manual'
     };
     state.tasks.unshift(task);
@@ -295,6 +403,7 @@ export class CoordinationManager {
     const sessionId = assignment.sessionId === undefined ? task.sessionId : cleanText(assignment.sessionId, 200);
     const role = assignment.role === undefined ? task.role : cleanText(assignment.role, taskRoleLimit);
     const provider = assignment.provider === undefined ? task.provider : validProvider(assignment.provider) ? assignment.provider : undefined;
+    if (sessionId) this.assertDependenciesComplete(state, task.dependsOn ?? []);
     const changed = task.sessionId !== sessionId || task.provider !== provider || task.role !== role;
     if (!changed) return state;
     task.sessionId = sessionId;
@@ -316,6 +425,7 @@ export class CoordinationManager {
     if (!task) throw new Error('Coordination task not found');
     const fromStatus = task.status;
     const nextSessionId = sessionId ?? task.sessionId;
+    if (status !== 'todo') this.assertDependenciesComplete(state, task.dependsOn ?? []);
     if (fromStatus === status && task.sessionId === nextSessionId) return state;
     task.status = status;
     task.sessionId = nextSessionId;
@@ -324,6 +434,26 @@ export class CoordinationManager {
       kind: 'task.status_changed', actorSessionId, sessionIds: compactSessionIds([task.sessionId]),
       taskId: task.id, fromStatus, toStatus: status
     });
+    await this.persist();
+    return state;
+  }
+
+  /** Replaces a task's dependency set as one visible, cycle-checked board operation. */
+  async setDependencies(project: string, taskId: string, dependencyIds: readonly string[], actorSessionId?: string) {
+    const state = this.ensure(project);
+    const task = this.resolveTask(state, taskId);
+    if (task.status !== 'todo') throw new Error('Reopen this task before changing its dependencies');
+    const dependsOn = this.resolveDependencies(state, dependencyIds);
+    if (dependsOn.includes(task.id)) throw new Error('A task cannot depend on itself');
+    const previous = task.dependsOn;
+    if (sameIds(previous ?? [], dependsOn)) return state;
+    task.dependsOn = dependsOn.length > 0 ? dependsOn : undefined;
+    if (this.hasCycle(state)) {
+      task.dependsOn = previous;
+      throw new Error('Task dependencies cannot contain a cycle');
+    }
+    task.updatedAt = new Date().toISOString();
+    this.record(state, {kind: 'task.dependencies_changed', actorSessionId, sessionIds: [], taskId: task.id, dependsOn});
     await this.persist();
     return state;
   }
@@ -613,6 +743,41 @@ export class CoordinationManager {
       this.states.set(canonicalProject, state);
     }
     return state;
+  }
+
+  private resolveTask(state: CoordinationState, id: string) {
+    const reference = cleanText(id, 200);
+    if (!reference) throw new Error('Name the task whose dependencies should change');
+    const matches = state.tasks.filter(task => task.id === reference || task.id.startsWith(reference));
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length === 0) throw new Error(`No task matches dependency id ${reference}`);
+    throw new Error(`Dependency id ${reference} is ambiguous; use more of the task id`);
+  }
+
+  private resolveDependencies(state: CoordinationState, input: unknown): string[] {
+    if (input === undefined) return [];
+    if (!Array.isArray(input) || input.length > taskDependencyLimit) throw new Error(`A task may depend on at most ${taskDependencyLimit} other tasks`);
+    const dependencies: string[] = [];
+    for (const dependency of input) {
+      if (typeof dependency !== 'string') throw new Error('Task dependencies must be task ids');
+      const task = this.resolveTask(state, dependency);
+      if (!dependencies.includes(task.id)) dependencies.push(task.id);
+    }
+    return dependencies;
+  }
+
+  private assertDependenciesComplete(state: CoordinationState, dependencyIds: readonly string[]) {
+    const pending = dependencyIds
+      .map(id => state.tasks.find(task => task.id === id))
+      .filter(task => !task || task.status !== 'done');
+    if (pending.length === 0) return;
+    const labels = pending.map(task => task ? `${task.id.slice(0, 8)} (${task.title})` : 'missing task').join(', ');
+    throw new Error(`Task is blocked by unfinished dependencies: ${labels}`);
+  }
+
+  private hasCycle(state: CoordinationState) {
+    const edges = new Map(state.tasks.map(task => [task.id, task.dependsOn ?? []] as const));
+    return state.tasks.some(task => (task.dependsOn ?? []).some(dependency => pathExists(edges, dependency, task.id)));
   }
 
   /** `/var` and `/private/var` name the same macOS worktree. State must not fork by spelling. */

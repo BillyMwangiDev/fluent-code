@@ -11,6 +11,59 @@ const initialReadDelaysMs = [1_500, 6_000, 20_000];
 
 type Pending = {resolve: (value: unknown) => void; reject: (error: Error) => void};
 
+export type CodexApproval = {
+  /** The server-request id. This is deliberately opaque: app-server request ids need not be numbers. */
+  requestId: string | number;
+  /** The documented app-server request method that raised the approval. */
+  method: 'item/commandExecution/requestApproval' | 'item/fileChange/requestApproval' | 'item/permissions/requestApproval';
+  kind: 'command' | 'file-change' | 'permissions';
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  reason?: string;
+  command?: string;
+  cwd?: string;
+  grantRoot?: string;
+};
+
+const approvalMethods = {
+  'item/commandExecution/requestApproval': 'command',
+  'item/fileChange/requestApproval': 'file-change',
+  'item/permissions/requestApproval': 'permissions'
+} as const;
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Extract the small, display-safe common subset of a documented server-initiated approval.
+ * In particular, network approvals are intentionally not inferred from a command preview: Codex
+ * represents them independently and a client must not pretend one is a shell command.
+ */
+export function approvalFrom(message: Record<string, unknown>): CodexApproval | undefined {
+  const method = typeof message.method === 'string' ? message.method : undefined;
+  if (!method || !(method in approvalMethods)) return undefined;
+  const requestId = message.id;
+  if (typeof requestId !== 'string' && typeof requestId !== 'number') return undefined;
+  const params = message.params && typeof message.params === 'object'
+    ? message.params as Record<string, unknown>
+    : {};
+  const item = params.item && typeof params.item === 'object' ? params.item as Record<string, unknown> : {};
+  return {
+    requestId,
+    method: method as CodexApproval['method'],
+    kind: approvalMethods[method as keyof typeof approvalMethods],
+    threadId: stringValue(params.threadId),
+    turnId: stringValue(params.turnId),
+    itemId: stringValue(item.id) ?? stringValue(params.itemId),
+    reason: stringValue(params.reason),
+    command: stringValue(params.command) ?? stringValue(item.command),
+    cwd: stringValue(params.cwd) ?? stringValue(item.cwd),
+    grantRoot: stringValue(params.grantRoot)
+  };
+}
+
 /** The payload Codex reports for one window. Field names are its own. */
 type RawWindow = {usedPercent?: number; windowDurationMins?: number; resetsAt?: number | string};
 
@@ -57,7 +110,7 @@ export function quotaFrom(payload: unknown): Partial<ProviderQuota> | undefined 
  * This channel observes; it never drives a turn. The PTY session remains the real, unmodified CLI
  * the user is talking to (spec §1), and nothing here reimplements what happens inside a turn.
  *
- * Emits 'quota' (Partial<ProviderQuota>) and 'closed'.
+ * Emits 'quota' (Partial<ProviderQuota>), 'approval' (CodexApproval), and 'closed'.
  */
 export class CodexAppServer extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
@@ -101,6 +154,10 @@ export class CodexAppServer extends EventEmitter {
       this.stop();
       return false;
     }
+
+    // App-server's initialize handshake is complete only after this client notification. Sending
+    // it also makes the channel safe to extend into a real structured adapter later.
+    this.notify('initialized', {});
 
     this.scheduleInitialReads();
     return true;
@@ -175,6 +232,18 @@ export class CodexAppServer extends EventEmitter {
       return;
     }
 
+    const approval = approvalFrom(message);
+    if (approval) {
+      // This process observes a separate app-server instance while the user controls the actual
+      // lane in a PTY. It must never turn an observed request into an unreviewed terminal action.
+      // Server requests require a response, so fail closed rather than leaving a provider turn
+      // hanging. A future adapter that owns `thread/start` can replace this with its user-facing
+      // approval decision path.
+      this.respond(approval.requestId, approval.kind === 'permissions' ? {permissions: {}} : {decision: 'decline'});
+      this.emit('approval', approval);
+      return;
+    }
+
     // Notifications. Rate limits can arrive on their own channel or attached to a turn's end;
     // either way they are the same two windows, and either way they are merged, never replaced.
     const method = typeof message.method === 'string' ? message.method : undefined;
@@ -205,5 +274,15 @@ export class CodexAppServer extends EventEmitter {
       timer.unref();
       this.timers.push(timer);
     });
+  }
+
+  private notify(method: string, params: unknown) {
+    if (!this.child) return;
+    this.child.stdin.write(`${JSON.stringify({method, params})}\n`);
+  }
+
+  private respond(id: string | number, result: unknown) {
+    if (!this.child) return;
+    this.child.stdin.write(`${JSON.stringify({id, result})}\n`);
   }
 }

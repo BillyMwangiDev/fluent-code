@@ -52,6 +52,10 @@ function eventActivity(event: CoordinationEvent, state: CoordinationState): Coor
     case 'task.created': return {...base, label: 'task created', detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
     case 'task.assigned': return {...base, label: 'task assigned', detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
     case 'task.status_changed': return {...base, label: `task ${event.toStatus ?? 'updated'}`, detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
+    case 'task.dependencies_changed': {
+      const count = event.dependsOn?.length ?? 0;
+      return {...base, label: 'task prerequisites updated', detail: `${task?.title ?? 'task no longer retained'} · ${count === 0 ? 'no prerequisites' : `${count} prerequisite${count === 1 ? '' : 's'}`}`, subject: task ? {kind: 'task', id: task.id} : undefined};
+    }
     case 'master_brief.set': return {...base, label: 'master brief updated', detail: state.masterBrief ? 'Project direction saved on the board' : 'Project direction cleared'};
     case 'claim.declared': return {...base, label: 'claim declared', detail: event.path ?? 'path unavailable', subject: claim ? {kind: 'claim', id: claim.id} : undefined};
     case 'claim.observed': return {...base, label: 'path observed', detail: event.path ?? 'path unavailable', subject: claim ? {kind: 'claim', id: claim.id} : undefined};

@@ -3,7 +3,7 @@ import {chmod, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {after, describe, it} from 'node:test';
-import {CodexAppServer, quotaFrom, windowFrom} from './codex-app-server.js';
+import {approvalFrom, CodexAppServer, quotaFrom, windowFrom} from './codex-app-server.js';
 import {mergeQuota} from './usage-monitor.js';
 import type {ProviderQuota} from './daemon-protocol.js';
 
@@ -76,6 +76,34 @@ describe('reading Codex rate limits', () => {
   });
 });
 
+describe('reading documented Codex approval requests', () => {
+  it('keeps server request ids opaque and does not fabricate a command for a non-command approval', () => {
+    const approval = approvalFrom({
+      id: 'server-request-7',
+      method: 'item/fileChange/requestApproval',
+      params: {threadId: 'thread-1', turnId: 'turn-1', item: {id: 'item-1'}, reason: 'edit a file'}
+    });
+
+    assert.deepEqual(approval, {
+      requestId: 'server-request-7',
+      method: 'item/fileChange/requestApproval',
+      kind: 'file-change',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      reason: 'edit a file',
+      command: undefined,
+      cwd: undefined,
+      grantRoot: undefined
+    });
+  });
+
+  it('ignores malformed or unknown server requests', () => {
+    assert.equal(approvalFrom({id: 1, method: 'turn/started', params: {}}), undefined);
+    assert.equal(approvalFrom({method: 'item/commandExecution/requestApproval', params: {}}), undefined);
+  });
+});
+
 describe('merging sparse quota updates', () => {
   it('keeps a window an update does not mention', () => {
     const first: ProviderQuota = {primary: {usedPercent: 20, windowMinutes: 300}, secondary: {usedPercent: 60, windowMinutes: 10_080}, observedAt: 'a'};
@@ -113,6 +141,41 @@ function handle(request, send) {
     assert.equal(quota?.primary?.usedPercent, 42);
     assert.equal(quota?.secondary?.usedPercent, 70);
     assert.equal(reported.length, 1, 'a read is also announced, so a caller need not poll');
+  });
+
+  it('completes the initialize handshake and reports a structured approval request', async () => {
+    const executable = await fakeServer(`
+let initialized = false;
+function handle(request, send) {
+  if (request.method === 'initialize') return send({id: request.id, result: {}});
+  if (request.method === 'initialized') {
+    initialized = true;
+    return setTimeout(() => send({
+      id: 'approval-request-1',
+      method: 'item/commandExecution/requestApproval',
+      params: {threadId: 'thread-1', turnId: 'turn-1', item: {id: 'item-1', command: 'git status', cwd: '/repo'}, reason: 'needs review'}
+    }), 10);
+  }
+  if (request.id === 'approval-request-1') {
+    if (request.result?.decision !== 'decline') process.exit(3);
+    return send({method: 'usage.rate_limits', params: {primary: {usedPercent: 23}}});
+  }
+  send({id: request.id, result: {}});
+}`);
+    const channel = new CodexAppServer({executable});
+    const approval = new Promise<any>(resolve => channel.once('approval', resolve));
+    const response = new Promise<Partial<ProviderQuota>>(resolve => channel.once('quota', resolve));
+
+    assert.equal(await channel.start(), true);
+    const reported = await approval;
+    const quota = await response;
+    channel.stop();
+
+    assert.equal(reported.requestId, 'approval-request-1');
+    assert.equal(reported.kind, 'command');
+    assert.equal(reported.command, 'git status');
+    assert.equal(reported.cwd, '/repo');
+    assert.equal(quota.primary?.usedPercent, 23, 'the fake server observed Fluent fail closed before it continued');
   });
 
   it('picks up rate limits pushed as a notification', async () => {

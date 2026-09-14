@@ -509,6 +509,8 @@ button.btn.primary {
   font-weight: 600;
 }
 button.btn.primary:hover { background: var(--coral-hover); border-color: var(--coral-hover); }
+button.btn.danger { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 45%, var(--line)); }
+button.btn.danger:hover { color: var(--canvas); background: var(--coral-hover); border-color: var(--coral-hover); }
 button.btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 table.sessions {
@@ -608,6 +610,8 @@ table.sessions td {
   --line-strong: #4a4843;
 }
 table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
+.session-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.session-actions .btn { padding: 5px 7px; font-size: 11px; }
 
 .field-label {
   color: var(--fg-muted);
@@ -869,6 +873,9 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 .provider-dot.claude { background: #b08968; }
 .provider-dot.codex { background: #6b8fb0; }
 .provider-dot.gemini { background: #8a9a6b; }
+.provider-dot.qwen { background: #5d9990; }
+.provider-dot.glm { background: #9a7bb3; }
+.provider-dot.nvidia { background: #739e78; }
 
 /* Multi-series line chart — same shape as the Usage Observatory artboard (design/previews/hNqHb.png):
    smooth per-series lines over a fill, gridlines, a legend, and start/mid/end axis labels. Built as

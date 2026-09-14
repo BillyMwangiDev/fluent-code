@@ -4,7 +4,7 @@ import {promisify} from 'node:util';
 import {chmod, unlink} from 'node:fs/promises';
 import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {daemonSocketPath, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
+import {daemonSocketPath, fluentProtocolVersion, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
 import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
 import {HardwareMonitor} from './hardware-monitor.js';
@@ -29,7 +29,9 @@ import {EvalRunner, planEvals} from './eval-runner.js';
 import * as sourceControl from './source-control.js';
 import * as catalog from './catalog-manager.js';
 import {ApprovalRecords, type ApprovalAction} from './security/approval-records.js';
+import {ExtensionSourcePolicy, type ExtensionSourcePolicyMode} from './security/extension-source-policy.js';
 import {RunEventBus} from './execution/event-bus.js';
+import {RecipeRunner} from './recipe-runner.js';
 
 const socketPath = daemonSocketPath();
 const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
@@ -52,6 +54,8 @@ const codexChannels = new Map<string, CodexAppServer>();
 const admission = new AdmissionAdvisor();
 const evals = new EvalRunner();
 const approvals = new ApprovalRecords(stateDirectory);
+const extensionSources = new ExtensionSourcePolicy(stateDirectory);
+const recipes = new RecipeRunner(stateDirectory);
 const runEvents = new RunEventBus(manager.runStore);
 
 // Only sockets that explicitly opted in via `stream.open` or `sessions.subscribe` receive pushed
@@ -136,6 +140,12 @@ manager.on('status', (sessionId: string, summary) => {
     void verifySession(sessionId, false, undefined, true).catch(error => console.error(`fluentd could not verify ${sessionId}: ${error.message}`));
   }
 });
+
+// Once a local session record is deleted there is nothing meaningful for a stale terminal
+// subscriber to receive. The provider was already stopped by the lifecycle guard in SessionManager.
+manager.on('deleted', (sessionId: string) => {
+  sessionSubscribers.delete(sessionId);
+});
 manager.runStore.on('event', event => runEvents.publish(event));
 broker.on('switched', (provider, accountId, reason) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
@@ -188,6 +198,54 @@ async function integrateSession(sessionId: string) {
 
 async function requireApproval(id: string | undefined, action: ApprovalAction, target: string, command?: string, baseSha?: string) {
   return approvals.consume({id, action, target, command, baseSha});
+}
+
+function mcpApprovalBinding(targets: readonly ProviderId[], config: import('./catalog-manager.js').McpServerConfig) {
+  const target = `mcp:${[...new Set(targets)].sort().join(',')}:${config.name}`;
+  const command = config.transport === 'stdio'
+    ? [config.command, ...(config.args ?? [])].filter(Boolean).join(' ')
+    : config.url;
+  return {target, command};
+}
+
+async function allowMarketplaceSource(source: string, trustSource: boolean | undefined, policyApprovalId: string | undefined) {
+  const validated = catalog.validateMarketplaceSource(source);
+  const policySource = catalog.marketplacePolicySource(validated);
+  if (trustSource) {
+    await requireApproval(policyApprovalId, 'extension.policy', `marketplace:${validated.source}`, 'trust marketplace source');
+    await extensionSources.trust(policySource);
+  }
+  if (!extensionSources.allows(policySource)) {
+    throw new Error(`Marketplace source is not in the trusted extension allowlist: ${policySource.source}. Add it deliberately or switch the policy to review each.`);
+  }
+  return {validated, policySource};
+}
+
+async function allowMcpSource(targets: readonly ProviderId[], config: import('./catalog-manager.js').McpServerConfig, trustSource: boolean | undefined, policyApprovalId: string | undefined) {
+  const policySource = catalog.mcpPolicySource(config);
+  const binding = mcpApprovalBinding(targets, config);
+  if (trustSource) {
+    await requireApproval(policyApprovalId, 'extension.policy', binding.target, binding.command);
+    await extensionSources.trust(policySource);
+  }
+  if (!extensionSources.allows(policySource)) {
+    throw new Error(`MCP declaration is not in the trusted extension allowlist: ${policySource.source}. Trust this exact declaration deliberately or switch the policy to review each.`);
+  }
+  return binding;
+}
+
+async function allowPluginSource(target: ProviderId, pluginId: string) {
+  if (extensionSources.get().mode === 'review-each') return;
+  const plugin = (await catalog.allPlugins()).find(candidate => candidate.target === target && candidate.id === pluginId);
+  if (!plugin) throw new Error('Cannot establish this plugin’s marketplace source while trusted-only policy is active');
+  if (plugin.trust.level === 'provider-bundled') return;
+  let source: import('./catalog-manager.js').ExtensionPolicySource;
+  try {
+    source = catalog.marketplacePolicySource(catalog.validateMarketplaceSource(plugin.source));
+  } catch {
+    throw new Error(`Plugin source is not eligible for the trusted extension allowlist: ${plugin.source}`);
+  }
+  if (!extensionSources.allows(source)) throw new Error(`Plugin source is not in the trusted extension allowlist: ${source.source}`);
 }
 
 /**
@@ -316,7 +374,7 @@ function laneFor(cwd: string, sessionId?: string) {
 }
 
 function knownSession(sessionId: string) {
-  return manager.list().some(session => session.id === sessionId);
+  return manager.list(true).some(session => session.id === sessionId);
 }
 
 /**
@@ -436,8 +494,8 @@ async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; 
 
 async function dispatch(request: RpcRequest) {
   switch (request.method) {
-    case 'ping': return {ok: true, pid: process.pid};
-    case 'sessions.list': return manager.list();
+    case 'ping': return {ok: true, pid: process.pid, protocolVersion: fluentProtocolVersion};
+    case 'sessions.list': return manager.list(request.params?.includeArchived);
     case 'sessions.create': {
       // Claude's additive hook relay writes `.claude/settings.json` in the selected project.
       // Creating a terminal is user-initiated, but that project configuration write still needs a
@@ -455,6 +513,13 @@ async function dispatch(request: RpcRequest) {
     case 'sessions.send': await manager.send(request.params.sessionId, request.params.input); return {sent: true};
     case 'sessions.inject': return manager.inject(request.params.sessionId, request.params.text, request.params.submit ?? true);
     case 'sessions.stop': return manager.stop(request.params.sessionId);
+    case 'sessions.archive': return manager.archive(request.params.sessionId);
+    case 'sessions.restore': return manager.restoreArchived(request.params.sessionId);
+    case 'sessions.delete': {
+      const session = manager.get(request.params.sessionId);
+      await requireApproval(request.params.approvalId, 'session.delete', session.id, `delete local session ${session.id}`);
+      return manager.delete(request.params.sessionId);
+    }
     case 'sessions.removeWorktree': {
       const session = manager.get(request.params.sessionId);
       await requireApproval(request.params.approvalId, 'worktree.remove', session.worktreePath ?? session.directory, 'git worktree remove');
@@ -575,6 +640,7 @@ async function dispatch(request: RpcRequest) {
     case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
     case 'catalog.plugins': return catalog.allPlugins();
     case 'catalog.installPlugin': {
+      await allowPluginSource(request.params.target, request.params.pluginId);
       await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.pluginId}`, `plugin install ${request.params.pluginId}`);
       return catalog.installPlugin(request.params.target, request.params.pluginId);
     }
@@ -582,17 +648,29 @@ async function dispatch(request: RpcRequest) {
     case 'catalog.addMarketplace': {
       // Validate before consuming the one-time approval. An invalid source must not spend the
       // user's consent record or reach a provider CLI as a surprising option/remote string.
-      const source = catalog.validateMarketplaceSource(request.params.source).source;
+      const source = (await allowMarketplaceSource(request.params.source, request.params.trustSource, request.params.policyApprovalId)).validated.source;
       await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${source}`, `marketplace add ${source}`);
       return catalog.addMarketplace(request.params.target, source);
     }
+    case 'catalog.sourcePolicy.get': return extensionSources.get();
+    case 'catalog.sourcePolicy.mode.set': {
+      const mode = request.params.mode as ExtensionSourcePolicyMode;
+      await requireApproval(request.params.approvalId, 'extension.policy', 'extension-source-policy', `mode ${mode}`);
+      return extensionSources.setMode(mode);
+    }
+    case 'catalog.sourcePolicy.trustMarketplace': {
+      const validated = catalog.validateMarketplaceSource(request.params.source);
+      await requireApproval(request.params.approvalId, 'extension.policy', `marketplace:${validated.source}`, 'trust marketplace source');
+      return extensionSources.trust(catalog.marketplacePolicySource(validated));
+    }
+    case 'catalog.sourcePolicy.remove': {
+      await requireApproval(request.params.approvalId, 'extension.policy', `extension-source-policy:${request.params.sourceId}`, `remove ${request.params.sourceId}`);
+      return extensionSources.remove(request.params.sourceId);
+    }
     case 'catalog.mcpServers': return catalog.mcpServers();
     case 'catalog.addMcpServer': {
-      const target = `mcp:${[...new Set(request.params.targets)].sort().join(',')}:${request.params.config.name}`;
-      const command = request.params.config.transport === 'stdio'
-        ? [request.params.config.command, ...(request.params.config.args ?? [])].filter(Boolean).join(' ')
-        : request.params.config.url;
-      await requireApproval(request.params.approvalId, 'extension.install', target, command);
+      const binding = await allowMcpSource(request.params.targets, request.params.config, request.params.trustSource, request.params.policyApprovalId);
+      await requireApproval(request.params.approvalId, 'extension.install', binding.target, binding.command);
       return catalog.addMcpServerToTargets(request.params.targets, request.params.config);
     }
     case 'providers.list': return providerHealth();
@@ -606,6 +684,9 @@ async function dispatch(request: RpcRequest) {
     case 'coordination.task.assign': {
       if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
       return coordination.assignTask(request.params.project, request.params.taskId, request.params);
+    }
+    case 'coordination.task.dependencies.set': {
+      return coordination.setDependencies(request.params.project, request.params.taskId, request.params.dependsOn);
     }
     case 'coordination.task.update': {
       if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
@@ -653,7 +734,7 @@ async function dispatch(request: RpcRequest) {
     case 'credentials.list': return broker.list();
     case 'credentials.upsertAccount': {
       await requireApproval(request.params.approvalId, 'credential.change', `${request.params.provider}:${request.params.id}`, `credential ${request.params.mode}`);
-      return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl, request.params.sameIdentityAs);
+      return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl, request.params.sameIdentityAs, request.params.model);
     }
     case 'credentials.setChain': {
       await requireApproval(request.params.approvalId, 'credential.change', request.params.provider, `chain ${request.params.accountIds.join(',')}`);
@@ -672,6 +753,14 @@ async function dispatch(request: RpcRequest) {
     case 'sessions.subscribe': case 'sessions.unsubscribe': case 'runs.subscribe': case 'runs.unsubscribe': case 'stream.open': throw new Error(`${request.method} must not reach dispatch`);
     case 'runs.list': return manager.runStore.list();
     case 'runs.get': return manager.runStore.get(request.params.runId);
+    case 'runs.checkpoint': return manager.checkpoint(request.params.runId);
+    case 'recipes.list': return recipes.list(request.params.directory);
+    case 'recipes.receipts': return recipes.listReceipts(request.params?.directory);
+    case 'recipes.execute': {
+      const recipe = await recipes.recipe(request.params.directory, request.params.name);
+      await requireApproval(request.params.approvalId, 'recipe.execute', request.params.directory, recipe.command);
+      return recipes.execute(request.params.directory, recipe);
+    }
   }
 }
 
@@ -792,6 +881,8 @@ async function main() {
   await verification.restore();
   await evals.restore();
   await approvals.restore();
+  await extensionSources.restore();
+  await recipes.restore();
   resources.start(process.pid);
   hardware.start();
   // Half the lease, so a live lane is always renewed well before its claims could lapse.
@@ -891,7 +982,7 @@ async function main() {
     for (const client of clients) client.destroy();
     // Lanes end with the daemon rather than being orphaned (see SessionManager.shutdown); the timer
     // bounds a lane that ignores SIGTERM.
-    void manager.shutdown()
+    void Promise.all([manager.shutdown(), remotes.shutdown()])
       .catch(error => console.error(`fluentd shutdown: ${error.message}`))
       .finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 5_000).unref();

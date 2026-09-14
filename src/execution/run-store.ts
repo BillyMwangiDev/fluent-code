@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {EventEmitter} from 'node:events';
 import {readPrivateFile, writePrivateFile, appendPrivateLine} from '../security/secure-state.js';
 import {redactPayload, type RedactedPayload} from '../perf/redaction.js';
-import {assertTransition, type CapabilitySet, type DeliveryState, type Run, type RunEvent, type RunEventType, type RunState, type TimingValue, type WorkClass} from './types.js';
+import {assertTransition, type CapabilitySet, type CheckpointRef, type DeliveryState, type Run, type RunEvent, type RunEventType, type RunState, type TimingValue, type WorkClass} from './types.js';
 import {join, resolve} from 'node:path';
 import type {ProviderId} from '../daemon-protocol.js';
 
@@ -180,6 +180,24 @@ export class RunStore extends EventEmitter {
     return event;
   }
 
+  /**
+   * Captures only a reviewable repository reference plus whether there were uncommitted changes.
+   * The user may use it to start a deliberate follow-up lane, but it is deliberately not a hidden
+   * git stash, commit, or provider-resume operation.
+   */
+  async checkpoint(runId: string, input: {gitRef?: string; workingTree: CheckpointRef['workingTree']}, source: RunEvent['source'] = {adapter: 'fluentd'}) {
+    const run = this.get(runId);
+    const gitRef = typeof input.gitRef === 'string' && /^[0-9a-f]{40,64}$/i.test(input.gitRef) ? input.gitRef : undefined;
+    const workingTree = input.workingTree === 'clean' || input.workingTree === 'dirty' ? input.workingTree : 'unknown';
+    const checkpoint: CheckpointRef = {id: randomUUID(), ...(gitRef ? {gitRef} : {}), workingTree, createdAt: new Date().toISOString()};
+    const event = await this.append(run, 'checkpoint.created', checkpoint, source);
+    run.checkpoint = checkpoint;
+    run.updatedAt = event.atWall;
+    this.scheduleSnapshot();
+    this.emit('event', event);
+    return checkpoint;
+  }
+
   async record(runId: string, type: Exclude<RunEventType, 'run.state_changed' | 'prompt.dispatch_intended' | 'prompt.dispatch_confirmed' | 'run.delivery_unknown'>, payload: Record<string, unknown> = {}, source: RunEvent['source'] = {adapter: 'fluentd'}) {
     const run = this.get(runId);
     const event = await this.append(run, type, payload, source);
@@ -276,6 +294,15 @@ export class RunStore extends EventEmitter {
     if (event.type === 'prompt.dispatch_intended') run.delivery = 'intended';
     if (event.type === 'prompt.dispatch_confirmed') run.delivery = 'confirmed';
     if (event.type === 'run.delivery_unknown') run.delivery = 'unknown';
+    if (event.type === 'checkpoint.created') {
+      const payload = event.payload;
+      if (typeof payload.id === 'string' && typeof payload.createdAt === 'string') {
+        const gitRef = typeof payload.gitRef === 'string' && /^[0-9a-f]{40,64}$/i.test(payload.gitRef) ? payload.gitRef : undefined;
+        const workingTree = payload.workingTree === 'clean' || payload.workingTree === 'dirty' ? payload.workingTree : 'unknown';
+        run.checkpoint = {id: payload.id, ...(gitRef ? {gitRef} : {}), workingTree, createdAt: payload.createdAt};
+        run.updatedAt = event.atWall;
+      }
+    }
   }
 
   /** Writes any snapshot still waiting to be written — for a daemon about to exit. */

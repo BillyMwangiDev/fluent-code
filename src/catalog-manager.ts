@@ -1,9 +1,11 @@
 import {execFile} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
 import {readFile} from 'node:fs/promises';
 import {homedir} from 'node:os';
-import {isAbsolute, join} from 'node:path';
+import {isAbsolute, join, resolve} from 'node:path';
 import type {ProviderId} from './daemon-protocol.js';
+import type {TrustedExtensionSource} from './security/extension-source-policy.js';
 
 const run = promisify(execFile);
 
@@ -70,6 +72,12 @@ export type McpServerConfig = {
   url?: string;
 };
 export type McpInstallResult = {target: ProviderId; ok: boolean; output: string};
+
+/** Qwen, GLM, and NVIDIA sessions are OpenCode-backed model links. Fluent deliberately does not
+ * pretend their provider APIs expose the Claude/Codex/Gemini plugin or MCP registration commands. */
+function hasNativeCatalog(target: ProviderId): target is 'claude' | 'codex' | 'gemini' {
+  return target === 'claude' || target === 'codex' || target === 'gemini';
+}
 
 type ClaudeInstalledPlugin = {id: string; version?: string; enabled: boolean};
 type ClaudeMarketplace = {name: string; source: string; repo?: string; path?: string};
@@ -305,6 +313,7 @@ export async function allPlugins(): Promise<CatalogPlugin[]> {
 }
 
 export async function installPlugin(target: ProviderId, pluginId: string): Promise<{ok: boolean; output: string}> {
+  if (!hasNativeCatalog(target)) return {ok: false, output: `${target} is launched through OpenCode; configure its tools in OpenCode instead of using a provider-native marketplace.`};
   if (target === 'gemini') return {ok: false, output: 'Gemini CLI uses portable skills and MCP servers; it does not use the Claude/Codex marketplace plugin format.'};
   const [cli, args] = target === 'claude' ? ['claude', ['plugin', 'install', pluginId]] : ['codex', ['plugin', 'add', pluginId]];
   try {
@@ -316,6 +325,7 @@ export async function installPlugin(target: ProviderId, pluginId: string): Promi
 }
 
 export type ValidatedMarketplaceSource = {source: string; kind: 'local-path' | 'github-repository'};
+export type ExtensionPolicySource = Omit<TrustedExtensionSource, 'addedAt'>;
 
 const githubSegment = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
@@ -367,7 +377,30 @@ export function validateMarketplaceSource(input: string): ValidatedMarketplaceSo
   throw new Error('Marketplace sources must be an absolute local path, GitHub owner/repo, https://github.com/owner/repo, or git@github.com:owner/repo.git');
 }
 
+/** Canonical policy identity for the intentionally narrow marketplace grammar above. Paths stay
+ * local-only; GitHub spellings collapse to owner/repository so HTTPS and SSH cannot bypass a
+ * trusted-only policy by naming the same repository differently. */
+export function marketplacePolicySource(validated: ValidatedMarketplaceSource): ExtensionPolicySource {
+  if (validated.kind === 'local-path') {
+    const source = resolve(validated.source);
+    return {id: `marketplace:local:${source}`, kind: 'marketplace', source};
+  }
+  const github = validated.source.match(/^([^/]+)\/([^/]+)$/)
+    ?? validated.source.match(/^git@github\.com:([^/]+)\/([^/]+)$/i)
+    ?? (() => {
+      const url = new URL(validated.source);
+      const [owner, repository] = url.pathname.split('/').filter(Boolean);
+      return owner && repository ? [undefined, owner, repository] : undefined;
+    })();
+  if (!github?.[1] || !github[2]) throw new Error('Marketplace source could not be canonicalized');
+  const owner = github[1].toLowerCase();
+  const repository = github[2].replace(/\.git$/i, '').toLowerCase();
+  const source = `github.com/${owner}/${repository}`;
+  return {id: `marketplace:github:${owner}/${repository}`, kind: 'marketplace', source};
+}
+
 export async function addMarketplace(target: ProviderId, source: string): Promise<{ok: boolean; output: string}> {
+  if (!hasNativeCatalog(target)) return {ok: false, output: `${target} is launched through OpenCode; it does not expose a provider-native marketplace command.`};
   if (target === 'gemini') return {ok: false, output: 'Gemini CLI uses portable skills and MCP servers; it does not use the Claude/Codex marketplace format.'};
   const validated = validateMarketplaceSource(source);
   const [cli, args] = target === 'claude' ? ['claude', ['plugin', 'marketplace', 'add', validated.source]] : ['codex', ['plugin', 'marketplace', 'add', validated.source]];
@@ -464,17 +497,37 @@ function validateMcpConfig(config: McpServerConfig) {
   if (config.transport !== 'stdio' && config.transport !== 'http' && config.transport !== 'sse') throw new Error('MCP transport must be stdio, http, or sse');
   if (config.scope !== undefined && config.scope !== 'user' && config.scope !== 'local' && config.scope !== 'project') throw new Error('MCP scope must be user, local, or project');
   if (config.transport === 'stdio') {
-    if (!config.command?.trim()) throw new Error('A stdio MCP server needs an executable');
+    if (!config.command?.trim() || /[\u0000-\u001F\u007F]/.test(config.command)) throw new Error('A stdio MCP server needs a plain executable name or path');
     if (config.url) throw new Error('A stdio MCP server cannot also have a URL');
-  } else if (!/^https:\/\//.test(config.url ?? '')) {
-    throw new Error('Remote MCP servers must use an https URL');
+  } else {
+    let url: URL;
+    try { url = new URL(config.url ?? ''); } catch { throw new Error('Remote MCP servers must use an https URL'); }
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || /[\u0000-\u001F\u007F]/.test(config.url ?? '')) {
+      throw new Error('Remote MCP servers must use a credential-free https URL without query or fragment data');
+    }
   }
-  if ((config.args ?? []).some(arg => typeof arg !== 'string')) throw new Error('MCP arguments must be strings');
+  if ((config.args ?? []).some(arg => typeof arg !== 'string' || arg.length > 4_000 || /[\u0000-\u001F\u007F]/.test(arg))) throw new Error('MCP arguments must be plain strings no longer than 4000 characters');
+}
+
+/** An exact MCP declaration has its own opaque policy ID. The hash is intentionally calculated
+ * from the full structured declaration (including args) but the stored display label is redacted,
+ * so trusting `npx package-a` cannot be reused for `npx package-b` or leak a secret-like arg. */
+export function mcpPolicySource(config: McpServerConfig): ExtensionPolicySource {
+  validateMcpConfig(config);
+  const canonical = config.transport === 'stdio'
+    ? {transport: config.transport, command: config.command!.trim(), args: config.args ?? [], scope: config.scope ?? 'user'}
+    : {transport: config.transport, url: new URL(config.url!).toString(), scope: config.scope ?? 'user'};
+  const id = `mcp:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`;
+  const source = config.transport === 'stdio'
+    ? `local MCP process: ${[canonical.command, ...(canonical.args ?? []).map(redactArgument)].join(' ')}`
+    : `remote MCP endpoint: ${redactUrl(canonical.url!)}`;
+  return {id, kind: 'mcp', source};
 }
 
 export function mcpCommandArgs(target: ProviderId, config: McpServerConfig) {
   validateMcpConfig(config);
   const scope = config.scope ?? 'user';
+  if (!hasNativeCatalog(target)) throw new Error(`${target} is launched through OpenCode; configure MCP tools in OpenCode instead of running a provider-native command.`);
   if (target === 'claude') {
     return config.transport === 'stdio'
       ? ['mcp', 'add', '--scope', scope, config.name, '--', config.command!, ...(config.args ?? [])]

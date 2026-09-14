@@ -2,23 +2,30 @@ import type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {AssignedIssue, OpenPullRequest, RepoStatus} from './source-control.js';
 export type {CatalogPlugin, ExtensionTrust, ExtensionTrustLevel, MarketplaceEntry, McpInstallResult, McpServerConfig, McpServerEntry, McpTransport} from './catalog-manager.js';
+export type {ExtensionSourcePolicyMode, ExtensionSourcePolicyState, TrustedExtensionSource} from './security/extension-source-policy.js';
 export type {CapabilitySet, Run, RunEvent, RunEventType, RunState, TimingMap, TimingValue, WorkClass} from './execution/types.js';
+export type {RecipeDefinition, RecipeReceipt} from './recipe-runner.js';
 export type {ApprovalAction, ApprovalRecord} from './security/approval-records.js';
 import type {Run, RunEvent} from './execution/types.js';
 import type {ApprovalAction, ApprovalRecord} from './security/approval-records.js';
+
+/** Bumped only when an SSH-forwarded daemon can no longer safely interpret this RPC contract. */
+export const fluentProtocolVersion = 1;
 
 /**
  * A provider is an agent runtime Fluent can launch directly. Keep this distinct from MCP: MCP is
  * the portable tool layer shared by runtimes, whereas each provider owns its own login, terminal,
  * transcript and optional structured-control protocol.
  */
-export type ProviderId = 'claude' | 'codex' | 'gemini';
+export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidia';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 
 export type SessionSummary = {
   id: string;
   provider: ProviderId;
   command: string;
+  /** Explicit model selection for adapters that can target more than one upstream model. */
+  model?: string;
   directory: string;
   task?: string;
   status: SessionStatus;
@@ -45,6 +52,9 @@ export type SessionSummary = {
   /** Outcome of the project's own checks in this lane. Deliberately separate from `status`: a lane
    * can be running and verified, or exited and failing, and collapsing the two loses that. */
   verification?: VerificationStatus;
+  /** Set only after a stopped session is deliberately archived. Archived records remain local and
+   * inspectable, but stay out of default session/lane lists. */
+  archivedAt?: string;
 };
 
 export type SessionSnapshot = SessionSummary & {
@@ -218,6 +228,18 @@ export type EvalRun = {
 /** A ticket is deliberately small enough to pass to a lane as clean context. The master brief is
  * stored once on the board; individual tickets carry only the specialised slice of work. */
 export type TaskSource = 'manual' | 'spec' | 'planner';
+/**
+ * The durable, repo-native portion of a design-to-build handoff. `implementationPaths` are
+ * intentionally not claims: a claim belongs to an accountable live lane and remains a separate,
+ * visible, expiring coordination record.
+ */
+export type DesignHandoffSpec = {
+  sourceRef?: string;
+  componentSpec?: string;
+  tokenSpec?: string;
+  previewUrl?: string;
+  implementationPaths?: string[];
+};
 export type CoordinationTask = {
   id: string;
   title: string;
@@ -230,6 +252,10 @@ export type CoordinationTask = {
   role?: string;
   /** The ticket-local brief. This prevents the project brief from bloating every lane's prompt. */
   description?: string;
+  /** Tasks that must be complete before this ticket may be assigned to a lane or started. */
+  dependsOn?: string[];
+  /** Present only for a Design workspace task; it is shown verbatim to its assigned builder. */
+  designHandoff?: DesignHandoffSpec;
   source?: TaskSource;
   createdAt: string;
   updatedAt?: string;
@@ -261,6 +287,7 @@ export type CoordinationEventKind =
   | 'task.created'
   | 'task.assigned'
   | 'task.status_changed'
+  | 'task.dependencies_changed'
   | 'master_brief.set'
   | 'claim.declared'
   | 'claim.observed'
@@ -280,6 +307,8 @@ export type CoordinationEvent = {
   /** Every lane materially involved in this event, including an assigned task or handoff endpoint. */
   sessionIds: string[];
   taskId?: string;
+  /** The complete dependency set after a dependency edit; never inferred from task titles. */
+  dependsOn?: string[];
   provider?: ProviderId;
   role?: string;
   claimId?: string;
@@ -306,22 +335,26 @@ export type CoordinationState = {
   messages: LaneMessage[];
   events: CoordinationEvent[];
 };
-export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
+export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; autoReconnect: boolean; status: 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 export type DesignToolId = 'pen' | 'open-design';
-export type McpTarget = ProviderId;
+/** OpenDesign's native installer documents only these two host CLIs. */
+export type McpTarget = Extract<ProviderId, 'claude' | 'codex'>;
 export type DesignTool = {id: DesignToolId; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
 
 export type RpcRequest =
   | {id: string; method: 'ping'}
-  | {id: string; method: 'sessions.list'}
+  | {id: string; method: 'sessions.list'; params?: {includeArchived?: boolean}}
   | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */
   | {id: string; method: 'sessions.inject'; params: {sessionId: string; text: string; submit?: boolean}}
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.archive'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.restore'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.delete'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'sessions.removeWorktree'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'sessions.diff'; params: {sessionId: string}}
   | {id: string; method: 'sessions.verify'; params: {sessionId: string; force?: boolean; approvalId?: string}}
@@ -355,8 +388,12 @@ export type RpcRequest =
   | {id: string; method: 'sessions.unsubscribe'; params: {sessionId: string}}
   | {id: string; method: 'runs.list'}
   | {id: string; method: 'runs.get'; params: {runId: string}}
+  | {id: string; method: 'runs.checkpoint'; params: {runId: string}}
   | {id: string; method: 'runs.subscribe'; params: {runId: string; afterSequence?: number}}
   | {id: string; method: 'runs.unsubscribe'; params: {runId: string}}
+  | {id: string; method: 'recipes.list'; params: {directory: string}}
+  | {id: string; method: 'recipes.receipts'; params?: {directory?: string}}
+  | {id: string; method: 'recipes.execute'; params: {directory: string; name: string; approvalId?: string}}
   | {id: string; method: 'stream.open'}
   | {id: string; method: 'hardware.snapshot'}
   | {id: string; method: 'software.snapshot'}
@@ -372,16 +409,21 @@ export type RpcRequest =
   | {id: string; method: 'catalog.plugins'}
   | {id: string; method: 'catalog.installPlugin'; params: {target: ProviderId; pluginId: string; approvalId?: string}}
   | {id: string; method: 'catalog.marketplaces'}
-  | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string; approvalId?: string}}
+  | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string; approvalId?: string; trustSource?: boolean; policyApprovalId?: string}}
+  | {id: string; method: 'catalog.sourcePolicy.get'}
+  | {id: string; method: 'catalog.sourcePolicy.mode.set'; params: {mode: import('./security/extension-source-policy.js').ExtensionSourcePolicyMode; approvalId?: string}}
+  | {id: string; method: 'catalog.sourcePolicy.trustMarketplace'; params: {source: string; approvalId?: string}}
+  | {id: string; method: 'catalog.sourcePolicy.remove'; params: {sourceId: string; approvalId?: string}}
   | {id: string; method: 'catalog.mcpServers'}
-  | {id: string; method: 'catalog.addMcpServer'; params: {targets: ProviderId[]; config: import('./catalog-manager.js').McpServerConfig; approvalId?: string}}
+  | {id: string; method: 'catalog.addMcpServer'; params: {targets: ProviderId[]; config: import('./catalog-manager.js').McpServerConfig; approvalId?: string; trustSource?: boolean; policyApprovalId?: string}}
   | {id: string; method: 'providers.list'}
   | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}
   | {id: string; method: 'coordination.brief.set'; params: {project: string; brief: string}}
-  | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; description?: string; role?: string; provider?: ProviderId; source?: TaskSource; sessionId?: string}}
+  | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; description?: string; role?: string; provider?: ProviderId; source?: TaskSource; sessionId?: string; designHandoff?: DesignHandoffSpec; dependsOn?: string[]}}
   | {id: string; method: 'coordination.task.update'; params: {project: string; taskId: string; status: 'todo' | 'active' | 'done'; sessionId?: string}}
   | {id: string; method: 'coordination.task.assign'; params: {project: string; taskId: string; sessionId?: string; provider?: ProviderId; role?: string}}
+  | {id: string; method: 'coordination.task.dependencies.set'; params: {project: string; taskId: string; dependsOn: string[]}}
   | {id: string; method: 'coordination.claim'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.claims.sweep'}
   | {id: string; method: 'coordination.conflicts'; params: {project: string}}
@@ -391,7 +433,7 @@ export type RpcRequest =
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
   | {id: string; method: 'coordination.handoff.accept'; params: {project: string; handoffId: string}}
   | {id: string; method: 'remote.list'}
-  | {id: string; method: 'remote.save'; params: {name: string; host: string; port?: number; remoteSocket?: string; approvalId?: string}}
+  | {id: string; method: 'remote.save'; params: {name: string; host: string; port?: number; remoteSocket?: string; autoReconnect?: boolean; approvalId?: string}}
   | {id: string; method: 'remote.connect'; params: {profileId: string; approvalId?: string}}
   | {id: string; method: 'remote.disconnect'; params: {profileId: string}}
   | {id: string; method: 'openDesign.get'}
@@ -400,7 +442,7 @@ export type RpcRequest =
   | {id: string; method: 'designTools.list'}
   | {id: string; method: 'designTools.installOpenDesignMcp'; params: {target: McpTarget; approvalId?: string}}
   | {id: string; method: 'credentials.list'}
-  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; sameIdentityAs?: string; approvalId?: string}}
+  | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; model?: string; sameIdentityAs?: string; approvalId?: string}}
   | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]; approvalId?: string}}
   | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy; approvalId?: string}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
@@ -477,6 +519,8 @@ export type CredentialAccount = {
   identityId: string;
   /** API key material is held in the operating system credential store, never in Fluent state. */
   hasSecret?: boolean;
+  /** The provider model selected for this account, used by the OpenCode-compatible adapters. */
+  model?: string;
   baseUrl?: string;
 };
 

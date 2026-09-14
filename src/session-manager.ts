@@ -4,7 +4,7 @@ import {realpathSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {providerAdapter, resolveProviderExecutable} from './providers.js';
+import {providerAdapter, providerLaunchArgs, resolveProviderExecutable} from './providers.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
 import {briefingArgs} from './agent-briefing.js';
@@ -27,6 +27,9 @@ type LiveSession = {
   /** Output bytes seen since the last durable observation was recorded. */
   pendingOutputBytes?: number;
   observationTimer?: NodeJS.Timeout;
+  /** Settles only after the PTY exit path has written its final durable projection. */
+  terminalExited?: Promise<void>;
+  resolveTerminalExit?: () => void;
 };
 
 type StoredSession = {summary: SessionSummary; directory: string; /** Legacy only; never written again. */ output?: string};
@@ -82,6 +85,7 @@ export function initialPromptArgs(provider: ProviderId, task?: string): string[]
   const prompt = task?.trim();
   if (!prompt) return [];
   if (provider === 'gemini') return ['--prompt-interactive', prompt];
+  if (provider === 'qwen' || provider === 'glm' || provider === 'nvidia') return ['--prompt', prompt];
   // A leading dash would be parsed as an option instead of as the prompt.
   return [prompt.startsWith('-') ? ` ${prompt}` : prompt];
 }
@@ -155,9 +159,12 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  list(): SessionSummary[] {
+  /** Default lists exclude deliberately archived records so historic terminal sessions never read
+   * as live work. Callers that render the archive opt in explicitly. */
+  list(includeArchived = false): SessionSummary[] {
     return [...this.sessions.values()]
       .map(({summary}) => summary)
+      .filter(summary => includeArchived || !summary.archivedAt)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
@@ -183,10 +190,16 @@ export class SessionManager extends EventEmitter {
       throw error;
     }
     const sessionDirectory = worktree?.path ?? directory;
+    const modelReference = env?.set.FLUENT_OPENCODE_MODEL;
+    const model = (provider === 'qwen' || provider === 'glm' || provider === 'nvidia')
+      && modelReference?.startsWith(`fluent-${provider}/`)
+      ? modelReference.slice(`fluent-${provider}/`.length)
+      : undefined;
     const summary: SessionSummary = {
       id,
       provider,
       command: adapter.executable,
+      model,
       directory: sessionDirectory,
       task: task?.trim() || undefined,
       status: 'starting',
@@ -217,7 +230,7 @@ export class SessionManager extends EventEmitter {
       // would otherwise start a lane nothing will stop.
       if (this.closing) throw new Error('fluentd is shutting down');
       const pty = await ptyRuntime();
-      terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider), ...initialPromptArgs(provider, summary.task)], {
+      terminal = pty.spawn(executable, [...adapter.args, ...providerLaunchArgs(provider, env), ...briefingArgs(provider), ...initialPromptArgs(provider, summary.task)], {
       cwd: sessionDirectory,
       env: applyCredentialEnvironment(env, {
         // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
@@ -246,14 +259,9 @@ export class SessionManager extends EventEmitter {
     await this.runStore.ready(id, {adapter: 'pty'});
     await this.runStore.transition(id, 'running', 'provider process spawned', {adapter: 'pty'});
     this.setStatus(session, 'running');
+    session.terminalExited = new Promise(resolve => { session.resolveTerminalExit = resolve; });
     terminal.onExit(({exitCode}) => {
-      session.terminal = undefined;
-      session.summary.pid = undefined;
-      session.summary.exitCode = exitCode;
-      this.setStatus(session, session.summary.status === 'stopped' ? 'stopped' : 'exited');
-      // Journaled after the in-memory state is settled, and ahead of the run's final state.
-      this.recordObservation(session);
-      void this.finishRun(session.summary.id, session.summary.status, exitCode).catch(error => console.error(`fluentd could not finalize run ${session.summary.id}: ${error.message}`));
+      void this.finalizeTerminalExit(session, exitCode);
     });
     return summary;
   }
@@ -308,6 +316,16 @@ export class SessionManager extends EventEmitter {
     // after relaying SIGINT, and a lane never signalled would be orphaned.
     for (const session of live) session.terminal!.kill('SIGTERM');
     await Promise.all(live.map(session => this.stop(session.summary.id).catch(() => undefined)));
+    // A child normally responds to SIGTERM immediately. Escalate only during daemon shutdown so a
+    // user-facing Stop remains a regular provider-friendly request, while a daemon never exits
+    // before it has either reaped its lanes or made a best effort to do so.
+    await Promise.all(live.map(async session => {
+      await this.waitForTerminalExit(session, 2_000);
+      if (session.terminal) {
+        session.terminal.kill('SIGKILL');
+        await this.waitForTerminalExit(session, 1_000);
+      }
+    }));
     if (this.persistTimer) clearTimeout(this.persistTimer);
     this.persistTimer = undefined;
     await Promise.all([this.runStore.flush(), this.persist()]);
@@ -333,6 +351,62 @@ export class SessionManager extends EventEmitter {
     }
     this.setStatus(session, 'stopped');
     return session.summary;
+  }
+
+  /**
+   * Checkpoints are deliberately observational. `git rev-parse` and `git status` tell a future
+   * lane exactly what it can review, without Fluent committing, stashing, resetting, or pretending
+   * an interactive PTY can be resumed after a daemon restart.
+   */
+  async checkpoint(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    let gitRef: string | undefined;
+    let workingTree: 'clean' | 'dirty' | 'unknown' = 'unknown';
+    try {
+      const [head, status] = await Promise.all([
+        run('git', ['-C', session.directory, 'rev-parse', '--verify', 'HEAD'], {timeout: 5_000}),
+        run('git', ['-C', session.directory, 'status', '--porcelain', '--untracked-files=normal'], {timeout: 5_000})
+      ]);
+      const candidate = head.stdout.trim();
+      if (/^[0-9a-f]{40,64}$/i.test(candidate)) gitRef = candidate;
+      workingTree = status.stdout.trim() ? 'dirty' : 'clean';
+    } catch {
+      // A directory without Git is still a valid lane. The checkpoint remains useful as a durable
+      // time marker, and its explicit unknown state avoids inventing a recoverable source ref.
+    }
+    return this.runStore.checkpoint(sessionId, {gitRef, workingTree}, {adapter: 'pty'});
+  }
+
+  async archive(sessionId: string) {
+    const session = this.requireStoppedSession(sessionId, 'archive');
+    if (session.summary.archivedAt) return session.summary;
+    session.summary.archivedAt = new Date().toISOString();
+    session.summary.updatedAt = session.summary.archivedAt;
+    await this.persist();
+    this.emit('status', sessionId, session.summary);
+    return session.summary;
+  }
+
+  async restoreArchived(sessionId: string) {
+    const session = this.requireStoppedSession(sessionId, 'restore');
+    if (!session.summary.archivedAt) return session.summary;
+    delete session.summary.archivedAt;
+    session.summary.updatedAt = new Date().toISOString();
+    await this.persist();
+    this.emit('status', sessionId, session.summary);
+    return session.summary;
+  }
+
+  /** Removes only Fluent's local session entry. Worktrees, project files, coordination history,
+   * and usage data remain intentionally untouched: each has an independent, explicit lifecycle. */
+  async delete(sessionId: string) {
+    const session = this.requireStoppedSession(sessionId, 'delete');
+    if (!session.summary.archivedAt) throw new Error('Archive the session before deleting its local record');
+    this.sessions.delete(sessionId);
+    await this.persist();
+    this.emit('deleted', sessionId);
+    return {deleted: true as const, sessionId};
   }
 
   async removeWorktree(sessionId: string) {
@@ -419,6 +493,15 @@ export class SessionManager extends EventEmitter {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   }
 
+  private requireStoppedSession(sessionId: string, action: 'archive' | 'restore' | 'delete') {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (session.terminal || session.summary.status === 'running' || session.summary.status === 'starting') {
+      throw new Error(`Stop the session before you ${action} it`);
+    }
+    return session;
+  }
+
   private append(session: LiveSession, chunk: string) {
     session.bracketedPaste = bracketedPasteMode(session.bracketedPaste ?? false, (session.modeTail ?? '') + chunk);
     session.modeTail = chunk.slice(-32);
@@ -431,18 +514,53 @@ export class SessionManager extends EventEmitter {
     // A TUI emits many small chunks per second, so the count is summarized once per interval.
     session.pendingOutputBytes = (session.pendingOutputBytes ?? 0) + Buffer.byteLength(chunk);
     if (!session.observationTimer) {
-      session.observationTimer = setTimeout(() => this.recordObservation(session), observationIntervalMs);
+      session.observationTimer = setTimeout(() => {
+        void this.recordObservation(session).catch(error => console.error(`fluentd could not record terminal observation: ${error.message}`));
+      }, observationIntervalMs);
       session.observationTimer.unref();
     }
   }
 
-  private recordObservation(session: LiveSession) {
+  private async finalizeTerminalExit(session: LiveSession, exitCode: number) {
+    // In-memory state first: a journal write that fails must not leave an exited lane reading as
+    // running, unarchivable, and holding a pid that shutdown would signal after the OS reused it.
+    session.terminal = undefined;
+    session.summary.pid = undefined;
+    session.summary.exitCode = exitCode;
+    this.setStatus(session, session.summary.status === 'stopped' ? 'stopped' : 'exited');
+    try {
+      await this.recordObservation(session);
+      await this.finishRun(session.summary.id, session.summary.status, exitCode);
+    } catch (error) {
+      console.error(`fluentd could not finalize run ${session.summary.id}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      session.resolveTerminalExit?.();
+      session.resolveTerminalExit = undefined;
+    }
+  }
+
+  private async recordObservation(session: LiveSession) {
     if (session.observationTimer) clearTimeout(session.observationTimer);
     session.observationTimer = undefined;
     const bytes = session.pendingOutputBytes ?? 0;
     session.pendingOutputBytes = 0;
     if (bytes === 0) return;
-    void this.runStore.record(session.summary.id, 'text.delta', {bytes}, {adapter: 'pty'}).catch(error => console.error(`fluentd could not record terminal observation: ${error.message}`));
+    await this.runStore.record(session.summary.id, 'text.delta', {bytes}, {adapter: 'pty'});
+  }
+
+  /** Waits for the whole exit path, including its durable writes, but never lets a stuck provider
+   * make the daemon's shutdown path unbounded. */
+  private async waitForTerminalExit(session: LiveSession, timeoutMs: number) {
+    if (!session.terminalExited) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      session.terminalExited,
+      new Promise<void>(resolve => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref();
+      })
+    ]);
+    if (timer) clearTimeout(timer);
   }
 
   /** Coalesces the frequent, low-stakes `updatedAt` changes from output and keystrokes. */
