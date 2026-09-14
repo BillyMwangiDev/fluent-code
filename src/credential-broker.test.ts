@@ -395,4 +395,28 @@ describe('migrating state written before identityId existed', () => {
 
     assert.equal(firstIdentity, secondIdentity, 'restoring twice from the same persisted file must not mint a new identity each time');
   });
+
+  it('reuses an existing identityId when doing a partial migration, to preserve chain invariants', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    // A partial migration: one account already has an identityId, but a chain-sibling doesn't.
+    const existingIdentityId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    await writePrivateJson(join(directory, 'credentials.json'), [{
+      provider: 'claude',
+      accounts: [
+        {id: 'work-sub', provider: 'claude', mode: 'subscription', label: 'work · subscription', identityId: existingIdentityId},
+        {id: 'work-credits', provider: 'claude', mode: 'platform-credits', label: 'work · credits'}
+      ],
+      chain: ['work-sub', 'work-credits'],
+      fallbackPolicy: 'always-ask'
+    }]);
+
+    const instance = new CredentialBroker(directory);
+    await instance.restore();
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
+    assert.equal(byId['work-sub']!.identityId, existingIdentityId, 'the pre-existing identity is preserved');
+    assert.equal(byId['work-credits']!.identityId, existingIdentityId, 'the backfilled account reuses the existing identity, not a fresh one');
+  });
 });
