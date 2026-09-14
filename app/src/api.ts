@@ -4,17 +4,18 @@ import {listen, type UnlistenFn} from '@tauri-apps/api/event';
 // Mirrors src/daemon-protocol.ts's shared types. Duplicated rather than imported across the
 // package boundary — app/ is a separate, dependency-free frontend build from src/ (fluentd);
 // keeping them independent means the desktop app never needs fluentd's Node toolchain to build.
-export type ProviderId = 'claude' | 'codex' | 'gemini';
+export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidia';
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';
-export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'recipe.execute' | 'project.configure';
+export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
 export type ApprovalRecord = {id: string; action: ApprovalAction; target: string; commandHash?: string; baseSha?: string; issuedAt: string; expiresAt: string; consumedAt?: string};
 
 export type SessionSummary = {
   id: string;
   provider: ProviderId;
   command: string;
+  model?: string;
   directory: string;
   task?: string;
   status: SessionStatus;
@@ -28,6 +29,7 @@ export type SessionSummary = {
   prepareMs?: number;
   warmedPaths?: string[];
   verification?: VerificationStatus;
+  archivedAt?: string;
 };
 
 export type FallbackGuidance = {
@@ -95,6 +97,7 @@ export type Run = {
   state: 'queued' | 'preparing' | 'ready' | 'running' | 'awaiting_approval' | 'blocked' | 'verifying' | 'integrating' | 'succeeded' | 'failed' | 'cancelled' | 'lost';
   delivery: 'idle' | 'intended' | 'confirmed' | 'unknown';
   timing: Record<string, {atWall: string; atMonoMs?: number; available: boolean; detail?: string}>;
+  checkpoint?: {id: string; gitRef?: string; workingTree: 'clean' | 'dirty' | 'unknown'; createdAt: string};
 };
 
 export type HardwareSample = {
@@ -152,13 +155,19 @@ export type McpServerConfig = {name: string; transport: McpTransport; scope?: 'u
 export type McpServerEntry = {name: string; target: ProviderId; transport: McpTransport; displayCommand?: string; displayArgs?: string[]; displayUrl?: string; trust: ExtensionTrust; connected?: boolean; needsAuth?: boolean};
 export type McpInstallResult = {target: ProviderId; ok: boolean; output: string};
 export type CatalogActionResult = {ok: boolean; output: string};
+export type ExtensionSourcePolicyMode = 'review-each' | 'trusted-only';
+export type TrustedExtensionSource = {id: string; kind: 'marketplace' | 'mcp'; source: string; addedAt: string};
+export type ExtensionSourcePolicyState = {mode: ExtensionSourcePolicyMode; sources: TrustedExtensionSource[]};
+export type RecipeDefinition = {name: string; description?: string; command: string; timeoutMs: number};
+export type RecipeReceipt = {id: string; directory: string; name: string; commandHash: string; startedAt: string; durationMs: number; status: 'passed' | 'failed'; exitCode: number | null; output: string};
 
 export type ProviderHealth = {id: ProviderId; label: string; installed: boolean; executable?: string; version?: string};
+export type DesignHandoffSpec = {sourceRef?: string; componentSpec?: string; tokenSpec?: string; previewUrl?: string; implementationPaths?: string[]};
 export type CoordinationState = {
   project: string;
   masterBrief?: string;
   masterBriefUpdatedAt?: string;
-  tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; provider?: ProviderId; role?: string; description?: string; source?: 'manual' | 'spec' | 'planner'; createdAt: string; updatedAt?: string}>;
+  tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; provider?: ProviderId; role?: string; description?: string; dependsOn?: string[]; designHandoff?: DesignHandoffSpec; source?: 'manual' | 'spec' | 'planner'; createdAt: string; updatedAt?: string}>;
   claims: Array<{id: string; path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
   decisions: Array<{id: string; summary: string; sessionId?: string; createdAt: string}>;
   messages: LaneMessage[];
@@ -169,6 +178,7 @@ export type CoordinationEventKind =
   | 'task.created'
   | 'task.assigned'
   | 'task.status_changed'
+  | 'task.dependencies_changed'
   | 'master_brief.set'
   | 'claim.declared'
   | 'claim.observed'
@@ -185,6 +195,7 @@ export type CoordinationEvent = {
   actorSessionId?: string;
   sessionIds: string[];
   taskId?: string;
+  dependsOn?: string[];
   provider?: ProviderId;
   role?: string;
   claimId?: string;
@@ -241,7 +252,7 @@ export type SkillInstallState = {provider: ProviderId; path: string; installed: 
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
 export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
-export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
+export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; autoReconnect: boolean; status: 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 export type DesignTool = {id: 'pen' | 'open-design'; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
@@ -255,6 +266,7 @@ export type CredentialAccount = {
    * automatic usage-limit fallback. */
   identityId: string;
   hasSecret?: boolean;
+  model?: string;
   baseUrl?: string;
 };
 
@@ -292,8 +304,8 @@ export function selectRemoteSocket(socketPath?: string) {
 }
 
 export const api = {
-  ping: () => daemonRequest<{ok: boolean; pid: number}>('ping'),
-  listSessions: () => daemonRequest<SessionSummary[]>('sessions.list'),
+  ping: () => daemonRequest<{ok: boolean; pid: number; protocolVersion: number}>('ping'),
+  listSessions: (includeArchived = false) => daemonRequest<SessionSummary[]>('sessions.list', includeArchived ? {includeArchived: true} : {}),
   createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean}) => {
     const approval = params.provider === 'claude'
       ? await issueApproval('project.configure', params.directory, 'configure Claude hooks')
@@ -302,10 +314,23 @@ export const api = {
   },
   getSession: (sessionId: string) => daemonRequest<SessionSnapshot>('sessions.get', {sessionId}),
   getRun: (runId: string) => daemonRequest<Run>('runs.get', {runId}),
+  checkpointRun: (runId: string) => daemonRequest<Run['checkpoint']>('runs.checkpoint', {runId}),
+  listRecipes: (directory: string) => daemonRequest<RecipeDefinition[]>('recipes.list', {directory}),
+  recipeReceipts: (directory?: string) => daemonRequest<RecipeReceipt[]>('recipes.receipts', directory ? {directory} : {}),
+  executeRecipe: async (directory: string, recipe: RecipeDefinition) => {
+    const approval = await issueApproval('recipe.execute', directory, recipe.command);
+    return daemonRequest<RecipeReceipt>('recipes.execute', {directory, name: recipe.name, approvalId: approval.id});
+  },
   send: (sessionId: string, input: string) => daemonRequest<{sent: boolean}>('sessions.send', {sessionId, input}),
   /** Pastes context into a running lane as one paste, then presses Enter unless `submit` is false. */
   inject: (sessionId: string, text: string, submit = true) => daemonRequest<{injected: boolean; submitted: boolean; bracketedPaste: boolean}>('sessions.inject', {sessionId, text, submit}),
   stop: (sessionId: string) => daemonRequest<SessionSummary>('sessions.stop', {sessionId}),
+  archiveSession: (sessionId: string) => daemonRequest<SessionSummary>('sessions.archive', {sessionId}),
+  restoreSession: (sessionId: string) => daemonRequest<SessionSummary>('sessions.restore', {sessionId}),
+  deleteSession: async (sessionId: string) => {
+    const approval = await issueApproval('session.delete', sessionId, `delete local session ${sessionId}`);
+    return daemonRequest<{deleted: true; sessionId: string}>('sessions.delete', {sessionId, approvalId: approval.id});
+  },
   removeWorktree: async (sessionId: string) => {
     const session = await daemonRequest<SessionSnapshot>('sessions.get', {sessionId});
     const approval = await issueApproval('worktree.remove', session.worktreePath ?? session.directory, 'git worktree remove');
@@ -346,25 +371,41 @@ export const api = {
     return daemonRequest<CatalogActionResult>('catalog.installPlugin', {target, pluginId, approvalId: approval.id});
   },
   catalogMarketplaces: () => daemonRequest<MarketplaceEntry[]>('catalog.marketplaces'),
-  addCatalogMarketplace: async (target: ProviderId, source: string) => {
+  addCatalogMarketplace: async (target: ProviderId, source: string, trustSource = false) => {
+    const policyApproval = trustSource ? await issueApproval('extension.policy', `marketplace:${source}`, 'trust marketplace source') : undefined;
     const approval = await issueApproval('extension.install', `${target}:${source}`, `marketplace add ${source}`);
-    return daemonRequest<CatalogActionResult>('catalog.addMarketplace', {target, source, approvalId: approval.id});
+    return daemonRequest<CatalogActionResult>('catalog.addMarketplace', {target, source, approvalId: approval.id, trustSource, policyApprovalId: policyApproval?.id});
+  },
+  catalogSourcePolicy: () => daemonRequest<ExtensionSourcePolicyState>('catalog.sourcePolicy.get'),
+  setCatalogSourcePolicyMode: async (mode: ExtensionSourcePolicyMode) => {
+    const approval = await issueApproval('extension.policy', 'extension-source-policy', `mode ${mode}`);
+    return daemonRequest<ExtensionSourcePolicyState>('catalog.sourcePolicy.mode.set', {mode, approvalId: approval.id});
+  },
+  trustCatalogMarketplaceSource: async (source: string) => {
+    const approval = await issueApproval('extension.policy', `marketplace:${source}`, 'trust marketplace source');
+    return daemonRequest<ExtensionSourcePolicyState>('catalog.sourcePolicy.trustMarketplace', {source, approvalId: approval.id});
+  },
+  removeCatalogTrustedSource: async (sourceId: string) => {
+    const approval = await issueApproval('extension.policy', `extension-source-policy:${sourceId}`, `remove ${sourceId}`);
+    return daemonRequest<ExtensionSourcePolicyState>('catalog.sourcePolicy.remove', {sourceId, approvalId: approval.id});
   },
   catalogMcpServers: () => daemonRequest<McpServerEntry[]>('catalog.mcpServers'),
-  addCatalogMcpServer: async (targets: ProviderId[], config: McpServerConfig) => {
+  addCatalogMcpServer: async (targets: ProviderId[], config: McpServerConfig, trustSource = false) => {
     const target = `mcp:${[...new Set(targets)].sort().join(',')}:${config.name}`;
     const command = config.transport === 'stdio' ? [config.command, ...(config.args ?? [])].filter(Boolean).join(' ') : config.url;
+    const policyApproval = trustSource ? await issueApproval('extension.policy', target, command) : undefined;
     const approval = await issueApproval('extension.install', target, command);
-    return daemonRequest<McpInstallResult[]>('catalog.addMcpServer', {targets, config, approvalId: approval.id});
+    return daemonRequest<McpInstallResult[]>('catalog.addMcpServer', {targets, config, approvalId: approval.id, trustSource, policyApprovalId: policyApproval?.id});
   },
   setPriceOverride: (model: string, override: PriceOverride) => daemonRequest<{ok: boolean}>('spend.setPriceOverride', {model, override}),
   clearPriceOverride: (model: string) => daemonRequest<{ok: boolean}>('spend.clearPriceOverride', {model}),
   listProviders: () => daemonRequest<ProviderHealth[]>('providers.list'),
   coordination: (project: string) => daemonRequest<CoordinationState>('coordination.get', {project}),
   setMasterBrief: (project: string, brief: string) => daemonRequest<CoordinationState>('coordination.brief.set', {project, brief}),
-  createTask: (project: string, task: {title: string; description?: string; role?: string; provider?: ProviderId; source?: 'manual' | 'spec' | 'planner'; sessionId?: string}) => daemonRequest<CoordinationState>('coordination.task.create', {project, ...task}),
+  createTask: (project: string, task: {title: string; description?: string; role?: string; provider?: ProviderId; source?: 'manual' | 'spec' | 'planner'; sessionId?: string; designHandoff?: DesignHandoffSpec; dependsOn?: string[]}) => daemonRequest<CoordinationState>('coordination.task.create', {project, ...task}),
   updateTask: (project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.update', {project, taskId, status, sessionId}),
   assignTask: (project: string, taskId: string, assignment: {sessionId?: string; provider?: ProviderId; role?: string}) => daemonRequest<CoordinationState>('coordination.task.assign', {project, taskId, ...assignment}),
+  setTaskDependencies: (project: string, taskId: string, dependsOn: string[]) => daemonRequest<CoordinationState>('coordination.task.dependencies.set', {project, taskId, dependsOn}),
   claimFile: (project: string, path: string, sessionId: string) => daemonRequest<ClaimResult>('coordination.claim', {project, path, sessionId}),
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
   conflicts: (project: string) => daemonRequest<RankedConflict[]>('coordination.conflicts', {project}),
@@ -384,7 +425,7 @@ export const api = {
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),
   acceptHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.accept', {project, handoffId}),
   listRemotes: () => localDaemonRequest<RemoteProfile[]>('remote.list'),
-  saveRemote: async (params: {name: string; host: string; port?: number; remoteSocket?: string}) => {
+  saveRemote: async (params: {name: string; host: string; port?: number; remoteSocket?: string; autoReconnect?: boolean}) => {
     const approval = await issueApproval('remote.configure', `${params.host}:${params.port ?? 22}`, params.remoteSocket, undefined, true);
     return localDaemonRequest<RemoteProfile>('remote.save', {...params, approvalId: approval.id});
   },
@@ -409,6 +450,7 @@ export const api = {
     label: string;
     apiKey?: string;
     baseUrl?: string;
+    model?: string;
     sameIdentityAs?: string;
     forceNewIdentity?: boolean;
   }) => {

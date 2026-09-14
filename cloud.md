@@ -28,9 +28,11 @@ Use SSH host configuration, key management, and host verification appropriate to
 Never forward a Fluent socket over an unauthenticated TCP listener: the RPC is privileged and has
 no separate network authentication layer.
 
-Remote setup, profile validation, credential broadcast, reconnection recovery, and a full remote
-observability UX remain incomplete. Remote profile metadata is local state and may reveal hostnames
-or topology; treat the state directory accordingly.
+Remote profiles validate their bounded SSH destination and remote Unix-socket path, then require a
+versioned Fluent daemon handshake before the desktop can select the forward. A user can opt into
+bounded automatic tunnel recovery; a direct disconnect cancels it. Windows forwarding, credential
+broadcast, and a full remote observability UX remain incomplete. Remote profile metadata is local state and
+may reveal hostnames or topology; treat the state directory accordingly.
 
 ## Security posture and open work
 

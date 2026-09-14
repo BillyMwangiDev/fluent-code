@@ -15,6 +15,7 @@ import type {
 } from './daemon-protocol.js';
 import {SecretStore} from './secret-store.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
+import {isOpenCodeAdapter, providerAdapter} from './providers.js';
 
 const execute = promisify(execFile);
 
@@ -29,6 +30,14 @@ const shortWindowMs = Number(process.env.FLUENT_SWITCH_MIN_WINDOW_MS ?? 5 * 60_0
 
 /** Cache observations older than this say nothing useful about the session running now. */
 const observationTtlMs = 30 * 60_000;
+
+/** Kept separate from common provider variables so a key inherited from a shell or another
+ * OpenCode profile cannot silently win over the account selected in Fluent. */
+const openCodeKeyVariables = ['FLUENT_QWEN_API_KEY', 'FLUENT_GLM_API_KEY', 'FLUENT_NVIDIA_API_KEY'];
+
+function openCodeKeyVariable(provider: ProviderId) {
+  return `FLUENT_${provider.toUpperCase()}_API_KEY`;
+}
 
 type CacheObservation = {sessionId: string; accountId?: string; hitRatio?: number; observedAt: number};
 
@@ -154,6 +163,38 @@ export class CredentialBroker extends EventEmitter {
 
     const apiKey = await this.secrets.get(provider, account.id);
     if (!apiKey) throw new Error(`The API key for ${account.label} is unavailable in the system credential store`);
+    const adapter = providerAdapter(provider);
+    if (isOpenCodeAdapter(adapter)) {
+      const model = account.model?.trim() || adapter.defaultModel;
+      const baseUrl = account.baseUrl?.trim() || adapter.defaultBaseUrl;
+      if (!model || !baseUrl) throw new Error(`${adapter.label} needs both a model and an OpenAI-compatible endpoint.`);
+      const providerId = `fluent-${provider}`;
+      const keyVariable = openCodeKeyVariable(provider);
+      // OpenCode documents `OPENCODE_CONFIG_CONTENT` as a highest-precedence, process-local
+      // override. The config carries endpoint/model metadata only; the key remains in Fluent's
+      // OS credential store until the child process receives this one-session environment.
+      const config = {
+        $schema: 'https://opencode.ai/config.json',
+        model: `${providerId}/${model}`,
+        providers: {
+          [providerId]: {
+            name: adapter.label,
+            env: [keyVariable],
+            package: '@opencode/ai/providers/openai-compatible',
+            settings: {baseURL: baseUrl},
+            models: {[model]: {modelID: model, name: model}}
+          }
+        }
+      };
+      return {
+        set: {
+          [keyVariable]: apiKey,
+          FLUENT_OPENCODE_MODEL: `${providerId}/${model}`,
+          OPENCODE_CONFIG_CONTENT: JSON.stringify(config)
+        },
+        unset: [...openCodeKeyVariables.filter(variable => variable !== keyVariable), 'FLUENT_OPENCODE_MODEL', 'OPENCODE_CONFIG_CONTENT']
+      };
+    }
     // Codex's own key variable; unconfirmed against a real Codex install (spec §7.5).
     if (provider === 'codex') return {set: {OPENAI_API_KEY: apiKey}, unset: []};
     // Gemini CLI documents GEMINI_API_KEY for direct Gemini API access. Its browser/Google Cloud
@@ -211,7 +252,7 @@ export class CredentialBroker extends EventEmitter {
     return state;
   }
 
-  async upsertAccount(provider: ProviderId, id: string, mode: CredentialMode, label: string, apiKey?: string, baseUrl?: string, sameIdentityAs?: string) {
+  async upsertAccount(provider: ProviderId, id: string, mode: CredentialMode, label: string, apiKey?: string, baseUrl?: string, sameIdentityAs?: string, model?: string) {
     const state = this.ensure(provider);
     const existing = state.accounts.findIndex(candidate => candidate.id === id);
     const previous = existing >= 0 ? state.accounts[existing] : undefined;
@@ -223,7 +264,8 @@ export class CredentialBroker extends EventEmitter {
       mode,
       label,
       identityId: this.resolveIdentity(state, mode, previous, sameIdentityAs),
-      baseUrl,
+      baseUrl: baseUrl?.trim() || undefined,
+      model: model?.trim() || undefined,
       hasSecret: mode === 'api-key' ? Boolean(apiKey) || previous?.hasSecret : undefined
     };
     if (existing >= 0) state.accounts[existing] = account;

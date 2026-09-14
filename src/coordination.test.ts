@@ -91,6 +91,101 @@ describe('file claims', () => {
   });
 });
 
+describe('design-to-build handoffs', () => {
+  it('persists a bounded source mapping, spec, loopback preview, and intended files', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const first = new CoordinationManager(directory);
+    await first.task('/project', {
+      title: 'design: remote connection state',
+      role: 'design',
+      designHandoff: {
+        sourceRef: './design/pen/fluent-code.pen',
+        componentSpec: 'remote profile card',
+        tokenSpec: 'Coral only for failed state',
+        previewUrl: 'http://127.0.0.1:4173/remote',
+        implementationPaths: ['app/src/main.ts', 'src/remote-manager.ts', 'app/src/main.ts']
+      }
+    });
+
+    const restored = new CoordinationManager(directory);
+    await restored.restore();
+    assert.deepEqual(restored.get('/project').tasks[0]?.designHandoff, {
+      sourceRef: 'design/pen/fluent-code.pen',
+      componentSpec: 'remote profile card',
+      tokenSpec: 'Coral only for failed state',
+      previewUrl: 'http://127.0.0.1:4173/remote',
+      implementationPaths: ['app/src/main.ts', 'src/remote-manager.ts']
+    });
+  });
+
+  it('rejects external previews and path escapes rather than silently losing handoff context', async () => {
+    const coordination = await manager();
+    await assert.rejects(() => coordination.task('/project', {
+      title: 'design: safe mapping',
+      designHandoff: {sourceRef: '../outside.pen', previewUrl: 'https://example.test/', implementationPaths: ['../secret', '/absolute', 'src/ok.ts']}
+    }), /Design source mapping/);
+
+    assert.deepEqual(coordination.get('/project').tasks, []);
+  });
+});
+
+describe('task dependencies', () => {
+  it('blocks assignment and progress until every dependency is complete', async () => {
+    const coordination = await manager();
+    const prerequisite = (await coordination.task('/project', {title: 'write protocol'})).tasks[0]!;
+    const dependent = (await coordination.task('/project', {title: 'implement client', dependsOn: [prerequisite.id]})).tasks[0]!;
+
+    await assert.rejects(
+      () => coordination.assignTask('/project', dependent.id, {sessionId: 'lane-client'}),
+      /blocked by unfinished dependencies/
+    );
+    await assert.rejects(
+      () => coordination.updateTask('/project', dependent.id, 'active'),
+      /blocked by unfinished dependencies/
+    );
+    await coordination.updateTask('/project', prerequisite.id, 'done');
+    await coordination.assignTask('/project', dependent.id, {sessionId: 'lane-client'});
+
+    assert.equal(coordination.get('/project').tasks.find(task => task.id === dependent.id)?.status, 'active');
+  });
+
+  it('rejects unknown and cyclic dependency graphs without changing the board', async () => {
+    const coordination = await manager();
+    await assert.rejects(() => coordination.task('/project', {title: 'bad', dependsOn: ['does-not-exist']}), /No task matches/);
+    const first = (await coordination.task('/project', {title: 'first'})).tasks[0]!;
+    const second = (await coordination.task('/project', {title: 'second'})).tasks[0]!;
+    await coordination.setDependencies('/project', first.id, [second.id]);
+    await assert.rejects(() => coordination.setDependencies('/project', second.id, [first.id]), /cannot contain a cycle/);
+
+    const state = coordination.get('/project');
+    assert.deepEqual(state.tasks.find(task => task.id === first.id)?.dependsOn, [second.id]);
+    assert.equal(state.tasks.find(task => task.id === second.id)?.dependsOn, undefined);
+    assert.equal(state.events.at(-1)?.kind, 'task.dependencies_changed');
+  });
+
+  it('repairs a restored graph that references missing tasks or contains a cycle', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const {mkdir, writeFile} = await import('node:fs/promises');
+    await mkdir(directory, {recursive: true});
+    const now = new Date().toISOString();
+    await writeFile(join(directory, 'coordination.json'), JSON.stringify([{
+      project: '/project', claims: [], decisions: [], handoffs: [], messages: [], events: [],
+      tasks: [
+        {id: 'task-a', title: 'A', status: 'todo', createdAt: now, dependsOn: ['task-b', 'missing']},
+        {id: 'task-b', title: 'B', status: 'todo', createdAt: now, dependsOn: ['task-a']}
+      ]
+    }]));
+    const coordination = new CoordinationManager(directory);
+    await coordination.restore();
+
+    const state = coordination.get('/project');
+    assert.deepEqual(state.tasks.find(task => task.id === 'task-a')?.dependsOn, ['task-b']);
+    assert.equal(state.tasks.find(task => task.id === 'task-b')?.dependsOn, undefined);
+  });
+});
+
 describe('messages between lanes', () => {
   it('delivers to the named lane, oldest first', async () => {
     const coordination = await manager();

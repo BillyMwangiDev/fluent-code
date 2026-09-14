@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
-import {mcpCommandArgs, mcpTrustForConfig, validateMarketplaceSource} from './catalog-manager.js';
+import {marketplacePolicySource, mcpCommandArgs, mcpPolicySource, mcpTrustForConfig, validateMarketplaceSource} from './catalog-manager.js';
 
 describe('portable MCP registration', () => {
   const config = {name: 'github', transport: 'stdio' as const, command: 'npx', args: ['-y', '@modelcontextprotocol/server-github'], scope: 'user' as const};
@@ -18,6 +18,19 @@ describe('portable MCP registration', () => {
   it('validates untrusted transport and scope values at runtime', () => {
     assert.throws(() => mcpCommandArgs('claude', {name: 'bad', transport: 'pipe' as 'stdio', command: 'tool'}), /transport/);
     assert.throws(() => mcpCommandArgs('claude', {name: 'bad-scope', transport: 'stdio', command: 'tool', scope: 'machine' as 'user'}), /scope/);
+  });
+
+  it('rejects remote URL credentials, query tokens, and fragments before a provider sees them', () => {
+    for (const url of ['http://example.test/mcp', 'https://person:secret@example.test/mcp', 'https://example.test/mcp?token=secret', 'https://example.test/mcp#fragment']) {
+      assert.throws(() => mcpCommandArgs('claude', {name: 'remote', transport: 'http', url}), /credential-free https URL|https URL/, url);
+    }
+  });
+
+  it('uses an exact opaque identity for a trusted MCP declaration while redacting its display label', () => {
+    const first = mcpPolicySource({name: 'tools', transport: 'stdio', command: 'npx', args: ['-y', '@scope/one']});
+    const second = mcpPolicySource({name: 'tools', transport: 'stdio', command: 'npx', args: ['-y', '@scope/two']});
+    assert.notEqual(first.id, second.id);
+    assert.match(first.source, /local MCP process: npx/);
   });
 
   it('labels a local process and a remote endpoint with only the boundary Fluent knows', () => {
@@ -49,5 +62,14 @@ describe('marketplace source validation', () => {
     ]) {
       assert.throws(() => validateMarketplaceSource(source), /marketplace|use an absolute/i, source);
     }
+  });
+
+  it('canonicalizes alternate GitHub spellings to one policy identity without resolving local source outside its absolute boundary', () => {
+    const direct = marketplacePolicySource(validateMarketplaceSource('Owner/Repo.git'));
+    const https = marketplacePolicySource(validateMarketplaceSource('https://github.com/owner/repo'));
+    assert.deepEqual(direct, https);
+    assert.deepEqual(marketplacePolicySource(validateMarketplaceSource('/opt/fluent/../plugins')), {
+      id: 'marketplace:local:/opt/plugins', kind: 'marketplace', source: '/opt/plugins'
+    });
   });
 });

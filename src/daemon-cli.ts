@@ -6,7 +6,7 @@ if (command !== 'status') {
   process.exitCode = 1;
 } else {
   void daemonClient.ping()
-    .then(({pid}) => console.log(`fluentd healthy · pid ${pid}`))
+    .then(({pid, protocolVersion}) => console.log(`fluentd healthy · pid ${pid} · protocol v${protocolVersion}`))
     .catch(error => {
       console.error(error.message);
       process.exitCode = 1;

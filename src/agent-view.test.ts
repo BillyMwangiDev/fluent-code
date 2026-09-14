@@ -35,8 +35,17 @@ describe('what a lane is told', () => {
     }));
 
     assert.match(text, /^tasks 1$/m);
-    assert.match(text, /^id status lane title$/m);
-    assert.match(text, /^a1c2d3e4 active 3f2a1b0c Add router tests$/m);
+    assert.match(text, /^id status lane needs title$/m);
+    assert.match(text, /^a1c2d3e4 active 3f2a1b0c - Add router tests$/m);
+  });
+
+  it('includes dependency ids in both the visible board and its cursor', () => {
+    const base = {id: 'a1c2d3e4-0000-0000-0000-000000000000', title: 'Implement client', status: 'todo' as const, createdAt: 'now'};
+    const withoutDependency = view({tasks: [base]});
+    const withDependency = view({tasks: [{...base, dependsOn: ['b9c8d7e6-0000-0000-0000-000000000000']}]});
+
+    assert.match(renderAgentView(withDependency), /^a1c2d3e4 todo - b9c8d7e6 Implement client$/m);
+    assert.notEqual(withoutDependency.cursor, withDependency.cursor);
   });
 
   it('counts the lane\'s own claims separately from everyone\'s', () => {

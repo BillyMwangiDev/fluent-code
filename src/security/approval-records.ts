@@ -9,9 +9,11 @@ export type ApprovalAction =
   | 'worktree.reset'
   | 'worktree.rebase'
   | 'integration.merge'
+  | 'session.delete'
   | 'remote.configure'
   | 'remote.connect'
   | 'extension.install'
+  | 'extension.policy'
   | 'recipe.execute'
   | 'project.configure';
 

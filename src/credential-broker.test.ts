@@ -131,6 +131,48 @@ describe('putting a session on one account', () => {
     assert.ok(environment.unset.includes('GOOGLE_API_KEY'));
     assert.ok(environment.unset.includes('GOOGLE_APPLICATION_CREDENTIALS'));
   });
+
+  it('launches a linked Qwen model through an account-scoped OpenCode config without serializing its key', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    const instance = new CredentialBroker(directory);
+    await instance.upsertAccount(
+      'qwen', 'dashscope', 'api-key', 'Qwen work', 'qwen-secret',
+      'https://example.test/v1', undefined, 'qwen3-coder-next'
+    );
+
+    const environment = await instance.resolveEnv('qwen', 'dashscope');
+    const config = JSON.parse(environment.set.OPENCODE_CONFIG_CONTENT!) as {
+      model: string;
+      providers: Record<string, {env: string[]; settings: {baseURL: string}; models: Record<string, {modelID: string}>}>;
+    };
+
+    assert.equal(environment.set.FLUENT_QWEN_API_KEY, 'qwen-secret');
+    assert.equal(environment.set.FLUENT_OPENCODE_MODEL, 'fluent-qwen/qwen3-coder-next');
+    assert.equal(config.model, 'fluent-qwen/qwen3-coder-next');
+    assert.deepEqual(config.providers['fluent-qwen']!.env, ['FLUENT_QWEN_API_KEY']);
+    assert.equal(config.providers['fluent-qwen']!.settings.baseURL, 'https://example.test/v1');
+    assert.equal(config.providers['fluent-qwen']!.models['qwen3-coder-next']!.modelID, 'qwen3-coder-next');
+    assert.doesNotMatch(environment.set.OPENCODE_CONFIG_CONTENT!, /qwen-secret/);
+    assert.ok(environment.unset.includes('FLUENT_GLM_API_KEY'));
+    assert.ok(environment.unset.includes('FLUENT_NVIDIA_API_KEY'));
+  });
+
+  it('supplies safe model-link defaults for GLM and NVIDIA accounts', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    const instance = new CredentialBroker(directory);
+    await instance.upsertAccount('glm', 'zai', 'api-key', 'Z.AI', 'glm-secret');
+    await instance.upsertAccount('nvidia', 'nim', 'api-key', 'NVIDIA', 'nim-secret');
+
+    const glm = JSON.parse((await instance.resolveEnv('glm', 'zai')).set.OPENCODE_CONFIG_CONTENT!) as {model: string; providers: Record<string, {settings: {baseURL: string}}>};
+    const nvidia = JSON.parse((await instance.resolveEnv('nvidia', 'nim')).set.OPENCODE_CONFIG_CONTENT!) as {model: string; providers: Record<string, {settings: {baseURL: string}}>};
+
+    assert.equal(glm.model, 'fluent-glm/GLM-4.7');
+    assert.equal(glm.providers['fluent-glm']!.settings.baseURL, 'https://api.z.ai/api/coding/paas/v4');
+    assert.equal(nvidia.model, 'fluent-nvidia/nvidia/nemotron-3-super');
+    assert.equal(nvidia.providers['fluent-nvidia']!.settings.baseURL, 'https://integrate.api.nvidia.com/v1');
+  });
 });
 
 describe('fallback guidance', () => {
