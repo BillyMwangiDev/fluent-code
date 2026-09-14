@@ -72,7 +72,10 @@ await writeFile(configPath, JSON.stringify({
     // an optional package. pkg cannot statically follow either pattern, so declare both
     // explicitly. Config globs are relative to this generated config file, not the project root.
     scripts: [
-      `${relative(temporaryDirectory, resolve(root, 'node_modules', 'node-pty', 'lib'))}/**/*.js`
+      `${relative(temporaryDirectory, resolve(root, 'node_modules', 'node-pty', 'lib'))}/**/*.js`,
+      // Not imported by the daemon, but run from its snapshot by Claude Code hooks, agent shells and
+      // MCP clients (see src/script-runner.ts), so pkg must include them explicitly.
+      ...['hook-relay.js', 'coord-cli.js', 'fluent-coord-mcp.js'].map(script => relative(temporaryDirectory, resolve(root, 'dist', script)))
     ],
     assets: [
       `${relative(temporaryDirectory, resolve(root, 'node_modules', 'node-pty', 'package.json'))}`,

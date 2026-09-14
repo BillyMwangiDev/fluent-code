@@ -1,5 +1,8 @@
 import {connect, createServer, type Socket} from 'node:net';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {chmod, unlink} from 'node:fs/promises';
+import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {daemonSocketPath, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
 import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
@@ -307,9 +310,23 @@ async function sampleLaneCost() {
  * correlation the Claude Code hook relay already relies on.
  */
 function laneFor(cwd: string, sessionId?: string) {
-  const session = liveSession(sessionId) ?? manager.findActiveByDirectory(cwd);
-  if (!session) throw new Error(`No running Fluent lane is working in ${cwd}`);
+  const session = callerLane(cwd, sessionId);
+  if (!session) throw new Error(sessionId && knownSession(sessionId) ? `Lane ${shortId(sessionId)} is no longer running` : `No running Fluent lane is working in ${cwd}`);
   return {session, project: session.projectDirectory ?? session.directory};
+}
+
+function knownSession(sessionId: string) {
+  return manager.list().some(session => session.id === sessionId);
+}
+
+/**
+ * The lane a command or hook came from. A `FLUENT_SESSION_ID` this daemon knows is authoritative even
+ * after that lane has exited: falling back to the directory would credit a late hook or command to a
+ * sibling lane sharing the checkout — the misattribution the id exists to prevent.
+ */
+function callerLane(cwd: string, sessionId?: string) {
+  if (sessionId && knownSession(sessionId)) return liveSession(sessionId);
+  return manager.findActiveByDirectory(cwd);
 }
 
 /** The lane a caller named by the `FLUENT_SESSION_ID` it was launched with, if that lane is live. */
@@ -341,10 +358,12 @@ async function agentView(cwd: string, sessionId?: string): Promise<AgentView> {
   return {...partial, cursor: viewCursor(partial)};
 }
 
+// Imported statically: the packaged fluentd's runtime cannot run a dynamic `import()`, and a lazy
+// import here failed every `fluent-coord status` there ("A dynamic import callback was not specified").
+const execFileAsync = promisify(execFile);
+
 async function gitBranch(project: string) {
-  const {execFile} = await import('node:child_process');
-  const {promisify} = await import('node:util');
-  return promisify(execFile)('git', ['-C', project, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {timeout: 5_000})
+  return execFileAsync('git', ['-C', project, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {timeout: 5_000})
     .then(result => result.stdout.trim() || undefined, () => undefined);
 }
 
@@ -386,7 +405,7 @@ function activeSessionCount(provider: ProviderId) {
 }
 
 async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; sessionId?: string; event: string; payload: Record<string, unknown>}) {
-  const session = liveSession(sessionId) ?? manager.findActiveByDirectory(cwd);
+  const session = callerLane(cwd, sessionId);
   if (!session) return {handled: false};
   if (event === 'StatusLine' && session.provider === 'claude') {
     await usage.recordClaude(session.id, payload);
@@ -656,30 +675,86 @@ async function dispatch(request: RpcRequest) {
   }
 }
 
-/** Asks whatever is listening on the socket path for a ping. A hung or dead socket counts as absent. */
-function runningDaemon(path: string): Promise<{pid: number} | undefined> {
+/**
+ * Whether another daemon is listening on the socket path. Anything that accepts the connection
+ * counts, answered ping or not: a daemon busy with many lanes can be slow to reply, and treating slow
+ * as dead is exactly how a second daemon replaced a live one. Only a refused or missing socket — a
+ * leftover file from a daemon that is gone — counts as absent.
+ */
+function runningDaemon(path: string): Promise<{pid?: number} | undefined> {
   return new Promise(resolve => {
     const socket = connect(path);
     let buffer = '';
-    const finish = (found?: {pid: number}) => {
+    let connected = false;
+    const finish = (found?: {pid?: number}) => {
       socket.destroy();
       resolve(found);
     };
-    socket.setTimeout(1_000, () => finish());
-    socket.once('error', () => finish());
-    socket.once('connect', () => socket.write(`${JSON.stringify({id: 'fluentd-startup-probe', method: 'ping'})}\n`));
+    socket.setTimeout(2_000, () => finish(connected ? {} : undefined));
+    socket.once('error', () => finish(connected ? {} : undefined));
+    socket.once('connect', () => {
+      connected = true;
+      socket.write(`${JSON.stringify({id: 'fluentd-startup-probe', method: 'ping'})}\n`);
+    });
     socket.on('data', chunk => {
       buffer += chunk.toString();
       const newline = buffer.indexOf('\n');
       if (newline < 0) return;
       try {
         const response = JSON.parse(buffer.slice(0, newline)) as RpcResponse;
-        finish(response.ok ? response.result as {pid: number} : undefined);
+        finish(response.ok ? response.result as {pid: number} : {});
       } catch {
-        finish();
+        finish({});
       }
     });
   });
+}
+
+const stateLock = join(stateDirectory, 'fluentd.lock');
+
+/**
+ * Takes the state directory for this daemon alone. The socket guard cannot cover it: a daemon removes
+ * its socket as soon as shutdown begins, then keeps journaling its lanes' exits for seconds, and a
+ * daemon started in that window restored the same state and wrote it concurrently. A lock left by a
+ * daemon that died is taken over once its pid is gone; a live holder gets a short wait, since it is
+ * usually still finishing its shutdown.
+ */
+async function acquireStateLock() {
+  mkdirSync(stateDirectory, {recursive: true, mode: 0o700});
+  for (let attempt = 0; ; attempt++) {
+    try {
+      writeFileSync(stateLock, String(process.pid), {flag: 'wx', mode: 0o600});
+      process.on('exit', () => {
+        try {
+          if (readFileSync(stateLock, 'utf8') === String(process.pid)) rmSync(stateLock);
+        } catch { /* already gone */ }
+      });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    let holder = Number.NaN;
+    try { holder = Number.parseInt(readFileSync(stateLock, 'utf8'), 10); } catch { /* released meanwhile */ }
+    if (!pidAlive(holder)) {
+      rmSync(stateLock, {force: true});
+      continue;
+    }
+    if (attempt >= 20) {
+      console.error(`fluentd state in ${stateDirectory} is in use by pid ${holder}; not starting another`);
+      process.exit(1);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+}
+
+function pidAlive(pid: number) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
 }
 
 async function main() {
@@ -687,12 +762,27 @@ async function main() {
   // the first running but unreachable — together with every lane it held. Each app launch did this,
   // so the window could end up talking to a stale daemon while live lanes sat orphaned. Defer to the
   // daemon that is already answering instead, before touching any state it owns.
-  const existing = await runningDaemon(socketPath);
-  if (existing) {
+  let existing = await runningDaemon(socketPath);
+  // A daemon that accepts the connection without answering may only be busy, so give it time. It is
+  // never replaced either way: a hung one is reported, because replacing it would orphan its lanes.
+  // Each round is the probe's 2s reply timeout plus the pause: five rounds is the ~20s reported below.
+  for (let attempt = 0; existing && existing.pid === undefined && attempt < 5; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 1_500));
+    existing = await runningDaemon(socketPath);
+  }
+  if (existing?.pid !== undefined) {
     console.error(`fluentd is already running on ${socketPath} (pid ${existing.pid}); not starting another`);
     process.exit(0);
   }
+  if (existing) {
+    console.error(`fluentd on ${socketPath} accepts connections but has not answered for 20s; stop that process before starting another`);
+    process.exit(1);
+  }
+  await acquireStateLock();
   await manager.restore();
+  // Bounds run history (RunStore.compact); without it the snapshot grows with every lane-hour.
+  const compaction = setInterval(() => void manager.runStore.compact().catch(error => console.error(`fluentd run compaction failed: ${error.message}`)), 10 * 60_000);
+  compaction.unref();
   await broker.restore();
   await coordination.restore();
   await remotes.restore();
@@ -786,16 +876,25 @@ async function main() {
       .then(() => console.log(`fluentd listening on ${socketPath}`))
       .catch(error => console.error(`fluentd could not secure its socket: ${error.message}`));
   });
+  let shuttingDown = false;
   const shutdown = () => {
+    // SIGINT and SIGTERM can both arrive (tsx relays signals and may repeat one); shut down once.
+    if (shuttingDown) return;
+    shuttingDown = true;
     hardware.stop();
     resources.stop();
     for (const channel of codexChannels.values()) channel.stop();
     // `server.close` only stops new connections and waits for open ones — and the desktop app keeps
     // streams open indefinitely. Waiting for them left a daemon that had already removed its socket
     // running on: unreachable by any new client, yet still holding its lanes.
-    server.close(() => process.exit(0));
+    server.close();
     for (const client of clients) client.destroy();
-    setTimeout(() => process.exit(0), 2_000).unref();
+    // Lanes end with the daemon rather than being orphaned (see SessionManager.shutdown); the timer
+    // bounds a lane that ignores SIGTERM.
+    void manager.shutdown()
+      .catch(error => console.error(`fluentd shutdown: ${error.message}`))
+      .finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 5_000).unref();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

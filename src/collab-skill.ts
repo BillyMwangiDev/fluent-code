@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
 import {coordCommand} from './agent-briefing.js';
+import {packagedExecutable} from './script-runner.js';
 
 export const skillName = 'fluent-collab';
 export const coordinationMcpName = 'fluent-coord';
@@ -168,16 +169,23 @@ export type CollaborationInstallState = SkillInstallState & {
 /** The compiled command is intentionally absolute: user-scoped MCP registrations must work from
  * every project, even when Fluent itself is running from a source checkout. */
 export function coordinationMcpCommand() {
-  return {command: process.execPath, args: [join(packageRoot, 'dist', 'fluent-coord-mcp.js')]};
+  const packaged = packagedExecutable();
+  return {
+    command: process.execPath,
+    args: [join(packageRoot, 'dist', 'fluent-coord-mcp.js')],
+    // Without this the packaged binary starts another daemon instead of the server (script-runner.ts).
+    env: packaged ? {PKG_EXECPATH: packaged} : {} as Record<string, string>
+  };
 }
 
 export function collaborationMcpAddArgs(provider: SkillInstallState['provider']) {
-  const {command, args} = coordinationMcpCommand();
-  if (provider === 'claude') return ['mcp', 'add', '--scope', 'user', coordinationMcpName, '--', command, ...args];
+  const {command, args, env} = coordinationMcpCommand();
+  const pairs = Object.entries(env).map(([name, value]) => `${name}=${value}`);
+  if (provider === 'claude') return ['mcp', 'add', '--scope', 'user', coordinationMcpName, ...pairs.flatMap(pair => ['-e', pair]), '--', command, ...args];
   if (provider === 'gemini') return ['mcp', 'add', '--scope', 'user', coordinationMcpName, command, ...args];
   // Codex owns its config location. Its CLI's `mcp add` is the compatibility boundary; Fluent
   // does not write Codex config files or guess their schema.
-  return ['mcp', 'add', coordinationMcpName, '--', command, ...args];
+  return ['mcp', 'add', coordinationMcpName, ...pairs.flatMap(pair => ['--env', pair]), '--', command, ...args];
 }
 
 async function installMcp(provider: SkillInstallState['provider']) {

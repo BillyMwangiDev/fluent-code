@@ -100,7 +100,13 @@ before(async () => {
 });
 
 after(async () => {
-  daemon?.kill('SIGTERM');
+  // fluentd flushes its state on SIGTERM, so removing its state directory before it exits races
+  // that final write (ENOTEMPTY). Its shutdown is bounded, so waiting for the exit is too.
+  if (daemon && daemon.exitCode === null) {
+    const exited = new Promise(resolve => daemon!.once('exit', resolve));
+    daemon.kill('SIGTERM');
+    await exited;
+  }
   for (const directory of directories) await rm(directory, {recursive: true, force: true});
 });
 

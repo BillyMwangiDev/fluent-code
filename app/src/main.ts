@@ -63,6 +63,14 @@ let route: Route = {name: 'splash'};
 // Non-null only while a page with live lane terminals is mounted, so replacing that page — by
 // navigating or by re-rendering the same route — releases their streams.
 let routeCleanup: (() => void) | undefined;
+
+/** Registers what a page releases when it is replaced. A render that finishes after a newer render
+ * already replaced its page releases at once, instead of overwriting the current page's cleanup and
+ * leaking every terminal and subscription that page mounted. */
+function setRouteCleanup(page: HTMLElement, cleanup: () => void) {
+  if (!page.isConnected) return cleanup();
+  routeCleanup = cleanup;
+}
 let credentialProvider: ProviderId = 'claude';
 type Appearance = 'system' | 'dark' | 'light';
 type ThemeMode = 'dark' | 'light';
@@ -2678,7 +2686,7 @@ function laneLauncher(defaultDirectory: string): HTMLElement {
 async function renderLaneGrid(main: HTMLElement, lanes: SessionSummary[]) {
   const selected = new Set(lanes.map(lane => lane.id));
   const disposers: Array<() => void> = [];
-  routeCleanup = () => { for (const dispose of disposers.splice(0)) dispose(); };
+  setRouteCleanup(main, () => { for (const dispose of disposers.splice(0)) dispose(); });
   const grid = h('div', {class: 'lane-grid'});
   main.append(h('section', {class: 'lane-section'}, [
     h('div', {}, [
@@ -2909,7 +2917,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
       void api.getRun(sessionId).then(run => { currentRun = run; renderHeader(summary); }, () => renderHeader(summary));
     }
   });
-  routeCleanup = lane.dispose;
+  setRouteCleanup(main, lane.dispose);
   const initial = lane.snapshot;
   currentRun = await api.getRun(sessionId).catch(() => undefined);
   renderHeader(initial);
@@ -2936,13 +2944,13 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     showBanner(`switched to ${accountLabel(event.accountId, chains)} (${event.reason})`);
   });
 
-  routeCleanup = () => {
+  setRouteCleanup(main, () => {
     lane.dispose();
     unlistenNotice();
     unlistenSwitched();
     unlistenVerification();
     unlistenAdmission();
-  };
+  });
 }
 
 // --- Credentials ------------------------------------------------------------

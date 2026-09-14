@@ -24,11 +24,18 @@ type LiveSession = {
   bracketedPaste?: boolean;
   /** The end of the previous chunk, so a mode sequence split across two reads is still seen. */
   modeTail?: string;
+  /** Output bytes seen since the last durable observation was recorded. */
+  pendingOutputBytes?: number;
+  observationTimer?: NodeJS.Timeout;
 };
 
 type StoredSession = {summary: SessionSummary; directory: string; /** Legacy only; never written again. */ output?: string};
 
 const maxOutputBytes = 160_000;
+/** How often a streaming lane's output is summarized into one durable observation. */
+const observationIntervalMs = 1_000;
+/** How long a burst of output or keystrokes may leave `sessions.json` behind before it is written. */
+const persistDelayMs = 500;
 
 /**
  * Variables a parent agent session exports to mark its own children. fluentd is often started from
@@ -92,12 +99,17 @@ export function bracketedPasteMode(current: boolean, output: string) {
 
 /**
  * Text as a terminal delivers a paste. Inside a bracketed paste a newline is part of the text rather
- * than a submit, so a multi-line brief arrives whole. A paste-end marker inside the text is removed:
- * it would close the paste early and let everything after it be read as keystrokes.
+ * than a submit, so a multi-line brief arrives whole.
+ *
+ * Every other control character is removed, not just paste markers. Injected text can come from an
+ * agent (a ticket another lane wrote), and a filter that deletes whole markers in one pass rebuilds a
+ * marker nested inside one — closing the paste early and typing the rest into the lane as keystrokes.
+ * With no ESC left, no marker can be formed. Without bracketed paste a newline would submit mid-brief,
+ * so lines are joined instead.
  */
 export function pastePayload(text: string, bracketed: boolean) {
-  const clean = text.replace(/\x1b\[20[01]~/g, '');
-  return bracketed ? `\x1b[200~${clean}\x1b[201~` : clean;
+  const clean = text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '');
+  return bracketed ? `\x1b[200~${clean}\x1b[201~` : clean.replace(/[\t\n]+/g, ' ');
 }
 
 /** Emits 'output' (sessionId, chunk) and 'status' (sessionId, summary) so daemon.ts can push
@@ -107,6 +119,10 @@ export class SessionManager extends EventEmitter {
   private readonly stateFile: string;
   readonly runStore: RunStore;
   private persistQueue: Promise<void> = Promise.resolve();
+  private persistTimer?: NodeJS.Timeout;
+  /** Set once shutdown begins; no lane may start after the shutdown has taken its list of lanes. */
+  private closing = false;
+  private shutdownPromise?: Promise<unknown>;
   private readonly worktrees = new WorktreeManager();
 
   constructor(stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent')) {
@@ -197,6 +213,9 @@ export class SessionManager extends EventEmitter {
     // (spec §7.5) — never by rewriting what the CLI does or what it prints.
     let terminal: import('node-pty').IPty;
     try {
+      // Checked at the spawn itself: a launch already underway when shutdown took its list of lanes
+      // would otherwise start a lane nothing will stop.
+      if (this.closing) throw new Error('fluentd is shutting down');
       const pty = await ptyRuntime();
       terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider), ...initialPromptArgs(provider, summary.task)], {
       cwd: sessionDirectory,
@@ -232,6 +251,8 @@ export class SessionManager extends EventEmitter {
       session.summary.pid = undefined;
       session.summary.exitCode = exitCode;
       this.setStatus(session, session.summary.status === 'stopped' ? 'stopped' : 'exited');
+      // Journaled after the in-memory state is settled, and ahead of the run's final state.
+      this.recordObservation(session);
       void this.finishRun(session.summary.id, session.summary.status, exitCode).catch(error => console.error(`fluentd could not finalize run ${session.summary.id}: ${error.message}`));
     });
     return summary;
@@ -260,10 +281,37 @@ export class SessionManager extends EventEmitter {
     if (!session?.terminal || session.summary.status !== 'running') throw new Error('Session is not accepting input');
     // A PTY write is only delivery intent. There is no provider acknowledgement we can prove, so
     // a restart after this point remains reviewable rather than being replayed automatically.
-    await this.runStore.dispatchIntent(sessionId, {inputBytes: Buffer.byteLength(input)});
+    // Only a submit is a prompt dispatch: single keystrokes, a paste still waiting for Enter, and the
+    // replies a terminal sends to a CLI's own queries (cursor position, focus, colours) are not —
+    // recording each of those made every typed character a durable run event.
+    if (input.includes('\r')) await this.runStore.dispatchIntent(sessionId, {inputBytes: Buffer.byteLength(input)});
     session.terminal.write(input);
     session.summary.updatedAt = new Date().toISOString();
-    await this.persist();
+    this.schedulePersist();
+  }
+
+  /**
+   * Ends every lane this daemon started, for a daemon that is shutting down. A lane outlives its
+   * closed terminal (Claude Code keeps running after its PTY hangs up) and a restarted daemon cannot
+   * reattach to it, so leaving lanes behind would leak live agents that nothing can see or stop.
+   * Every call gets the same shutdown, since a signal handler can fire more than once.
+   */
+  shutdown() {
+    this.shutdownPromise ??= this.shutdownLanes();
+    return this.shutdownPromise;
+  }
+
+  private async shutdownLanes() {
+    this.closing = true;
+    const live = [...this.sessions.values()].filter(session => session.terminal);
+    // Signal every lane before the first await: under `pnpm daemon`, tsx can SIGKILL fluentd moments
+    // after relaying SIGINT, and a lane never signalled would be orphaned.
+    for (const session of live) session.terminal!.kill('SIGTERM');
+    await Promise.all(live.map(session => this.stop(session.summary.id).catch(() => undefined)));
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = undefined;
+    await Promise.all([this.runStore.flush(), this.persist()]);
+    return live.length;
   }
 
   /** Keeps the PTY's own idea of terminal size in sync with whatever xterm.js actually rendered
@@ -376,11 +424,35 @@ export class SessionManager extends EventEmitter {
     session.modeTail = chunk.slice(-32);
     session.output = (session.output + chunk).slice(-maxOutputBytes);
     session.summary.updatedAt = new Date().toISOString();
-    this.queuePersist();
+    this.schedulePersist();
     this.emit('output', session.summary.id, chunk);
     // The terminal view remains live, but the durable event only records a redacted observation
     // count. Persisting raw terminal text would turn the trace into an accidental secret store.
-    void this.runStore.record(session.summary.id, 'text.delta', {bytes: Buffer.byteLength(chunk)}, {adapter: 'pty'}).catch(error => console.error(`fluentd could not record terminal observation: ${error.message}`));
+    // A TUI emits many small chunks per second, so the count is summarized once per interval.
+    session.pendingOutputBytes = (session.pendingOutputBytes ?? 0) + Buffer.byteLength(chunk);
+    if (!session.observationTimer) {
+      session.observationTimer = setTimeout(() => this.recordObservation(session), observationIntervalMs);
+      session.observationTimer.unref();
+    }
+  }
+
+  private recordObservation(session: LiveSession) {
+    if (session.observationTimer) clearTimeout(session.observationTimer);
+    session.observationTimer = undefined;
+    const bytes = session.pendingOutputBytes ?? 0;
+    session.pendingOutputBytes = 0;
+    if (bytes === 0) return;
+    void this.runStore.record(session.summary.id, 'text.delta', {bytes}, {adapter: 'pty'}).catch(error => console.error(`fluentd could not record terminal observation: ${error.message}`));
+  }
+
+  /** Coalesces the frequent, low-stakes `updatedAt` changes from output and keystrokes. */
+  private schedulePersist() {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.queuePersist();
+    }, persistDelayMs);
+    this.persistTimer.unref();
   }
 
   private setStatus(session: LiveSession, status: SessionStatus) {

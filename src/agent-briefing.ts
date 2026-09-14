@@ -3,6 +3,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {delimiter} from 'node:path';
 import type {ProviderId} from './daemon-protocol.js';
+import {scriptRunner} from './script-runner.js';
 
 const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
@@ -15,7 +16,7 @@ export function coordCommand() {
   for (const entry of (process.env.PATH ?? '').split(delimiter)) {
     if (entry && existsSync(join(entry, 'fluent-coord'))) return 'fluent-coord';
   }
-  return `node ${join(packageRoot, 'dist', 'coord-cli.js')}`;
+  return `${scriptRunner()} ${join(packageRoot, 'dist', 'coord-cli.js')}`;
 }
 
 /**
