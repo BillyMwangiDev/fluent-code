@@ -21,9 +21,10 @@ pnpm tauri dev
 
 `fluentd` owns provider processes, so closing the app window does not stop a running session —
 check what's still running with `pnpm daemon:status`. The Tauri app talks to `fluentd` only over
-its Unix socket (`$XDG_RUNTIME_DIR/fluent-code.sock`, or `/tmp/fluent-code.sock` when that
-directory is unavailable; override both sides with `FLUENT_SOCKET`);
-there is no other channel between them.
+an owner-local IPC endpoint: a Unix socket (`$XDG_RUNTIME_DIR/fluent-code.sock`, or
+`/tmp/fluent-code.sock`) on macOS/Linux, or a per-user Windows named pipe. Override both sides
+with `FLUENT_SOCKET` (and optionally set `FLUENT_PIPE_NAME` on Windows). There is no other channel
+between them.
 
 First run: the splash screen routes you to onboarding if no provider account is connected yet.
 "Connect via CLI login" opens a real `claude` session in the app so you complete auth through the
@@ -46,7 +47,8 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
   missing values mean unavailable data, not zero. Transcript-derived totals can include sessions
   started outside Fluent and are estimates, not billing records.
 - SSH remote profiles forward a remote `fluentd` Unix socket and can become the active desktop
-  target. Remote setup, credential broadcasts, and reconnect recovery still need fuller UX.
+  target. Windows remote forwarding, remote setup, credential broadcasts, and reconnect recovery
+  still need fuller UX.
 - The Design workspace can optionally embed a user-run local [OpenDesign](https://open-design.ai/official/)
   service at `127.0.0.1:7456`. The connector is intentionally loopback-only and does not yet
   perform file-level OpenDesign API handoff; it creates repository-bound Fluent handoff tasks.
@@ -63,6 +65,21 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
   with one explicit approval. The daemon validates executable/argument/URL structure, but a
   trusted-source policy is still needed for third-party extension sources.
 
+## Desktop packaging
+
+`pnpm run package:mac` produces a macOS `.dmg`; `pnpm run package:windows` produces a Windows
+NSIS `.exe`. Both commands create `fluentd` and the resource monitor as Tauri sidecars before
+assembling the installer. A release build therefore does not require a system Node installation,
+and the packaged daemon locates the packaged monitor beside itself. Native terminal and credential
+addons must be built on their matching target; the sidecar scripts deliberately reject a cross
+compile rather than silently shipping host-native code. Build macOS on macOS and Windows on
+Windows. The **desktop package checks** workflow runs both native builds and retains the test
+installers as downloadable Actions artifacts for 30 days; it can also be started manually.
+
+The local and CI artifacts are unsigned test installers. A public release still requires an Apple
+Developer signing identity and notarization for macOS, a Windows code-signing certificate, clean
+machine installation checks, and the provider-credential and multi-lane smoke matrix.
+
 ## Security and local data
 
 `fluentd` is a local, owner-only Unix-socket service. It can start provider CLIs, manage account
@@ -78,7 +95,8 @@ remote-connection notes.
 
 ```
 fluentd   src/daemon.ts et al. — Node, owns PTY sessions (node-pty), the credential broker,
-          and the hooks relay. Newline-delimited JSON-RPC over a Unix socket.
+          and the hooks relay. Newline-delimited JSON-RPC over a Unix socket (macOS/Linux) or a
+          Windows named pipe.
 fluent    src-tauri/ (Rust) + app/ (vanilla TS/HTML, esbuild-bundled, no framework) — a Tauri
           window. Rust holds the only fluentd connection; the webview never talks to the socket
           directly. xterm.js renders the text fluentd already captures.

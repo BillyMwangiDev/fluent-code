@@ -5,31 +5,79 @@
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+#[cfg(not(windows))]
+use tokio::net::UnixStream as DaemonStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient as DaemonStream};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
 fn socket_path(override_path: Option<&str>) -> String {
     if let Some(path) = override_path.filter(|path| !path.trim().is_empty()) {
         return path.to_string();
     }
-    std::env::var("FLUENT_SOCKET").unwrap_or_else(|_| {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        format!("{runtime_dir}/fluent-code.sock")
-    })
+    std::env::var("FLUENT_SOCKET").unwrap_or_else(|_| default_socket_path())
+}
+
+#[cfg(not(windows))]
+fn default_socket_path() -> String {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{runtime_dir}/fluent-code.sock")
+}
+
+#[cfg(windows)]
+fn default_socket_path() -> String {
+    let raw_name = std::env::var("FLUENT_PIPE_NAME")
+        .or_else(|_| std::env::var("USERNAME"))
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "default".to_string());
+    let sanitized: String = raw_name.chars().map(|character| {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') { character } else { '-' }
+    }).collect();
+    let pipe_name = sanitized.trim_matches('-');
+    format!(r"\\.\pipe\fluent-code-{}", if pipe_name.is_empty() { "default" } else { &pipe_name[..pipe_name.len().min(80)] })
+}
+
+#[cfg(not(windows))]
+async fn connect_socket(path: String) -> std::io::Result<DaemonStream> {
+    DaemonStream::connect(path).await
+}
+
+#[cfg(windows)]
+async fn connect_socket(path: String) -> std::io::Result<DaemonStream> {
+    // A named-pipe server can briefly have no free instance while accepting another client. Tokio
+    // documents ERROR_PIPE_BUSY as retriable; bound it so a request cannot hang forever.
+    for attempt in 0..20 {
+        match ClientOptions::new().open(&path) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) && attempt < 19 => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded named-pipe retry loop always returns")
 }
 
 fn unavailable(e: impl std::fmt::Display) -> String {
-    format!("fluentd unavailable: {e}. Start it with `pnpm daemon`.")
+    if cfg!(debug_assertions) {
+        format!("fluentd unavailable: {e}. Start it with `pnpm daemon`.")
+    } else {
+        format!("fluentd unavailable: {e}. Fluent Code could not start its local engine; quit and reopen the app.")
+    }
 }
 
 /// One-shot request/response: connect, write one line, read one line, close. Used for every RPC
 /// method except the two that keep the socket open (`sessions.subscribe`, `stream.open`).
 pub async fn request(method: &str, params: Option<Value>, target_socket: Option<&str>) -> Result<Value, String> {
-    let mut stream = UnixStream::connect(socket_path(target_socket)).await.map_err(unavailable)?;
+    let mut stream = connect_socket(socket_path(target_socket)).await.map_err(unavailable)?;
 
     let id = Uuid::new_v4().to_string();
     let mut payload = json!({"id": id, "method": method});
@@ -51,9 +99,21 @@ pub async fn request(method: &str, params: Option<Value>, target_socket: Option<
     }
 }
 
-/// Session id -> the background task streaming its events, so `sessions_unsubscribe` can cancel
-/// the right connection instead of guessing.
-pub type Subscriptions = Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>;
+/// One background task streaming a session's events, shared by every view showing that session.
+///
+/// Shared because Tauri events are broadcast to every listener: a second stream for the same
+/// session delivered each chunk twice into the same terminal. Counted because two views of one lane
+/// (the lane grid and the single-session screen) subscribe and unsubscribe in no guaranteed order
+/// while navigating, and one view leaving must not cut off the other.
+pub struct Subscription {
+    handle: tauri::async_runtime::JoinHandle<()>,
+    alive: Arc<AtomicBool>,
+    holders: usize,
+}
+
+/// Session id -> its shared stream, so `sessions_unsubscribe` can release the right connection
+/// instead of guessing.
+pub type Subscriptions = Arc<Mutex<HashMap<String, Subscription>>>;
 
 fn forward_event(app: &AppHandle, event: &Value) {
     match event["event"].as_str() {
@@ -98,8 +158,19 @@ fn forward_event(app: &AppHandle, event: &Value) {
 /// Tauri event, mirroring `daemon-client.ts`'s `subscribeSession`. Returns the initial snapshot
 /// (the subscribe ack), same as the TS client's `onSnapshot`.
 pub async fn subscribe_session(app: AppHandle, subscriptions: Subscriptions, session_id: String, target_socket: Option<String>) -> Result<Value, String> {
-    let stream = UnixStream::connect(socket_path(target_socket.as_deref())).await.map_err(unavailable)?;
-    let (read_half, mut write_half) = stream.into_split();
+    // Held for the whole call, so two first subscriptions to one session cannot both open a stream.
+    let mut subscriptions = subscriptions.lock().await;
+    if let Some(existing) = subscriptions.get_mut(&session_id) {
+        if existing.alive.load(Ordering::SeqCst) {
+            // The lane's output is already being forwarded; this view only needs the text so far.
+            let snapshot = request("sessions.get", Some(json!({"sessionId": session_id})), target_socket.as_deref()).await?;
+            existing.holders += 1;
+            return Ok(snapshot);
+        }
+    }
+
+    let stream = connect_socket(socket_path(target_socket.as_deref())).await.map_err(unavailable)?;
+    let (read_half, mut write_half) = tokio::io::split(stream);
 
     let id = Uuid::new_v4().to_string();
     let payload = json!({"id": id, "method": "sessions.subscribe", "params": {"sessionId": session_id}});
@@ -116,7 +187,8 @@ pub async fn subscribe_session(app: AppHandle, subscriptions: Subscriptions, ses
     }
     let snapshot = ack["result"].clone();
 
-    let sid = session_id.clone();
+    let alive = Arc::new(AtomicBool::new(true));
+    let stream_alive = alive.clone();
     let handle = tauri::async_runtime::spawn(async move {
         // `write_half` is kept alive only so the socket isn't half-closed by the writer dropping;
         // unsubscribe tears the whole task down via `abort()`.
@@ -140,16 +212,25 @@ pub async fn subscribe_session(app: AppHandle, subscriptions: Subscriptions, ses
                 Err(_) => break,
             }
         }
+        // A stream the daemon closed is replaced by the next subscription rather than shared.
+        stream_alive.store(false, Ordering::SeqCst);
     });
 
-    subscriptions.lock().await.insert(sid, handle);
+    subscriptions.insert(session_id, Subscription { handle, alive, holders: 1 });
     Ok(snapshot)
 }
 
 pub async fn unsubscribe_session(subscriptions: Subscriptions, session_id: String, target_socket: Option<&str>) {
-    if let Some(handle) = subscriptions.lock().await.remove(&session_id) {
-        handle.abort();
+    let mut subscriptions = subscriptions.lock().await;
+    let Some(existing) = subscriptions.get_mut(&session_id) else { return };
+    existing.holders = existing.holders.saturating_sub(1);
+    if existing.holders > 0 {
+        return;
     }
+    if let Some(released) = subscriptions.remove(&session_id) {
+        released.handle.abort();
+    }
+    drop(subscriptions);
     let _ = request("sessions.unsubscribe", Some(json!({"sessionId": session_id})), target_socket).await;
 }
 
@@ -163,8 +244,8 @@ pub fn spawn_global_event_stream(app: AppHandle) {
     // managed runtime regardless of the caller's context.
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Ok(stream) = UnixStream::connect(socket_path(None)).await {
-                let (read_half, mut write_half) = stream.into_split();
+            if let Ok(stream) = connect_socket(socket_path(None)).await {
+                let (read_half, mut write_half) = tokio::io::split(stream);
                 let id = Uuid::new_v4().to_string();
                 let payload = json!({"id": id, "method": "stream.open"});
                 let mut line = serde_json::to_string(&payload).unwrap();

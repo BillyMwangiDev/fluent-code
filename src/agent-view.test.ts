@@ -42,8 +42,8 @@ describe('what a lane is told', () => {
   it('counts the lane\'s own claims separately from everyone\'s', () => {
     const text = renderAgentView(view({
       claims: [
-        {path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'},
-        {path: 'src/b.ts', sessionId: other, origin: 'observed', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}
+        {id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'},
+        {id: 'claim-b', path: 'src/b.ts', sessionId: other, origin: 'observed', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}
       ]
     }));
 
@@ -76,7 +76,7 @@ describe('what a lane is told', () => {
   it('carries no JSON punctuation at all', () => {
     const text = renderAgentView(view({
       tasks: [{id: 'a1c2d3e4-0000-0000-0000-000000000000', title: 'Add tests', status: 'todo', createdAt: 'n'}],
-      claims: [{path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]
+      claims: [{id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]
     }));
 
     assert.doesNotMatch(text, /[{}"]/, 'the point of the format is that it is not JSON');
@@ -85,17 +85,17 @@ describe('what a lane is told', () => {
 
 describe('the status cursor', () => {
   it('is stable for the same picture and changes when the picture does', () => {
-    const before = view({claims: [{path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
-    const same = view({claims: [{path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
-    const after = view({claims: [{path: 'src/b.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
+    const before = view({claims: [{id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
+    const same = view({claims: [{id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
+    const after = view({claims: [{id: 'claim-b', path: 'src/b.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'n', expiresAt: 'n'}]});
 
     assert.equal(before.cursor, same.cursor);
     assert.notEqual(before.cursor, after.cursor);
   });
 
   it('ignores lease renewals, which change nothing an agent would act on', () => {
-    const before = view({claims: [{path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'one', expiresAt: 'one'}]});
-    const renewed = view({claims: [{path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'two', expiresAt: 'two'}]});
+    const before = view({claims: [{id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'one', expiresAt: 'one'}]});
+    const renewed = view({claims: [{id: 'claim-a', path: 'src/a.ts', sessionId: lane.sessionId, origin: 'declared', createdAt: 'n', renewedAt: 'two', expiresAt: 'two'}]});
 
     assert.equal(before.cursor, renewed.cursor, 'otherwise every heartbeat would look like news');
   });

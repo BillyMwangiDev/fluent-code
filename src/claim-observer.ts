@@ -13,6 +13,7 @@ const hotspotShare = 0.05;
 const hotspotTtlMs = 60 * 60_000;
 
 export type Lane = {sessionId: string; project: string; directory: string};
+export type LaneProjectValidator = (project: string, sessionId: string) => unknown;
 
 /**
  * Parses `git status --porcelain` into the paths a lane has actually touched. Renames report both
@@ -47,7 +48,11 @@ export class ClaimObserver extends EventEmitter {
   private readonly hotspots = new Map<string, {paths: Set<string>; computedAt: number}>();
   private readonly lastReported = new Map<string, string>();
 
-  constructor(private readonly coordination: CoordinationManager) {
+  constructor(
+    private readonly coordination: CoordinationManager,
+    /** The daemon supplies session/project membership; standalone analysis tests need no manager. */
+    private readonly requireLaneInProject: LaneProjectValidator = () => undefined
+  ) {
     super();
   }
 
@@ -56,6 +61,7 @@ export class ClaimObserver extends EventEmitter {
     for (const lane of lanes) {
       const paths = await this.changedPaths(lane.directory);
       if (paths === undefined) continue;
+      this.requireLaneInProject(lane.project, lane.sessionId);
       await this.coordination.observe(lane.project, lane.sessionId, paths);
       touched.add(lane.project);
     }

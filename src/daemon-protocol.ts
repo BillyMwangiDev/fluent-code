@@ -1,7 +1,7 @@
 import type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {PriceOverride, SpendSummary} from './spend-tracker.js';
 export type {AssignedIssue, OpenPullRequest, RepoStatus} from './source-control.js';
-export type {CatalogPlugin, MarketplaceEntry, McpInstallResult, McpServerConfig, McpServerEntry, McpTransport} from './catalog-manager.js';
+export type {CatalogPlugin, ExtensionTrust, ExtensionTrustLevel, MarketplaceEntry, McpInstallResult, McpServerConfig, McpServerEntry, McpTransport} from './catalog-manager.js';
 export type {CapabilitySet, Run, RunEvent, RunEventType, RunState, TimingMap, TimingValue, WorkClass} from './execution/types.js';
 export type {ApprovalAction, ApprovalRecord} from './security/approval-records.js';
 import type {Run, RunEvent} from './execution/types.js';
@@ -25,6 +25,9 @@ export type SessionSummary = {
   createdAt: string;
   updatedAt: string;
   exitCode?: number | null;
+  /** A launch failure is retained with the session so an unavailable provider never reads as an
+   * unresponsive button. Provider output remains ephemeral; this is Fluent's own diagnosis. */
+  error?: string;
   /** The credential account active for this provider at the moment the session was created — a
    * historical record for the session list, not a live pointer (spec screen 4's account column). */
   accountId?: string;
@@ -212,13 +215,31 @@ export type EvalRun = {
   reportPath?: string;
 };
 
-export type CoordinationTask = {id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string};
+/** A ticket is deliberately small enough to pass to a lane as clean context. The master brief is
+ * stored once on the board; individual tickets carry only the specialised slice of work. */
+export type TaskSource = 'manual' | 'spec' | 'planner';
+export type CoordinationTask = {
+  id: string;
+  title: string;
+  status: 'todo' | 'active' | 'done';
+  /** The lane currently accountable for this ticket, when one has been deliberately assigned. */
+  sessionId?: string;
+  /** The requested runtime for a future lane. It remains visible even before a lane is launched. */
+  provider?: ProviderId;
+  /** Human language such as “frontend”, “backend”, or “review”; never a hidden provider policy. */
+  role?: string;
+  /** The ticket-local brief. This prevents the project brief from bloating every lane's prompt. */
+  description?: string;
+  source?: TaskSource;
+  createdAt: string;
+  updatedAt?: string;
+};
 /**
  * A claim is an advisory signal that a lane intends to edit a path — never an OS lock (spec §11).
  * `origin` separates a claim an agent declared from one fluentd observed in the lane's own diff;
  * the lease fields let a dead lane's claims lapse instead of blocking live lanes forever.
  */
-export type FileClaim = {path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string};
+export type FileClaim = {id: string; path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string};
 /** `path` is the claim being attempted; `claimedPath` is the existing claim it overlaps, which is
  * not necessarily the same string — `src/` and `src/daemon.ts` overlap without matching. */
 export type ClaimConflict = {path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'};
@@ -234,7 +255,57 @@ export type Handoff = {id: string; fromSessionId: string; toSessionId: string; s
  * spec §2 principle 3 rules out. A lane reads its own mail when it is ready to.
  */
 export type LaneMessage = {id: string; from: string; to: string; body: string; createdAt: string; readAt?: string};
-export type CoordinationState = {project: string; tasks: CoordinationTask[]; claims: FileClaim[]; decisions: Decision[]; handoffs: Handoff[]; messages: LaneMessage[]};
+/** A bounded, retained coordination journal. It deliberately records board changes, not terminal
+ * output, tool calls, credential data or a provider transcript. */
+export type CoordinationEventKind =
+  | 'task.created'
+  | 'task.assigned'
+  | 'task.status_changed'
+  | 'master_brief.set'
+  | 'claim.declared'
+  | 'claim.observed'
+  | 'claim.conflicted'
+  | 'claim.released'
+  | 'decision.recorded'
+  | 'handoff.requested'
+  | 'handoff.accepted'
+  | 'message.sent';
+export type ClaimReleaseReason = 'released' | 'observed_cleared' | 'session_ended' | 'lease_expired';
+export type CoordinationEvent = {
+  id: string;
+  at: string;
+  kind: CoordinationEventKind;
+  /** Present only when a lane initiated the change. User-driven board actions remain unattributed. */
+  actorSessionId?: string;
+  /** Every lane materially involved in this event, including an assigned task or handoff endpoint. */
+  sessionIds: string[];
+  taskId?: string;
+  provider?: ProviderId;
+  role?: string;
+  claimId?: string;
+  path?: string;
+  claimOrigin?: FileClaim['origin'];
+  fromStatus?: CoordinationTask['status'];
+  toStatus?: CoordinationTask['status'];
+  releaseReason?: ClaimReleaseReason;
+  decisionId?: string;
+  handoffId?: string;
+  messageId?: string;
+  /** The claims that prevented a new advisory claim; the attempted claim itself was not stored. */
+  conflicts?: ClaimConflict[];
+};
+export type CoordinationState = {
+  project: string;
+  /** User-authored project direction for planners and newly launched specialist lanes. */
+  masterBrief?: string;
+  masterBriefUpdatedAt?: string;
+  tasks: CoordinationTask[];
+  claims: FileClaim[];
+  decisions: Decision[];
+  handoffs: Handoff[];
+  messages: LaneMessage[];
+  events: CoordinationEvent[];
+};
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; status: 'disconnected' | 'connecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
@@ -248,6 +319,8 @@ export type RpcRequest =
   | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
+  /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */
+  | {id: string; method: 'sessions.inject'; params: {sessionId: string; text: string; submit?: boolean}}
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
   | {id: string; method: 'sessions.removeWorktree'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'sessions.diff'; params: {sessionId: string}}
@@ -259,18 +332,19 @@ export type RpcRequest =
   | {id: string; method: 'merge.integrate'; params: {sessionId: string; approvalId?: string}}
   | {id: string; method: 'merge.pending'; params: {project: string}}
   /**
-   * The agent-facing surface. Every method identifies its lane by the working directory it was run
-   * from, so an agent never has to know or pass a session id — it just runs a command where it is
-   * already working (see coord-cli.ts).
+   * The agent-facing surface. An agent never has to know or pass a session id — it just runs a
+   * command where it is already working (see coord-cli.ts). The command forwards the
+   * `FLUENT_SESSION_ID` its lane was launched with when it has one, which is what tells apart
+   * several lanes sharing one directory; the working directory is the fallback.
    */
-  | {id: string; method: 'agent.status'; params: {cwd: string; since?: string}}
-  | {id: string; method: 'agent.claim'; params: {cwd: string; paths: string[]}}
-  | {id: string; method: 'agent.release'; params: {cwd: string; paths: string[]}}
-  | {id: string; method: 'agent.note'; params: {cwd: string; summary: string}}
-  | {id: string; method: 'agent.task'; params: {cwd: string; action: 'add' | 'start' | 'done'; title?: string; taskId?: string}}
-  | {id: string; method: 'agent.handoff'; params: {cwd: string; to: string; summary: string}}
-  | {id: string; method: 'agent.send'; params: {cwd: string; to: string; body: string}}
-  | {id: string; method: 'agent.inbox'; params: {cwd: string; peek?: boolean}}
+  | {id: string; method: 'agent.status'; params: {cwd: string; sessionId?: string; since?: string}}
+  | {id: string; method: 'agent.claim'; params: {cwd: string; sessionId?: string; paths: string[]}}
+  | {id: string; method: 'agent.release'; params: {cwd: string; sessionId?: string; paths: string[]}}
+  | {id: string; method: 'agent.note'; params: {cwd: string; sessionId?: string; summary: string}}
+  | {id: string; method: 'agent.task'; params: {cwd: string; sessionId?: string; action: 'add' | 'start' | 'done'; title?: string; taskId?: string}}
+  | {id: string; method: 'agent.handoff'; params: {cwd: string; sessionId?: string; to: string; summary: string}}
+  | {id: string; method: 'agent.send'; params: {cwd: string; sessionId?: string; to: string; body: string}}
+  | {id: string; method: 'agent.inbox'; params: {cwd: string; sessionId?: string; peek?: boolean}}
   | {id: string; method: 'skills.status'}
   | {id: string; method: 'skills.install'; params?: {approvalId?: string}}
   | {id: string; method: 'evals.latest'}
@@ -304,8 +378,10 @@ export type RpcRequest =
   | {id: string; method: 'providers.list'}
   | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}
-  | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; sessionId?: string}}
+  | {id: string; method: 'coordination.brief.set'; params: {project: string; brief: string}}
+  | {id: string; method: 'coordination.task.create'; params: {project: string; title: string; description?: string; role?: string; provider?: ProviderId; source?: TaskSource; sessionId?: string}}
   | {id: string; method: 'coordination.task.update'; params: {project: string; taskId: string; status: 'todo' | 'active' | 'done'; sessionId?: string}}
+  | {id: string; method: 'coordination.task.assign'; params: {project: string; taskId: string; sessionId?: string; provider?: ProviderId; role?: string}}
   | {id: string; method: 'coordination.claim'; params: {project: string; path: string; sessionId: string}}
   | {id: string; method: 'coordination.claims.sweep'}
   | {id: string; method: 'coordination.conflicts'; params: {project: string}}
@@ -330,7 +406,7 @@ export type RpcRequest =
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
   | {id: string; method: 'credentials.guidance'; params: {provider: ProviderId}}
   | {id: string; method: 'credentials.authStatus'}
-  | {id: string; method: 'hooks.report'; params: {cwd: string; event: string; payload: Record<string, unknown>}}
+  | {id: string; method: 'hooks.report'; params: {cwd: string; sessionId?: string; event: string; payload: Record<string, unknown>}}
   | {id: string; method: 'approvals.issue'; params: {action: ApprovalAction; target: string; command?: string; baseSha?: string; ttlMs?: number}};
 
 export type RpcResponse =
@@ -431,4 +507,23 @@ export type CredentialChainState = {
   revertAt?: string;
 };
 
-export const daemonSocketPath = () => process.env.FLUENT_SOCKET ?? `${process.env.XDG_RUNTIME_DIR ?? '/tmp'}/fluent-code.sock`;
+/**
+ * The daemon is an owner-local IPC service, never a TCP listener. Node's `net` module maps this
+ * path to a Unix-domain socket on macOS/Linux and to a named pipe on Windows. Keep the default
+ * derivation here so the daemon, terminal clients, and desktop bridge agree without relying on a
+ * shell wrapper to set `FLUENT_SOCKET`.
+ *
+ * A release-side daemon manager will provide a stronger, installation-specific pipe name on
+ * Windows through `FLUENT_SOCKET`. The default remains useful for development and must be stable
+ * enough for independently launched terminal clients to find the daemon.
+ */
+export function daemonSocketPath(platform: NodeJS.Platform = process.platform, environment: NodeJS.ProcessEnv = process.env) {
+  const override = environment.FLUENT_SOCKET?.trim();
+  if (override) return override;
+  if (platform === 'win32') {
+    const rawName = environment.FLUENT_PIPE_NAME?.trim() || environment.USERNAME?.trim() || environment.USER?.trim() || 'default';
+    const pipeName = rawName.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'default';
+    return `\\\\.\\pipe\\fluent-code-${pipeName}`;
+  }
+  return `${environment.XDG_RUNTIME_DIR?.trim() || '/tmp'}/fluent-code.sock`;
+}

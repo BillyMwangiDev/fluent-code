@@ -21,6 +21,7 @@ export type SessionSummary = {
   createdAt: string;
   updatedAt: string;
   exitCode?: number | null;
+  error?: string;
   accountId?: string;
   projectDirectory?: string;
   worktreePath?: string;
@@ -141,22 +142,61 @@ export type AssignedIssue = {number: number; title: string; url: string; repo: s
 export type OpenPullRequest = {number: number; title: string; url: string; repo: string; isDraft: boolean};
 
 // Mirrors src/catalog-manager.ts.
-export type CatalogPlugin = {id: string; name: string; marketplace: string; target: ProviderId; description?: string; category?: string; homepage?: string; installed: boolean; enabled?: boolean; version?: string; officialSource: boolean};
-export type MarketplaceEntry = {name: string; target: ProviderId; source: string; officialSource: boolean};
+export type ExtensionTrustLevel = 'provider-bundled' | 'provider-owned' | 'local' | 'third-party' | 'unverified';
+export type ExtensionTrust = {level: ExtensionTrustLevel; source: string; reviewRequired: boolean; disclosures: string[]};
+export type CatalogPlugin = {id: string; name: string; marketplace: string; target: ProviderId; description?: string; category?: string; homepage?: string; installed: boolean; enabled?: boolean; version?: string; source: string; trust: ExtensionTrust};
+export type MarketplaceEntry = {name: string; target: ProviderId; source: string; trust: ExtensionTrust};
 export type McpTransport = 'stdio' | 'http' | 'sse';
 export type McpServerConfig = {name: string; transport: McpTransport; scope?: 'user' | 'local' | 'project'; command?: string; args?: string[]; url?: string};
-export type McpServerEntry = {name: string; target: ProviderId; transport: McpTransport; command?: string; args?: string[]; url?: string; connected?: boolean; needsAuth?: boolean};
+/** Catalog rows are display-only: raw MCP settings never cross this RPC boundary. */
+export type McpServerEntry = {name: string; target: ProviderId; transport: McpTransport; displayCommand?: string; displayArgs?: string[]; displayUrl?: string; trust: ExtensionTrust; connected?: boolean; needsAuth?: boolean};
 export type McpInstallResult = {target: ProviderId; ok: boolean; output: string};
 export type CatalogActionResult = {ok: boolean; output: string};
 
 export type ProviderHealth = {id: ProviderId; label: string; installed: boolean; executable?: string; version?: string};
 export type CoordinationState = {
   project: string;
-  tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; createdAt: string}>;
-  claims: Array<{path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
+  masterBrief?: string;
+  masterBriefUpdatedAt?: string;
+  tasks: Array<{id: string; title: string; status: 'todo' | 'active' | 'done'; sessionId?: string; provider?: ProviderId; role?: string; description?: string; source?: 'manual' | 'spec' | 'planner'; createdAt: string; updatedAt?: string}>;
+  claims: Array<{id: string; path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
   decisions: Array<{id: string; summary: string; sessionId?: string; createdAt: string}>;
   messages: LaneMessage[];
   handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
+  events: CoordinationEvent[];
+};
+export type CoordinationEventKind =
+  | 'task.created'
+  | 'task.assigned'
+  | 'task.status_changed'
+  | 'master_brief.set'
+  | 'claim.declared'
+  | 'claim.observed'
+  | 'claim.conflicted'
+  | 'claim.released'
+  | 'decision.recorded'
+  | 'handoff.requested'
+  | 'handoff.accepted'
+  | 'message.sent';
+export type CoordinationEvent = {
+  id: string;
+  at: string;
+  kind: CoordinationEventKind;
+  actorSessionId?: string;
+  sessionIds: string[];
+  taskId?: string;
+  provider?: ProviderId;
+  role?: string;
+  claimId?: string;
+  path?: string;
+  claimOrigin?: 'declared' | 'observed';
+  fromStatus?: 'todo' | 'active' | 'done';
+  toStatus?: 'todo' | 'active' | 'done';
+  releaseReason?: 'released' | 'observed_cleared' | 'session_ended' | 'lease_expired';
+  decisionId?: string;
+  handoffId?: string;
+  messageId?: string;
+  conflicts?: Array<{path: string; claimedPath: string; sessionId: string; overlap: 'same' | 'contains' | 'contained'}>;
 };
 export type AccountAuthStatus = {
   accountId: string;
@@ -211,6 +251,9 @@ export type CredentialAccount = {
   provider: ProviderId;
   mode: CredentialMode;
   label: string;
+  /** Accounts with different identities may be selected manually, but never chained as an
+   * automatic usage-limit fallback. */
+  identityId: string;
   hasSecret?: boolean;
   baseUrl?: string;
 };
@@ -260,6 +303,8 @@ export const api = {
   getSession: (sessionId: string) => daemonRequest<SessionSnapshot>('sessions.get', {sessionId}),
   getRun: (runId: string) => daemonRequest<Run>('runs.get', {runId}),
   send: (sessionId: string, input: string) => daemonRequest<{sent: boolean}>('sessions.send', {sessionId, input}),
+  /** Pastes context into a running lane as one paste, then presses Enter unless `submit` is false. */
+  inject: (sessionId: string, text: string, submit = true) => daemonRequest<{injected: boolean; submitted: boolean; bracketedPaste: boolean}>('sessions.inject', {sessionId, text, submit}),
   stop: (sessionId: string) => daemonRequest<SessionSummary>('sessions.stop', {sessionId}),
   removeWorktree: async (sessionId: string) => {
     const session = await daemonRequest<SessionSnapshot>('sessions.get', {sessionId});
@@ -316,8 +361,10 @@ export const api = {
   clearPriceOverride: (model: string) => daemonRequest<{ok: boolean}>('spend.clearPriceOverride', {model}),
   listProviders: () => daemonRequest<ProviderHealth[]>('providers.list'),
   coordination: (project: string) => daemonRequest<CoordinationState>('coordination.get', {project}),
-  createTask: (project: string, title: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.create', {project, title, sessionId}),
+  setMasterBrief: (project: string, brief: string) => daemonRequest<CoordinationState>('coordination.brief.set', {project, brief}),
+  createTask: (project: string, task: {title: string; description?: string; role?: string; provider?: ProviderId; source?: 'manual' | 'spec' | 'planner'; sessionId?: string}) => daemonRequest<CoordinationState>('coordination.task.create', {project, ...task}),
   updateTask: (project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string) => daemonRequest<CoordinationState>('coordination.task.update', {project, taskId, status, sessionId}),
+  assignTask: (project: string, taskId: string, assignment: {sessionId?: string; provider?: ProviderId; role?: string}) => daemonRequest<CoordinationState>('coordination.task.assign', {project, taskId, ...assignment}),
   claimFile: (project: string, path: string, sessionId: string) => daemonRequest<ClaimResult>('coordination.claim', {project, path, sessionId}),
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
   conflicts: (project: string) => daemonRequest<RankedConflict[]>('coordination.conflicts', {project}),
@@ -355,7 +402,16 @@ export const api = {
     return localDaemonRequest<{target: string; output: string}>('designTools.installOpenDesignMcp', {target, approvalId: approval.id});
   },
   listCredentials: () => daemonRequest<CredentialChainState[]>('credentials.list'),
-  upsertAccount: async (params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; sameIdentityAs?: string}) => {
+  upsertAccount: async (params: {
+    provider: ProviderId;
+    id: string;
+    mode: CredentialMode;
+    label: string;
+    apiKey?: string;
+    baseUrl?: string;
+    sameIdentityAs?: string;
+    forceNewIdentity?: boolean;
+  }) => {
     const approval = await issueApproval('credential.change', `${params.provider}:${params.id}`, `credential ${params.mode}`);
     return daemonRequest<CredentialChainState>('credentials.upsertAccount', {...params, approvalId: approval.id});
   },

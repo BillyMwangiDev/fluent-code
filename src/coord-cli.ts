@@ -16,7 +16,9 @@ import {daemonRequest} from './daemon-client.js';
  * which passes it through each CLI's own convention for project direction (spec §7.5), never by
  * intercepting anything.
  *
- * Every command identifies its lane by the directory it runs in. An agent never sees a session id.
+ * Every command identifies its lane by the directory it runs in, plus the `FLUENT_SESSION_ID` the
+ * lane was launched with — the directory alone cannot tell apart lanes sharing one checkout. An
+ * agent never has to type a session id.
  */
 const usage = `fluent-coord — coordination between agent lanes
 
@@ -40,7 +42,7 @@ type Reply = {text: string};
 
 async function main(argv: string[]) {
   const [command, ...rest] = argv;
-  const cwd = process.cwd();
+  const lane = {cwd: process.cwd(), ...(process.env.FLUENT_SESSION_ID ? {sessionId: process.env.FLUENT_SESSION_ID} : {})};
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     console.log(usage);
@@ -51,30 +53,30 @@ async function main(argv: string[]) {
     case 'status': {
       const sinceFlag = rest.indexOf('--since');
       const since = sinceFlag >= 0 ? rest[sinceFlag + 1] : undefined;
-      return print(await daemonRequest<Reply>('agent.status', {cwd, since}));
+      return print(await daemonRequest<Reply>('agent.status', {...lane, since}));
     }
     case 'claim':
-      return print(await daemonRequest<Reply>('agent.claim', {cwd, paths: rest}));
+      return print(await daemonRequest<Reply>('agent.claim', {...lane, paths: rest}));
     case 'release':
-      return print(await daemonRequest<Reply>('agent.release', {cwd, paths: rest}));
+      return print(await daemonRequest<Reply>('agent.release', {...lane, paths: rest}));
     case 'note':
-      return print(await daemonRequest<Reply>('agent.note', {cwd, summary: rest.join(' ')}));
+      return print(await daemonRequest<Reply>('agent.note', {...lane, summary: rest.join(' ')}));
     case 'task': {
       const [action, ...args] = rest;
       if (action !== 'add' && action !== 'start' && action !== 'done') throw new Error('usage: fluent-coord task add|start|done');
-      return print(await daemonRequest<Reply>('agent.task', {cwd, action, title: args.join(' '), taskId: args[0]}));
+      return print(await daemonRequest<Reply>('agent.task', {...lane, action, title: args.join(' '), taskId: args[0]}));
     }
     case 'send': {
       const [to, ...body] = rest;
       if (!to || body.length === 0) throw new Error('usage: fluent-coord send LANE MESSAGE...');
-      return print(await daemonRequest<Reply>('agent.send', {cwd, to, body: body.join(' ')}));
+      return print(await daemonRequest<Reply>('agent.send', {...lane, to, body: body.join(' ')}));
     }
     case 'inbox':
-      return print(await daemonRequest<Reply>('agent.inbox', {cwd, peek: rest.includes('--peek')}));
+      return print(await daemonRequest<Reply>('agent.inbox', {...lane, peek: rest.includes('--peek')}));
     case 'handoff': {
       const [to, ...summary] = rest;
       if (!to) throw new Error('usage: fluent-coord handoff LANE SUMMARY...');
-      return print(await daemonRequest<Reply>('agent.handoff', {cwd, to, summary: summary.join(' ')}));
+      return print(await daemonRequest<Reply>('agent.handoff', {...lane, to, summary: summary.join(' ')}));
     }
     default:
       throw new Error(`Unknown command ${command}\n\n${usage}`);

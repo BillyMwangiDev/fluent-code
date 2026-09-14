@@ -17,3 +17,8 @@ dist/
 app/dist/
 src-tauri/target/
 native/resource-monitor/target/
+
+# Build-only fluentd sidecars. CI creates and signs one per native release target.
+.fluent-build/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep

@@ -1,5 +1,6 @@
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
+import {open as openDialog} from '@tauri-apps/plugin-dialog';
 import '@xterm/xterm/css/xterm.css';
 import '@fontsource/archivo/700.css';
 import '@fontsource/ibm-plex-mono/400.css';
@@ -14,10 +15,12 @@ import {
   selectRemoteSocket,
   subscribeSession,
   type CredentialChainState,
+  type CredentialMode,
   type HardwareSample,
   type PriceOverride,
   type ProviderId,
   type Run,
+  type SessionSnapshot,
   type MergeOutcome,
   type MergePlan,
   type QuotaWindow,
@@ -27,7 +30,15 @@ import {
   type VerificationStatus
 } from './api';
 import type {AssignedIssue, OpenPullRequest, PullRequestStatus, RepoStatus} from './api';
-import type {CatalogPlugin, McpServerEntry, McpTransport} from './api';
+import type {CatalogPlugin, ExtensionTrust, MarketplaceEntry, McpServerEntry, McpTransport} from './api';
+import {
+  retainedCoordinationHistory,
+  inspectCoordination,
+  isExplorerScope,
+  type CoordinationInspection,
+  type CoordinationSubject,
+  type ExplorerScope
+} from './coordination-explorer';
 
 const root = document.getElementById('app')!;
 
@@ -49,15 +60,39 @@ type Route =
   | {name: 'remote'};
 
 let route: Route = {name: 'splash'};
-// Non-null only while an <active-session> view is mounted, so navigating away can clean it up.
-let activeSessionCleanup: (() => void) | undefined;
+// Non-null only while a page with live lane terminals is mounted, so replacing that page — by
+// navigating or by re-rendering the same route — releases their streams.
+let routeCleanup: (() => void) | undefined;
 let credentialProvider: ProviderId = 'claude';
 type Appearance = 'system' | 'dark' | 'light';
 type ThemeMode = 'dark' | 'light';
 const appearanceKey = 'fluent.appearance';
 const bundleKey = 'fluent.theme-bundles';
-let appearance: Appearance = (localStorage.getItem(appearanceKey) as Appearance | null) ?? 'system';
+const workspacePathKey = 'fluent.workspace-path';
+const explorerScopeKey = 'fluent.orchestration-explorer.scope.v1';
+// Fluent Dark is the first-run bundle. System remains available as an explicit preference, but
+// letting a light OS silently choose the initial product surface contradicts the desktop design
+// contract and makes first impressions vary by machine.
+let appearance: Appearance = (localStorage.getItem(appearanceKey) as Appearance | null) ?? 'dark';
 let bundles: Record<ThemeMode, string> = JSON.parse(localStorage.getItem(bundleKey) ?? '{"dark":"Fluent Dark","light":"Fluent Light"}');
+// A workspace is a local path chosen by the user, never a path from the machine that built the
+// app. It is an input default only; each session still records its own working directory.
+let workspacePath = localStorage.getItem(workspacePathKey) ?? '';
+// Presentation preferences stay on this machine. Project coordination remains in fluentd and is
+// deliberately not changed by a user's preferred explorer view.
+let explorerScope: ExplorerScope = (() => {
+  try {
+    const saved = localStorage.getItem(explorerScopeKey);
+    return isExplorerScope(saved) ? saved : 'overview';
+  } catch { return 'overview'; }
+})();
+let orchestrationProject: string | undefined;
+let explorerSelection: {project: string; subject: CoordinationSubject} | undefined;
+
+function setExplorerScope(next: ExplorerScope) {
+  explorerScope = next;
+  try { localStorage.setItem(explorerScopeKey, next); } catch { /* a private-browsing failure should not block coordination */ }
+}
 
 function resolvedMode(): ThemeMode {
   return appearance === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : appearance;
@@ -105,8 +140,6 @@ function terminalFontSize() {
 }
 
 function navigate(next: Route) {
-  activeSessionCleanup?.();
-  activeSessionCleanup = undefined;
   route = next;
   void render();
 }
@@ -124,6 +157,29 @@ function h<K extends keyof HTMLElementTagNameMap>(
   for (const child of children) element.append(child);
   return element;
 }
+
+const actionNotices = h('div', {class: 'action-notices', role: 'status', 'aria-live': 'polite'});
+document.body.append(actionNotices);
+let noticeTimer: number | undefined;
+
+function actionErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/^Error:\s*/, '') || 'The action could not be completed.';
+}
+
+/** Every async control gets a visible result if its daemon call rejects. A provider issue must
+ * never be mistaken for an unresponsive button, even on a route that has no local status panel. */
+function showActionError(error: unknown) {
+  actionNotices.innerHTML = '';
+  actionNotices.append(h('div', {class: 'action-notice error'}, [actionErrorText(error)]));
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => { actionNotices.innerHTML = ''; }, 12_000);
+}
+
+window.addEventListener('unhandledrejection', event => {
+  event.preventDefault();
+  showActionError(event.reason);
+});
 
 /** The headline of the headroom advice — what the user needs before deciding, in one line. */
 function admissionLabel(verdict: {decision: 'clear' | 'tight' | 'over'; recommendedLanes: number}) {
@@ -180,72 +236,96 @@ function accountLabel(accountId: string | undefined, chains: CredentialChainStat
 }
 
 async function render() {
+  routeCleanup?.();
+  routeCleanup = undefined;
   root.innerHTML = '';
   const main = h('main');
+  // `main` is the full-width scroll owner (its scrollbar always sits at the true panel edge);
+  // `.page` is the separate, width-capped wrapper every route actually renders into. Splash has no
+  // rail/scroll shell at all, so it renders straight into `main` instead.
+  let page: HTMLElement;
   if (route.name === 'splash') {
     main.classList.add('splash-main');
     root.append(main);
+    page = main;
   } else {
-    // The shell is deliberately stable while routes change. It keeps project, target, and the
-    // user's place in the control surface visible without competing with the active work plane.
-    root.append(h('div', {class: 'app-shell'}, [renderTopbar(), main]));
+    // The shell is deliberately stable while routes change. The top command bar carries the
+    // current target and project at a glance; the rail keeps the user's place in the control
+    // surface visible without competing with the active work plane.
+    root.append(renderTopbar(), h('div', {class: 'app-shell'}, [renderAppRail(), main]));
+    page = h('div', {class: 'page'});
+    main.append(page);
   }
 
   try {
     switch (route.name) {
       case 'splash':
-        await renderSplash(main);
+        await renderSplash(page);
         break;
       case 'onboarding':
-        await renderOnboarding(main);
+        await renderOnboarding(page);
         break;
       case 'sessions':
-        await renderSessions(main);
+        await renderSessions(page);
         break;
       case 'new-session':
-        await renderNewSession(main);
+        await renderNewSession(page);
         break;
       case 'active-session':
-        await renderActiveSession(main, route.sessionId);
+        await renderActiveSession(page, route.sessionId);
         break;
       case 'credentials':
-        await renderCredentials(main);
+        await renderCredentials(page);
         break;
       case 'usage':
-        await renderUsage(main);
+        await renderUsage(page);
         break;
       case 'spend':
-        await renderSpend(main);
+        await renderSpend(page);
         break;
       case 'source-control':
-        await renderSourceControl(main);
+        await renderSourceControl(page);
         break;
       case 'catalog':
-        await renderCatalog(main);
+        await renderCatalog(page);
         break;
       case 'themes':
-        await renderThemes(main);
+        await renderThemes(page);
         break;
       case 'orchestration':
-        await renderOrchestration(main);
+        await renderOrchestration(page);
         break;
       case 'design':
-        await renderDesignWorkspace(main);
+        await renderDesignWorkspace(page);
         break;
       case 'preview':
-        await renderPreview(main);
+        await renderPreview(page);
         break;
       case 'remote':
-        await renderRemote(main);
+        await renderRemote(page);
         break;
     }
   } catch (error) {
-    main.innerHTML = '';
-    main.append(h('p', {class: 'splash error'}, [error instanceof Error ? error.message : String(error)]));
+    page.innerHTML = '';
+    page.append(h('p', {class: 'splash error'}, [error instanceof Error ? error.message : String(error)]));
   }
 }
 
 function renderTopbar(): HTMLElement {
+  const target = activeRemoteSocket()
+    ? h('span', {class: 'target-pill'}, ['● remote target'])
+    : h('span', {class: 'target-pill local'}, ['● local · owner only']);
+  return h('header', {class: 'topbar app-topbar'}, [
+    h('div', {class: 'brand'}, [markEl(), 'fluent code']),
+    h('span', {class: 'topbar-divider'}),
+    h('span', {class: 'topbar-product'}, ['agent control surface']),
+    h('span', {class: 'topbar-divider topbar-project-divider'}),
+    h('span', {class: 'topbar-project-path'}, [workspacePath || 'no workspace selected']),
+    h('div', {class: 'topbar-target'}, [target])
+  ]);
+}
+
+function renderAppRail(): HTMLElement {
   const workspace = h('nav', {class: 'primary-nav'}, [
     h('span', {class: 'rail-label'}, ['workspace']),
     navButton('sessions', 'sessions'),
@@ -267,21 +347,242 @@ function renderTopbar(): HTMLElement {
     navButton('preview', 'preview'),
     navButton('themes', 'themes')
   ]);
-  const target = activeRemoteSocket()
-    ? h('span', {class: 'target-pill'}, ['● remote target'])
-    : h('span', {class: 'target-pill local'}, ['● local target']);
-  return h('aside', {class: 'topbar app-rail'}, [
-    h('div', {class: 'rail-head'}, [
-      h('div', {class: 'brand'}, [markEl(), 'fluent code']),
-      h('span', {class: 'rail-version'}, ['agent control surface'])
-    ]),
+  const workspaceName = h('strong', {}, [workspacePath ? workspaceFolderName(workspacePath) : 'choose a workspace']);
+  const workspaceLocation = h('span', {class: 'rail-project-path'}, [workspacePath || 'select a folder to begin']);
+  const chooseWorkspace = h('button', {class: 'rail-project-picker', type: 'button'}, ['browse folders…']);
+  chooseWorkspace.addEventListener('click', async () => {
+    const selected = await pickDirectory('Choose workspace folder', workspacePath);
+    if (!selected) return;
+    setWorkspacePath(selected);
+    void render();
+  });
+
+  return h('aside', {class: 'app-rail'}, [
     h('div', {class: 'rail-project'}, [
       h('span', {class: 'rail-project-label'}, ['current project']),
-      h('strong', {}, ['fluent-code']),
-      h('span', {class: 'rail-project-path'}, ['~/WORK/fluent-code'])
+      workspaceName,
+      workspaceLocation,
+      chooseWorkspace
     ]),
     h('div', {class: 'rail-sections'}, [workspace, control, tools]),
-    h('div', {class: 'rail-footer'}, [target, h('span', {}, ['local-first · owner only'])])
+    h('div', {class: 'rail-footer'}, [h('span', {}, ['local-first · inspectable'])])
+  ]);
+}
+
+function workspaceFolderName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  return trimmed.split(/[\\/]/).filter(Boolean).at(-1) || path;
+}
+
+function setWorkspacePath(path: string) {
+  workspacePath = path;
+  localStorage.setItem(workspacePathKey, path);
+}
+
+function isNativePath(path: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|[\\/]{1,2})/.test(path);
+}
+
+/** Opens the OS folder chooser instead of asking a developer to know and type an absolute path.
+ * The dialog is intentionally limited to one directory: Fluent passes that exact path to the
+ * local daemon; it does not receive broad filesystem read access. */
+async function pickDirectory(title: string, defaultPath = ''): Promise<string | undefined> {
+  const selected = await openDialog({
+    title,
+    directory: true,
+    multiple: false,
+    ...(isNativePath(defaultPath) ? {defaultPath} : {})
+  });
+  return typeof selected === 'string' ? selected : undefined;
+}
+
+/** A spec remains on the user's machine. Fluent only passes the chosen local path to the planner
+ * lane; it does not upload or parse the document behind the user's back. */
+async function pickSpecFile(title: string, defaultPath = ''): Promise<string | undefined> {
+  const selected = await openDialog({
+    title,
+    multiple: false,
+    filters: [{name: 'Specification documents', extensions: ['md', 'mdx', 'txt', 'rst']}],
+    ...(isNativePath(defaultPath) ? {defaultPath} : {})
+  });
+  return typeof selected === 'string' ? selected : undefined;
+}
+
+function directoryField(input: HTMLInputElement, title = 'Choose workspace folder'): HTMLElement {
+  const browse = h('button', {class: 'btn directory-browse', type: 'button'}, ['browse…']);
+  browse.addEventListener('click', async () => {
+    browse.disabled = true;
+    try {
+      const selected = await pickDirectory(title, input.value.trim() || workspacePath);
+      if (!selected) return;
+      input.value = selected;
+      setWorkspacePath(selected);
+      input.dispatchEvent(new Event('input', {bubbles: true}));
+    } finally {
+      browse.disabled = false;
+    }
+  });
+  return h('div', {class: 'directory-field'}, [input, browse]);
+}
+
+// --- Chart primitives --------------------------------------------------------
+// Plain inline SVG, no charting library — kept consistent with the rest of app/ (vanilla TS,
+// esbuild-bundled, no framework). Curve math and axis rounding follow the same approach T3 Code's
+// usage chart uses (apps/web/src/components/usage/UsageProviderChart.tsx, MIT licensed): monotone
+// cubic interpolation so a curve can never overshoot spiky data, and a "nice" axis max so the
+// tallest value is never clipped. `vector-effect="non-scaling-stroke"` plus a
+// `preserveAspectRatio="none"` viewBox make every chart here fluid to its container's size without
+// the stroke getting fatter or thinner as the window resizes.
+
+function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string> = {}, children: Array<Node | string> = []): SVGElementTagNameMap[K] {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, value);
+  for (const child of children) element.append(child);
+  return element;
+}
+
+interface ChartPoint { x: number; y: number; }
+
+/** Shape-preserving cubic tangents (Fritsch-Carlson) — the curve follows the data without
+ * overshooting between two points that both sit on a local peak or valley. */
+function monotoneTangents(points: readonly ChartPoint[]): number[] {
+  const count = points.length;
+  if (count < 2) return [0];
+  const slopes: number[] = [];
+  for (let i = 0; i < count - 1; i += 1) {
+    const dx = points[i + 1]!.x - points[i]!.x;
+    const dy = points[i + 1]!.y - points[i]!.y;
+    slopes.push(dx === 0 ? 0 : dy / dx);
+  }
+  const tangents = new Array<number>(count).fill(0);
+  tangents[0] = slopes[0] ?? 0;
+  tangents[count - 1] = slopes[count - 2] ?? 0;
+  for (let i = 1; i < count - 1; i += 1) {
+    const previous = slopes[i - 1] ?? 0;
+    const next = slopes[i] ?? 0;
+    tangents[i] = previous * next <= 0 ? 0 : (previous + next) / 2;
+  }
+  for (let i = 0; i < count - 1; i += 1) {
+    const slope = slopes[i] ?? 0;
+    if (slope === 0) { tangents[i] = 0; tangents[i + 1] = 0; continue; }
+    const a = (tangents[i] ?? 0) / slope;
+    const b = (tangents[i + 1] ?? 0) / slope;
+    const magnitude = a * a + b * b;
+    if (magnitude > 9) {
+      const scale = 3 / Math.sqrt(magnitude);
+      tangents[i] = scale * a * slope;
+      tangents[i + 1] = scale * b * slope;
+    }
+  }
+  return tangents;
+}
+
+function curvePath(points: readonly ChartPoint[]): string {
+  if (points.length === 0) return '';
+  if (points.length === 1) return `M${points[0]!.x.toFixed(2)},${points[0]!.y.toFixed(2)}`;
+  const tangents = monotoneTangents(points);
+  let path = `M${points[0]!.x.toFixed(2)},${points[0]!.y.toFixed(2)}`;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const from = points[i]!;
+    const to = points[i + 1]!;
+    const dx = to.x - from.x;
+    const c1x = from.x + dx / 3;
+    const c1y = from.y + ((tangents[i] ?? 0) * dx) / 3;
+    const c2x = to.x - dx / 3;
+    const c2y = to.y - ((tangents[i + 1] ?? 0) * dx) / 3;
+    path += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${to.x.toFixed(2)},${to.y.toFixed(2)}`;
+  }
+  return path;
+}
+
+/** Rounds an axis max up to a readable 1/2/5 x 10^n step at or above the peak, so the tallest
+ * value is never drawn past the top of the plot and clipped. */
+function niceAxisMax(peak: number, steps = 4): number {
+  if (peak <= 0) return 0;
+  const rawStep = peak / steps;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / magnitude;
+  const step = (normalized > 5 ? 10 : normalized > 2 ? 5 : normalized > 1 ? 2 : 1) * magnitude;
+  return Math.ceil(peak / step) * step;
+}
+
+/** A compact trend line with no axis — the inline replacement for the old glyph sparkline
+ * (rendered as monospace block characters). */
+function sparklineChart(values: readonly number[], color = 'currentColor'): SVGSVGElement {
+  const width = 96;
+  const height = 24;
+  const finite = values.filter(Number.isFinite);
+  const svg = svgEl('svg', {class: 'sparkline', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true'});
+  if (finite.length < 2) return svg;
+  const min = Math.min(...finite);
+  const max = Math.max(...finite);
+  const range = Math.max(max - min, 1e-6);
+  const step = width / (finite.length - 1);
+  const points = finite.map((value, index) => ({x: index * step, y: height - 2 - ((value - min) / range) * (height - 4)}));
+  const line = curvePath(points);
+  svg.append(
+    svgEl('path', {d: `${line} L${width},${height} L0,${height} Z`, fill: color, 'fill-opacity': '0.14'}),
+    svgEl('path', {d: line, fill: 'none', stroke: color, 'stroke-width': '1.6', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke'})
+  );
+  return svg;
+}
+
+interface ChartSeries { readonly label: string; readonly color: string; readonly values: readonly number[]; }
+
+/** Multi-series line chart with gridlines, a legend, and start/mid/end category labels — the same
+ * shape as the Usage Observatory artboard (design/previews/hNqHb.png, "Multi-series token flow").
+ * Each category gets an invisible hit column with a native `<title>` tooltip rather than a
+ * hand-rolled positioned tooltip, which keeps this dependency-free while still making exact
+ * values inspectable on hover. */
+function lineChart(categories: readonly string[], series: readonly ChartSeries[], formatValue: (value: number) => string): HTMLElement {
+  const width = 960;
+  const height = 200;
+  const topPad = 10;
+  const peak = Math.max(1e-9, ...series.flatMap(item => item.values));
+  const axisMax = niceAxisMax(peak) || peak;
+  const toY = (value: number) => height - (value / axisMax) * (height - topPad);
+  const stepX = categories.length > 1 ? width / (categories.length - 1) : 0;
+  const gridTicks = 4;
+  const ticks = Array.from({length: gridTicks + 1}, (_, index) => (axisMax / gridTicks) * index);
+
+  const svg = svgEl('svg', {class: 'line-chart-svg', viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': 'multi-series chart'});
+  for (const tick of ticks) {
+    const y = toY(tick);
+    svg.append(svgEl('line', {class: 'chart-grid-line', x1: '0', x2: String(width), y1: y.toFixed(2), y2: y.toFixed(2)}));
+  }
+  // Heaviest series painted first so a small series is never buried under a larger one's fill.
+  const byWeight = [...series].sort((a, b) => Math.max(...b.values, 0) - Math.max(...a.values, 0));
+  const pointsByLabel = new Map<string, ChartPoint[]>();
+  for (const item of byWeight) {
+    const points = item.values.map((value, index) => ({x: index * stepX, y: toY(value)}));
+    pointsByLabel.set(item.label, points);
+    const line = curvePath(points);
+    if (line) svg.append(svgEl('path', {d: `${line} L${width},${height} L0,${height} Z`, fill: item.color, 'fill-opacity': '0.12'}));
+  }
+  for (const item of byWeight) {
+    const line = curvePath(pointsByLabel.get(item.label) ?? []);
+    if (line) svg.append(svgEl('path', {d: line, fill: 'none', stroke: item.color, 'stroke-width': '2', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke'}));
+  }
+  if (categories.length > 0 && stepX > 0) {
+    categories.forEach((category, index) => {
+      const detail = series.map(item => `${item.label} ${formatValue(item.values[index] ?? 0)}`).join(' · ');
+      svg.append(svgEl('rect', {class: 'chart-hit-area', x: String(index * stepX - stepX / 2), y: '0', width: String(stepX), height: String(height)}, [
+        svgEl('title', {}, [`${category} — ${detail}`])
+      ]));
+    });
+  }
+
+  const axisColumn = h('div', {class: 'chart-y-axis'}, ticks.slice().reverse().map(tick => h('span', {style: `top:${((toY(tick) / height) * 100).toFixed(2)}%`}, [tick === 0 ? '0' : formatValue(tick)])));
+  const legend = h('div', {class: 'chart-legend'}, series.map(item => h('span', {class: 'chart-legend-item'}, [h('span', {class: 'chart-legend-swatch', style: `background:${item.color}`}), item.label])));
+  const axisLabels = h('div', {class: 'chart-axis-labels'}, [
+    h('span', {}, [categories[0] ?? '']),
+    h('span', {}, [categories[Math.floor(categories.length / 2)] ?? '']),
+    h('span', {}, [categories.at(-1) ?? ''])
+  ]);
+  return h('div', {class: 'line-chart'}, [
+    legend,
+    h('div', {class: 'line-chart-body'}, [axisColumn, h('div', {class: 'line-chart-plot'}, [svg])]),
+    axisLabels
   ]);
 }
 
@@ -305,17 +606,6 @@ function duration(seconds: number): string {
   return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-function sparkline(samples: HardwareSample[], key: keyof Pick<HardwareSample, 'cpuPercent' | 'memoryUsedBytes'>): string;
-function sparkline(samples: Array<{capturedAt: string; contextPercent?: number}>, key: 'contextPercent'): string;
-function sparkline(samples: Array<Record<string, unknown>> | HardwareSample[] | Array<{capturedAt: string; contextPercent?: number}>, key: string): string {
-  const values = samples.map(sample => Number((sample as Record<string, unknown>)[key])).filter(Number.isFinite);
-  if (values.length < 2) return '—';
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const glyphs = '▁▂▃▄▅▆▇█';
-  return values.map(value => glyphs[Math.min(glyphs.length - 1, Math.round(((value - min) / Math.max(max - min, 1)) * (glyphs.length - 1)))]).join('');
-}
-
 async function renderUsage(main: HTMLElement) {
   const [hardware, sessions, software, usage, resources] = await Promise.all([api.hardwareSnapshot(), api.listSessions(), api.softwareSnapshot(), api.usageSnapshot(), api.resourceSnapshot().catch(() => undefined)]);
   const {current, history} = hardware;
@@ -329,16 +619,16 @@ async function renderUsage(main: HTMLElement) {
   );
   const memoryPercent = current.memoryTotalBytes ? (current.memoryUsedBytes / current.memoryTotalBytes) * 100 : 0;
   main.append(h('div', {class: 'metrics-grid'}, [
-    metricCard('cpu process share', `${current.cpuPercent.toFixed(1)}%`, sparkline(history, 'cpuPercent')),
-    metricCard('memory', `${bytes(current.memoryUsedBytes)} / ${bytes(current.memoryTotalBytes)}`, sparkline(history, 'memoryUsedBytes')),
+    metricCard('cpu process share', `${current.cpuPercent.toFixed(1)}%`, sparklineChart(history.map(sample => sample.cpuPercent), 'var(--success)')),
+    metricCard('memory', `${bytes(current.memoryUsedBytes)} / ${bytes(current.memoryTotalBytes)}`, sparklineChart(history.map(sample => sample.memoryUsedBytes), 'var(--fg-muted)')),
     metricCard('disk used', `${bytes(current.diskUsedBytes)} / ${bytes(current.diskTotalBytes)}`, current.diskTotalBytes ? `${((current.diskUsedBytes! / current.diskTotalBytes) * 100).toFixed(0)}% capacity` : 'not available'),
     metricCard('uptime', duration(current.uptimeSeconds), `${current.platform} · ${current.arch}`)
   ]));
   main.append(h('div', {class: 'cards-row'}, [
     h('div', {class: 'card'}, [
       h('h3', {}, ['hardware trace']),
-      h('p', {class: 'trace cpu'}, [`cpu     ${sparkline(history, 'cpuPercent')}`]),
-      h('p', {class: 'trace memory'}, [`memory  ${sparkline(history, 'memoryUsedBytes')}`]),
+      h('p', {class: 'trace cpu'}, ['cpu', sparklineChart(history.map(sample => sample.cpuPercent), 'var(--success)')]),
+      h('p', {class: 'trace memory'}, ['memory', sparklineChart(history.map(sample => sample.memoryUsedBytes), 'var(--fg-muted)')]),
       h('p', {class: 'section-sub'}, [`load average  ${current.loadAverage.map(value => value.toFixed(2)).join(' · ')}  ·  fluentd rss ${bytes(current.processRssBytes)}`])
     ]),
     h('div', {class: 'card'}, [
@@ -352,7 +642,9 @@ async function renderUsage(main: HTMLElement) {
       h('h3', {}, ['provider usage · each provider\'s own telemetry']),
       ...usage.sessions.map(item => h('div', {class: 'usage-row'}, [
         h('strong', {}, [item.model ?? (item.provider === 'codex' ? 'Codex' : 'Claude Code')]),
-        h('span', {class: 'trace'}, [`context ${item.contextPercent?.toFixed(0) ?? '—'}%  ${sparkline(item.history, 'contextPercent')}`]),
+        // Coral is reserved for actions/alerts/thresholds (AGENTS.md), never an ordinary data
+        // series — this is a routine per-session trend, so it stays in the muted trace palette.
+        h('span', {class: 'trace'}, [`context ${item.contextPercent?.toFixed(0) ?? '—'}%`, sparklineChart(item.history.map(sample => sample.contextPercent ?? NaN), 'var(--fg-muted)')]),
         h('span', {class: 'section-sub'}, [`input ${formatTokens(item.inputTokens)} · output ${formatTokens(item.outputTokens)} · cache ${item.cacheHitRatio === undefined ? '—' : `${(item.cacheHitRatio * 100).toFixed(0)}%`} · cost ${item.costUsd === undefined ? '—' : `$${item.costUsd.toFixed(2)}`}`]),
         h('span', {class: 'section-sub'}, [`${quotaLabel(item.quota?.primary)} · ${quotaLabel(item.quota?.secondary)} · ${relativeTime(item.updatedAt)}`])
       ]))
@@ -387,7 +679,7 @@ function formatTokens(value: number | undefined) {
   return String(value);
 }
 
-function metricCard(label: string, value: string, detail: string): HTMLElement {
+function metricCard(label: string, value: string, detail: string | Node): HTMLElement {
   return h('div', {class: 'metric-card'}, [h('span', {class: 'metric-label'}, [label]), h('strong', {}, [value]), h('span', {class: 'metric-detail'}, [detail])]);
 }
 
@@ -399,6 +691,9 @@ function metricCard(label: string, value: string, detail: string): HTMLElement {
 // historical cost, scanned from the providers' own transcript files, same as T3's approach.
 
 const providerLabel: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI'};
+// Muted, data-viz-safe series colors matching `.provider-dot` in styles.css — Coral stays reserved
+// for actions/alerts/thresholds (AGENTS.md), never an ordinary provider series.
+const providerColor: Record<ProviderId, string> = {claude: '#b08968', codex: '#6b8fb0', gemini: '#8a9a6b'};
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
@@ -493,27 +788,16 @@ async function renderSpend(main: HTMLElement) {
       );
     }
 
-    // Daily stacked bar chart — same shape as T3's chart, drawn with plain divs (no charting lib).
-    const maxDayCost = Math.max(1e-9, ...summary.days.map(day => day.costUsd));
+    // Daily cost as a per-provider line chart — the same shape as T3's own usage chart
+    // (apps/web/src/components/usage/UsageProviderChart.tsx) and the Usage Observatory artboard.
     const chartColumn = h('div', {});
     chartColumn.append(h('h2', {class: 'section-title'}, ['daily cost']));
-    const bars = h('div', {class: 'bar-chart'});
-    for (const day of summary.days) {
-      const column = h('div', {class: 'bar-col'});
-      for (const provider of activeProviders) {
-        const model = day.models.find(m => m.provider === provider);
-        const dayCost = day.models.reduce((sum, m) => sum + m.costUsd, 0);
-        if (!model || dayCost <= 0) continue;
-        const segmentHeightPercent = (model.costUsd / maxDayCost) * 100;
-        column.append(h('div', {class: `bar-seg ${provider}`, style: `height:${segmentHeightPercent}%`}));
-      }
-      column.setAttribute('title', `${day.day} · ${formatUsd(day.costUsd)}`);
-      bars.append(column);
-    }
-    chartColumn.append(bars);
-    if (summary.days.length > 0) {
-      chartColumn.append(h('div', {class: 'bar-chart-axis'}, [h('span', {}, [dayLabel(summary.days[0]!.day)]), h('span', {}, [dayLabel(summary.days.at(-1)!.day)])]));
-    }
+    const dailySeries = activeProviders.map(provider => ({
+      label: providerLabel[provider],
+      color: providerColor[provider],
+      values: summary.days.map(day => day.models.filter(model => model.provider === provider).reduce((sum, model) => sum + model.costUsd, 0))
+    }));
+    chartColumn.append(lineChart(summary.days.map(day => dayLabel(day.day)), dailySeries, formatUsd));
 
     container.append(h('div', {class: 'spend-grid'}, [left, chartColumn]));
 
@@ -732,34 +1016,61 @@ async function renderSourceControl(main: HTMLElement) {
 // src/catalog-manager.ts). "Favor installing what already exists" applied to the whole agent
 // ecosystem, not just provider sessions.
 
+function trustLabel(trust: ExtensionTrust) {
+  switch (trust.level) {
+    case 'provider-bundled': return 'provider bundled';
+    case 'provider-owned': return 'provider-owned source';
+    case 'local': return 'local source';
+    case 'third-party': return 'third-party source';
+    case 'unverified': return 'unverified source';
+  }
+}
+
+function trustPill(trust: ExtensionTrust) {
+  return h('span', {class: `pill${trust.reviewRequired ? ' status-default' : ' status-running'}`}, [trustLabel(trust)]);
+}
+
 function pluginRow(plugin: CatalogPlugin, onInstall: () => void): HTMLElement {
-  const meta = [providerLabel[plugin.target], plugin.marketplace, plugin.version ? `v${plugin.version}` : null].filter(Boolean).join(' · ');
+  const meta = [providerLabel[plugin.target], plugin.marketplace, plugin.version ? `v${plugin.version}` : null, `source: ${plugin.source}`].filter(Boolean).join(' · ');
   const installButton = h('button', {class: `btn${plugin.installed ? '' : ' primary'}`}, [plugin.installed ? 'installed' : 'install']);
   installButton.toggleAttribute('disabled', plugin.installed);
   if (!plugin.installed) installButton.addEventListener('click', onInstall);
-  // Neither CLI's own listing flags a source as vendor-published, so this is the one place the
-  // trust boundary is visible at all — quiet by default (no badge) for the provider's own
-  // marketplace, and named rather than hidden for everything else (README's "trusted-source
-  // policy" gap).
-  const trustBadge = plugin.officialSource ? null : h('span', {class: 'pill'}, ['third-party']);
   return h('div', {class: 'option-row'}, [
     h('div', {}, [
       h('div', {class: 'label'}, [plugin.name]),
-      h('div', {class: 'meta'}, [plugin.description ? `${plugin.description} — ${meta}` : meta])
+      h('div', {class: 'meta'}, [plugin.description ? `${plugin.description} — ${meta}` : meta]),
+      h('div', {class: 'meta'}, [plugin.trust.disclosures[0] ?? 'Review extension source before use.'])
     ]),
-    ...(trustBadge ? [trustBadge] : []),
+    trustPill(plugin.trust),
     installButton
   ]);
 }
 
 function mcpServerRow(server: McpServerEntry): HTMLElement {
-  const meta = [providerLabel[server.target], server.transport, server.command ?? server.url].filter(Boolean).join(' · ');
+  const endpoint = server.transport === 'stdio' ? server.displayCommand : server.displayUrl;
+  const args = server.displayArgs?.length ? `args: ${JSON.stringify(server.displayArgs)}` : undefined;
+  const meta = [providerLabel[server.target], server.transport, endpoint, args].filter(Boolean).join(' · ');
   const status = server.needsAuth
     ? h('span', {class: 'pill status-default'}, ['needs auth'])
     : server.connected === false
       ? h('span', {class: 'pill status-failed'}, ['disabled'])
       : h('span', {class: 'pill status-running'}, ['connected']);
-  return h('div', {class: 'option-row'}, [h('div', {}, [h('div', {class: 'label'}, [server.name]), h('div', {class: 'meta'}, [meta])]), status]);
+  return h('div', {class: 'option-row'}, [
+    h('div', {}, [h('div', {class: 'label'}, [server.name]), h('div', {class: 'meta'}, [meta]), h('div', {class: 'meta'}, [server.trust.disclosures[0] ?? 'Review server source before use.'])]),
+    trustPill(server.trust),
+    status
+  ]);
+}
+
+function marketplaceRow(marketplace: MarketplaceEntry): HTMLElement {
+  return h('div', {class: 'option-row'}, [
+    h('div', {}, [
+      h('div', {class: 'label'}, [`${providerLabel[marketplace.target]} · ${marketplace.name}`]),
+      h('div', {class: 'meta'}, [marketplace.source]),
+      h('div', {class: 'meta'}, [marketplace.trust.disclosures[0] ?? 'Review marketplace source before use.'])
+    ]),
+    trustPill(marketplace.trust)
+  ]);
 }
 
 async function renderCatalog(main: HTMLElement) {
@@ -776,8 +1087,9 @@ async function renderCatalog(main: HTMLElement) {
 
   let plugins: CatalogPlugin[];
   let servers: McpServerEntry[];
+  let marketplaces: MarketplaceEntry[];
   try {
-    [plugins, servers] = await Promise.all([api.catalogPlugins(), api.catalogMcpServers()]);
+    [plugins, servers, marketplaces] = await Promise.all([api.catalogPlugins(), api.catalogMcpServers(), api.catalogMarketplaces()]);
   } catch (error) {
     container.innerHTML = '';
     container.append(h('div', {class: 'empty-state'}, [error instanceof Error ? error.message : String(error)]));
@@ -814,7 +1126,7 @@ async function renderCatalog(main: HTMLElement) {
       search = searchInput.value;
       draw();
     });
-    pluginsCard.append(h('div', {class: 'toolbar'}, [targetToggle, installedToggle]), searchInput);
+    pluginsCard.append(h('div', {class: 'catalog-filter-row'}, [targetToggle, installedToggle]), searchInput);
 
     const needle = search.trim().toLowerCase();
     const filtered = plugins.filter(plugin => {
@@ -833,10 +1145,8 @@ async function renderCatalog(main: HTMLElement) {
       for (const plugin of shown) {
         pluginList.append(
         pluginRow(plugin, async () => {
-            const sourceNotice = plugin.officialSource
-              ? `${plugin.marketplace} is ${providerLabel[plugin.target]}'s own marketplace.`
-              : `${plugin.marketplace} is a third-party marketplace, not published by ${providerLabel[plugin.target]} — review it before installing.`;
-            if (!confirm(`Install ${plugin.name} for ${providerLabel[plugin.target]}? ${sourceNotice} This runs the provider CLI and may add third-party code.`)) return;
+            const sourceNotice = `${trustLabel(plugin.trust)}: ${plugin.source}. ${plugin.trust.disclosures.join(' ')}`;
+            if (!confirm(`Install ${plugin.name} for ${providerLabel[plugin.target]}? ${sourceNotice} This runs the provider CLI and may add extension code.`)) return;
             const result = await api.installCatalogPlugin(plugin.target, plugin.id);
             if (result.ok) {
               plugin.installed = true;
@@ -854,10 +1164,17 @@ async function renderCatalog(main: HTMLElement) {
     pluginsCard.append(pluginList);
     wrap.append(pluginsCard);
 
+    const marketplaceListCard = h('div', {class: 'card'}, [
+      h('h3', {}, [`configured marketplaces (${marketplaces.length})`]),
+      h('p', {class: 'section-sub'}, ['Source provenance is evidence from the provider configuration, not a permission manifest or safety guarantee.'])
+    ]);
+    marketplaceListCard.append(...(marketplaces.length ? marketplaces.map(marketplaceRow) : [h('p', {class: 'section-sub'}, ['No provider marketplaces were reported.'])]));
+    wrap.append(marketplaceListCard);
+
     // Add-marketplace card — a new marketplace source unlocks more plugins in the list above.
     const marketplaceCard = h('div', {class: 'card'}, [
       h('h3', {}, ['add a marketplace']),
-      h('p', {class: 'section-sub'}, ['Point at a GitHub repo (owner/repo) or local path that publishes a Claude Code or Codex plugin marketplace.'])
+      h('p', {class: 'section-sub'}, ['Use a GitHub repo (owner/repo, HTTPS, or Git SSH) or an absolute local path that publishes a Claude Code or Codex marketplace.'])
     ]);
     const marketplaceTargetSelect = h('select', {}, [h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex'])]);
     const marketplaceSourceInput = h('input', {type: 'text', placeholder: 'owner/repo or path'});
@@ -866,10 +1183,10 @@ async function renderCatalog(main: HTMLElement) {
       const source = marketplaceSourceInput.value.trim();
       if (!source) return;
       const target = marketplaceTargetSelect.value as ProviderId;
-      if (!confirm(`Add marketplace “${source}” for ${providerLabel[target]}? This lets the provider fetch and install third-party plugins.`)) return;
+      if (!confirm(`Add marketplace “${source}” for ${providerLabel[target]}? Fluent will validate the source before the provider CLI is allowed to fetch it. Review any local or third-party code before installing plugins.`)) return;
       const result = await api.addCatalogMarketplace(target, source);
       if (result.ok) {
-        plugins = await api.catalogPlugins();
+        [plugins, marketplaces] = await Promise.all([api.catalogPlugins(), api.catalogMarketplaces()]);
         marketplaceSourceInput.value = '';
         draw();
       } else {
@@ -913,7 +1230,10 @@ async function renderCatalog(main: HTMLElement) {
       const config = transport === 'stdio'
         ? {name, transport, command: endpoint, args, scope: 'user' as const}
         : {name, transport, url: endpoint, scope: 'user' as const};
-      if (!confirm(`Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? It may execute ${endpoint} when used by an agent.`)) return;
+      const boundary = transport === 'stdio'
+        ? `This launches the local process “${endpoint}” with ${args.length} structured argument${args.length === 1 ? '' : 's'} when used by an agent.`
+        : 'This connects to a remote HTTPS endpoint when used by an agent; it does not launch a local process.';
+      if (!confirm(`Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? ${boundary} Review the server source before use.`)) return;
       const results = await api.addCatalogMcpServer(targets, config);
       const failures = results.filter(result => !result.ok);
       if (failures.length === 0) {
@@ -964,17 +1284,14 @@ async function renderCatalog(main: HTMLElement) {
 
 async function renderOrchestration(main: HTMLElement) {
   const sessions = await api.listSessions();
-  const project = sessions[0]?.projectDirectory ?? sessions[0]?.directory;
+  const projects = [...new Set(sessions.map(session => session.projectDirectory ?? session.directory))];
+  if (!orchestrationProject || !projects.includes(orchestrationProject)) orchestrationProject = projects[0];
+  const project = orchestrationProject;
+  // An inspector selection is intentionally transient. It cannot follow a project change and it
+  // must not describe a record that disappeared while the board was being refreshed.
+  if (explorerSelection && explorerSelection.project !== project) explorerSelection = undefined;
   const refresh = h('button', {class: 'btn'}, ['refresh']);
   refresh.addEventListener('click', () => void render());
-  const stopProject = h('button', {class: 'btn'}, ['stop project agents']);
-  stopProject.addEventListener('click', async () => {
-    const projectSessions = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
-    if (!projectSessions.length) return;
-    if (!confirm(`Stop ${projectSessions.length} running agent${projectSessions.length === 1 ? '' : 's'} in this project?`)) return;
-    await Promise.all(projectSessions.map(session => api.stop(session.id)));
-    void render();
-  });
   const addAgent = h('button', {class: 'btn primary'}, ['+ add agent']);
   const advisory = h('div', {});
   addAgent.addEventListener('click', async () => {
@@ -998,25 +1315,61 @@ async function renderOrchestration(main: HTMLElement) {
       h('div', {class: 'actions'}, [proceed, cancel])
     ]));
   });
+  const projectPicker = h('select', {class: 'orchestration-project-picker', 'aria-label': 'Coordination project'});
+  for (const candidate of projects) projectPicker.append(h('option', {value: candidate}, [candidate]));
+  if (project) projectPicker.value = project;
+  projectPicker.addEventListener('change', () => {
+    orchestrationProject = projectPicker.value;
+    explorerSelection = undefined;
+    void render();
+  });
   main.append(h('div', {class: 'toolbar'}, [
-    h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), 'parallel orchestration']), h('p', {class: 'section-sub'}, ['shared, inspectable coordination — claims signal intent; they never lock files'])]),
-    h('div', {class: 'actions'}, [refresh, stopProject, addAgent])
+    h('div', {}, [
+      h('h1', {class: 'section-title'}, [markEl(), 'parallel orchestration']),
+      h('p', {class: 'section-sub'}, ['shared, inspectable coordination — claims signal intent; they never lock files'])
+    ]),
+    h('div', {class: 'actions'}, [projects.length > 1 ? projectPicker : h('span', {class: 'meta'}, [project ?? 'no project']), refresh, addAgent])
   ]));
-  main.append(advisory);
+  main.append(advisory, laneLauncher(project ?? workspacePath));
   if (!project) {
-    main.append(h('div', {class: 'empty-state'}, ['Start a session to establish a project coordination board.']));
+    main.append(h('div', {class: 'empty-state'}, ['Launch lanes above to establish a project coordination board.']));
     return;
   }
+  const stopProject = h('button', {class: 'btn'}, ['stop project agents']);
+  stopProject.addEventListener('click', async () => {
+    const projectSessions = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
+    if (!projectSessions.length) return;
+    if (!confirm(`Stop ${projectSessions.length} running agent${projectSessions.length === 1 ? '' : 's'} in this project?`)) return;
+    await Promise.all(projectSessions.map(session => api.stop(session.id)));
+    void render();
+  });
+  // Keep the potentially disruptive action near the selected project rather than in a global
+  // toolbar whose scope is easy to misread when several repositories have active lanes.
+  advisory.append(h('div', {class: 'orchestration-project-actions'}, [stopProject]));
+  await renderLaneGrid(main, sessions.filter(session => (session.projectDirectory ?? session.directory) === project && (session.status === 'running' || session.status === 'starting')));
   const state = await api.coordination(project);
   const conflicts = await api.conflicts(project);
   const skills = await api.skillStatus().catch(() => []);
   const evals = await api.evalReadiness().catch(() => undefined);
   const live = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
+  let inspection: CoordinationInspection | undefined;
+  if (explorerSelection?.project === project) {
+    inspection = inspectCoordination(explorerSelection.subject, state, sessions, conflicts);
+    if (!inspection) explorerSelection = undefined;
+  }
+  const selectSubject = (label: string, subject: CoordinationSubject, extraClass = '') => {
+    const button = h('button', {class: `object-link${extraClass ? ` ${extraClass}` : ''}`, type: 'button'}, [label]);
+    button.addEventListener('click', () => {
+      explorerSelection = {project, subject};
+      void render();
+    });
+    return button;
+  };
   const taskInput = h('input', {type: 'text', placeholder: 'add a shared task'});
   const addTask = h('button', {class: 'btn primary'}, ['add task']);
   addTask.addEventListener('click', async () => {
     if (!taskInput.value.trim()) return taskInput.focus();
-    await api.createTask(project, taskInput.value.trim());
+    await api.createTask(project, {title: taskInput.value.trim()});
     void render();
   });
   const claimInput = h('input', {type: 'text', placeholder: 'claim a file path'});
@@ -1056,46 +1409,357 @@ async function renderOrchestration(main: HTMLElement) {
     metricCard('overlaps', String(conflicts.length), conflicts.some(conflict => conflict.hotspot) ? 'includes a collision hotspot' : conflicts.length === 0 ? 'none detected' : 'none on hotspot files'),
     metricCard('handoffs', String(state.handoffs.filter(handoff => handoff.status === 'open').length), 'waiting for review')
   ]));
+
+  // The board keeps project direction once, then gives each lane only the narrow task it needs.
+  // This deliberately avoids pasting every prior conversation into every new provider session.
+  const providerSelect = (selected: ProviderId = 'codex') => {
+    const select = h('select', {'aria-label': 'Preferred provider'}) as HTMLSelectElement;
+    for (const provider of ['claude', 'codex', 'gemini'] as ProviderId[]) {
+      select.append(h('option', {value: provider}, [provider]));
+    }
+    select.value = selected;
+    return select;
+  };
+  const ticketPrompt = (task: typeof state.tasks[number]) => [
+    `You are the ${task.role || 'implementation'} specialist for this Fluent Code project.`,
+    '',
+    'Project direction:',
+    state.masterBrief || 'No master brief has been set. Work only from the ticket and inspect the repository before changing files.',
+    '',
+    `Assigned ticket: ${task.title}`,
+    task.description ? `Ticket details:\n${task.description}` : 'Ticket details: inspect the relevant code and make the smallest complete change.',
+    '',
+    'Keep your context focused on this ticket. Coordinate file claims and handoffs through Fluent when needed; do not take unrelated work. Before reporting completion, run the relevant checks and state changed files, verification, and any handoff needed.'
+  ].join('\n');
+
+  const boardNotice = h('p', {class: 'section-sub orchestration-notice'}, [
+    'Create a ticket, then deliberately assign a live lane or launch a clean isolated lane. Provider choice and role remain visible on the ticket.'
+  ]);
+  const masterBrief = h('textarea', {
+    class: 'orchestration-master-brief',
+    placeholder: 'Master brief: product goal, constraints, acceptance criteria, and relevant links',
+    rows: '5'
+  }) as HTMLTextAreaElement;
+  masterBrief.value = state.masterBrief ?? '';
+  const saveBrief = h('button', {class: 'btn primary', type: 'button'}, ['save master brief']);
+  saveBrief.addEventListener('click', async () => {
+    saveBrief.disabled = true;
+    try {
+      await api.setMasterBrief(project, masterBrief.value);
+      void render();
+    } catch (error: unknown) {
+      boardNotice.textContent = error instanceof Error ? error.message : 'Could not save the master brief';
+      boardNotice.className = 'error orchestration-notice';
+    } finally {
+      saveBrief.disabled = false;
+    }
+  });
+
+  const ticketTitle = h('input', {type: 'text', placeholder: 'ticket title, e.g. implement account settings'}) as HTMLInputElement;
+  const ticketRole = h('input', {type: 'text', placeholder: 'role, e.g. frontend'}) as HTMLInputElement;
+  const ticketProvider = providerSelect('codex');
+  const ticketDescription = h('textarea', {placeholder: 'Ticket-local brief, constraints, and acceptance checks', rows: '4'}) as HTMLTextAreaElement;
+  const createTicket = h('button', {class: 'btn primary', type: 'button'}, ['create ticket']);
+  createTicket.addEventListener('click', async () => {
+    if (!ticketTitle.value.trim()) return ticketTitle.focus();
+    createTicket.disabled = true;
+    try {
+      await api.createTask(project, {
+        title: ticketTitle.value,
+        description: ticketDescription.value,
+        role: ticketRole.value,
+        provider: ticketProvider.value as ProviderId,
+        source: 'manual'
+      });
+      void render();
+    } catch (error: unknown) {
+      boardNotice.textContent = error instanceof Error ? error.message : 'Could not create ticket';
+      boardNotice.className = 'error orchestration-notice';
+    } finally {
+      createTicket.disabled = false;
+    }
+  });
+
+  const specPath = h('input', {type: 'text', placeholder: 'choose a .md, .mdx, .txt, or .rst spec file'}) as HTMLInputElement;
+  const browseSpec = h('button', {class: 'btn directory-browse', type: 'button'}, ['choose spec…']);
+  browseSpec.addEventListener('click', async () => {
+    browseSpec.disabled = true;
+    try {
+      const selected = await pickSpecFile('Choose specification document', specPath.value);
+      if (selected) specPath.value = selected;
+    } finally {
+      browseSpec.disabled = false;
+    }
+  });
+  const plannerProvider = providerSelect('claude');
+  const launchPlanner = h('button', {class: 'btn primary', type: 'button'}, ['launch spec planner']);
+  launchPlanner.addEventListener('click', async () => {
+    if (!specPath.value.trim()) return specPath.focus();
+    launchPlanner.disabled = true;
+    try {
+      const plannerState = await api.createTask(project, {
+        title: `Plan spec: ${workspaceFolderName(specPath.value)}`,
+        description: `Read and break down the selected specification: ${specPath.value.trim()}`,
+        role: 'master orchestrator',
+        provider: plannerProvider.value as ProviderId,
+        source: 'planner'
+      });
+      const plannerTask = plannerState.tasks[0]!;
+      const plannerPrompt = [
+        'You are the master orchestration planner for this project.',
+        '',
+        `Read this local specification file: ${specPath.value.trim()}`,
+        'If the path is inaccessible, say so and ask for the relevant text rather than guessing.',
+        '',
+        'Project direction:',
+        plannerState.masterBrief || 'No master brief has been saved yet.',
+        '',
+        'Break the specification into small, independently verifiable Kanban tickets. For each, recommend a role and provider, call out file or dependency risks, and avoid doing implementation yourself. Use Fluent coordination tools to create the tickets when available; otherwise produce the numbered breakdown for the user to review.'
+      ].join('\n');
+      const session = await api.createSession({
+        provider: plannerProvider.value as ProviderId,
+        directory: project,
+        task: plannerPrompt,
+        isolate: true
+      });
+      await api.assignTask(project, plannerTask.id, {
+        sessionId: session.id,
+        provider: plannerProvider.value as ProviderId,
+        role: 'master orchestrator'
+      });
+      void render();
+    } catch (error: unknown) {
+      boardNotice.textContent = error instanceof Error ? error.message : 'Could not launch the spec planner';
+      boardNotice.className = 'error orchestration-notice';
+    } finally {
+      launchPlanner.disabled = false;
+    }
+  });
+
+  const taskColumns: Array<{status: 'todo' | 'active' | 'done'; label: string}> = [
+    {status: 'todo', label: 'ready'}, {status: 'active', label: 'in progress'}, {status: 'done', label: 'complete'}
+  ];
+  const activeLanes = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && (session.status === 'running' || session.status === 'starting'));
+  const ticketColumns = taskColumns.map(column => {
+    const tickets = state.tasks.filter(task => task.status === column.status);
+    const cards = tickets.length === 0
+      ? [h('p', {class: 'section-sub kanban-empty'}, ['No tickets'])]
+      : tickets.map(task => {
+          const lanePicker = h('select', {'aria-label': `Assign ${task.title} to a running lane`}) as HTMLSelectElement;
+          lanePicker.append(h('option', {value: ''}, ['choose running lane']));
+          for (const lane of activeLanes) lanePicker.append(h('option', {value: lane.id}, [`${lane.provider} · ${lane.id.slice(0, 8)} · ${lane.task || 'untitled lane'}`]));
+          if (task.sessionId && activeLanes.some(lane => lane.id === task.sessionId)) lanePicker.value = task.sessionId;
+          const assignExisting = h('button', {class: 'btn', type: 'button'}, ['assign & brief']);
+          assignExisting.disabled = activeLanes.length === 0;
+          assignExisting.addEventListener('click', async () => {
+            const sessionId = lanePicker.value;
+            if (!sessionId) return lanePicker.focus();
+            assignExisting.disabled = true;
+            try {
+              // Delivery first: the board never claims a lane has a ticket if its terminal did not
+              // accept the focused brief.
+              await api.inject(sessionId, ticketPrompt(task));
+              const lane = activeLanes.find(candidate => candidate.id === sessionId);
+              await api.assignTask(project, task.id, {sessionId, provider: lane?.provider ?? task.provider, role: task.role});
+              void render();
+            } catch (error: unknown) {
+              boardNotice.textContent = error instanceof Error ? error.message : 'Could not assign this lane';
+              boardNotice.className = 'error orchestration-notice';
+            } finally {
+              assignExisting.disabled = false;
+            }
+          });
+          const launch = h('button', {class: 'btn primary', type: 'button'}, ['launch clean lane']);
+          launch.addEventListener('click', async () => {
+            const provider = task.provider ?? 'codex';
+            launch.disabled = true;
+            try {
+              const session = await api.createSession({provider, directory: project, task: ticketPrompt(task), isolate: true});
+              await api.assignTask(project, task.id, {sessionId: session.id, provider, role: task.role});
+              void render();
+            } catch (error: unknown) {
+              boardNotice.textContent = error instanceof Error ? error.message : 'Could not launch this lane';
+              boardNotice.className = 'error orchestration-notice';
+            } finally {
+              launch.disabled = false;
+            }
+          });
+          const nextStatus = task.status === 'todo' ? 'active' : task.status === 'active' ? 'done' : 'todo';
+          const advance = h('button', {class: 'btn', type: 'button'}, [task.status === 'todo' ? 'start' : task.status === 'active' ? 'mark done' : 'reopen']);
+          advance.addEventListener('click', async () => { await api.updateTask(project, task.id, nextStatus, task.sessionId); void render(); });
+          const review = h('button', {class: 'btn', type: 'button'}, ['review lane']);
+          review.disabled = !task.sessionId;
+          review.addEventListener('click', () => task.sessionId && navigate({name: 'active-session', sessionId: task.sessionId}));
+          return h('article', {class: 'kanban-ticket'}, [
+            h('div', {class: 'kanban-ticket-head'}, [h('strong', {}, [task.title]), h('span', {class: 'pill'}, [task.source ?? 'manual'])]),
+            task.description ? h('p', {class: 'section-sub'}, [task.description]) : h('p', {class: 'section-sub'}, ['No ticket-local brief yet.']),
+            h('p', {class: 'kanban-meta'}, [`${task.role || 'generalist'} · ${task.provider || 'provider undecided'}${task.sessionId ? ` · lane ${task.sessionId.slice(0, 8)}` : ''}`]),
+            h('div', {class: 'kanban-assignment'}, [lanePicker, assignExisting]),
+            h('div', {class: 'kanban-actions'}, [launch, review, advance])
+          ]);
+        });
+    return h('section', {class: 'kanban-column'}, [h('div', {class: 'kanban-column-head'}, [h('h3', {}, [column.label]), h('span', {class: 'meta'}, [String(tickets.length)])]), ...cards]);
+  });
+  const sourceControl = h('button', {class: 'btn', type: 'button'}, ['open source control']);
+  sourceControl.addEventListener('click', () => navigate({name: 'source-control'}));
+  main.append(h('section', {class: 'orchestration-command card'}, [
+    h('div', {class: 'orchestration-command-head'}, [
+      h('div', {}, [h('h2', {}, ['orchestration command center']), h('p', {class: 'section-sub'}, ['Master direction stays on the board. Each named specialist lane receives a clean, accountable ticket prompt.'])]),
+      sourceControl
+    ]),
+    boardNotice,
+    h('div', {class: 'orchestration-composer-grid'}, [
+      h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['master brief']), masterBrief, h('div', {class: 'actions'}, [saveBrief])]),
+      h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['new ticket']), ticketTitle, h('div', {class: 'orchestration-form-row'}, [ticketRole, ticketProvider]), ticketDescription, h('div', {class: 'actions'}, [createTicket])]),
+      h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['spec → Kanban planner']), h('p', {class: 'section-sub'}, ['Starts an isolated planner with this file path and the saved brief. It creates a visible planner ticket first.']), h('div', {class: 'directory-field'}, [specPath, browseSpec]), h('div', {class: 'orchestration-form-row'}, [plannerProvider, launchPlanner])])
+    ]),
+    h('div', {class: 'kanban-board'}, ticketColumns)
+  ]));
+  const scopeLabels: Record<ExplorerScope, string> = {overview: 'overview', tasks: 'tasks', files: 'files', reviews: 'reviews'};
+  const scopeButtons = (Object.keys(scopeLabels) as ExplorerScope[]).map(scope => {
+    const button = h('button', {
+      class: `scope-button${explorerScope === scope ? ' active' : ''}`,
+      type: 'button',
+      'aria-pressed': explorerScope === scope ? 'true' : 'false'
+    }, [scopeLabels[scope]]);
+    button.addEventListener('click', () => { setExplorerScope(scope); void render(); });
+    return button;
+  });
+  const relatedRows = (label: string, rows: HTMLElement[]) => rows.length > 0
+    ? h('div', {class: 'relationship-group'}, [h('h4', {}, [label]), ...rows])
+    : undefined;
+  const inspectionBody: HTMLElement[] = [];
+  if (inspection) {
+    inspectionBody.push(
+      h('h3', {}, ['inspect relationship']),
+      h('p', {class: 'inspector-title'}, [inspection.title]),
+      h('p', {class: 'section-sub'}, [inspection.relationshipNote])
+    );
+    const relationshipGroups = [
+      relatedRows('lanes', [
+        ...inspection.lanes.map(lane => h('div', {class: 'relationship-row'}, [
+          selectSubject(`${lane.provider} · ${lane.id.slice(0, 8)} · ${lane.status}`, {kind: 'lane', sessionId: lane.id}),
+          verificationPill(lane.verification)
+        ])),
+        ...inspection.missingLaneIds.map(id => h('p', {class: 'meta relationship-missing'}, [`${id.slice(0, 8)} · no longer in this session snapshot`]))
+      ]),
+      relatedRows('tasks', inspection.tasks.map(task => h('div', {class: 'relationship-row'}, [
+        selectSubject(task.title, {kind: 'task', id: task.id}),
+        h('span', {class: 'meta'}, [task.status])
+      ]))),
+      relatedRows('claims', inspection.claims.map(claim => h('div', {class: 'relationship-row'}, [
+        selectSubject(claim.path, {kind: 'claim', id: claim.id}),
+        h('span', {class: 'meta'}, [claim.origin])
+      ]))),
+      relatedRows('handoffs', inspection.handoffs.map(handoff => h('div', {class: 'relationship-row'}, [
+        selectSubject(handoff.summary, {kind: 'handoff', id: handoff.id}),
+        h('span', {class: 'meta'}, [handoff.status])
+      ]))),
+      relatedRows('lane messages', inspection.messages.map(message => h('div', {class: 'relationship-row'}, [
+        selectSubject(message.body, {kind: 'message', id: message.id}),
+        h('span', {class: 'meta'}, [`${message.from.slice(0, 8)} → ${message.to.slice(0, 8)}${message.readAt ? ' · read' : ''}`])
+      ]))),
+      relatedRows('decisions', inspection.decisions.map(decision => h('div', {class: 'relationship-row'}, [
+        selectSubject(decision.summary, {kind: 'decision', id: decision.id})
+      ]))),
+      relatedRows('path overlaps', inspection.conflicts.map(conflict => h('div', {class: 'relationship-row'}, [
+        selectSubject(`${conflict.path} ↔ ${conflict.claimedPath}`, {kind: 'conflict', path: conflict.path, claimedPath: conflict.claimedPath, sessionId: conflict.sessionId}),
+        h('span', {class: conflict.hotspot ? 'error' : 'meta'}, [conflict.hotspot ? 'hotspot' : conflict.overlap])
+      ])))
+    ];
+    for (const group of relationshipGroups) if (group) inspectionBody.push(group);
+  } else {
+    inspectionBody.push(
+      h('h3', {}, ['inspect relationship']),
+      h('p', {class: 'section-sub'}, ['Select a lane, task, claim, handoff, decision, message, or overlap to see the records related in this current board.'])
+    );
+  }
+  const activity = retainedCoordinationHistory(state, 8);
+  const activityRows = activity.length > 0
+    ? activity.map(item => h('div', {class: 'activity-row'}, [
+        h('span', {class: 'activity-time'}, [Number.isFinite(Date.parse(item.at)) ? relativeTime(item.at) : 'time unavailable']),
+        h('span', {class: 'activity-kind'}, [item.label]),
+        item.subject ? selectSubject(item.detail, item.subject) : h('span', {class: 'activity-detail'}, [item.detail])
+      ]))
+    : [h('p', {class: 'section-sub'}, ['No retained coordination events yet.'])];
+  main.append(h('section', {class: 'coordination-explorer'}, [
+    h('div', {class: 'explorer-header'}, [
+      h('div', {}, [
+        h('h2', {}, ['coordination explorer']),
+        h('p', {class: 'section-sub'}, ['Personal saved view · derived from the current project board · never shared with agents'])
+      ]),
+      h('div', {class: 'scope-tabs', role: 'group', 'aria-label': 'Saved coordination views'}, scopeButtons)
+    ]),
+    h('div', {class: 'explorer-grid'}, [
+      h('div', {class: 'card coordination-inspector'}, inspectionBody),
+      (explorerScope === 'overview' || explorerScope === 'reviews')
+        ? h('div', {class: 'card current-record-activity'}, [
+            h('h3', {}, ['retained coordination history']),
+            h('p', {class: 'section-sub'}, ['Meaningful board changes only. This is not terminal history, a provider transcript, or an audit log.']),
+            ...activityRows
+          ])
+        : h('div', {class: 'card current-record-activity'}, [
+            h('h3', {}, ['focused view']),
+            h('p', {class: 'section-sub'}, [explorerScope === 'tasks'
+              ? 'Task and decision controls stay visible below.'
+              : 'Claims, overlap signals, and release controls stay visible below.'])
+          ])
+    ])
+  ]));
   const taskRows = state.tasks.map(task => {
     const next = task.status === 'todo' ? 'start' : task.status === 'active' ? 'mark done' : 'reopen';
     const nextStatus = task.status === 'todo' ? 'active' : task.status === 'active' ? 'done' : 'todo';
     const button = h('button', {class: 'btn'}, [next]);
     button.addEventListener('click', async () => { await api.updateTask(project, task.id, nextStatus, live[0]?.id); void render(); });
-    return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [task.title]), h('span', {class: 'meta'}, [task.status]), button]);
+    return h('div', {class: 'option-row'}, [selectSubject(task.title, {kind: 'task', id: task.id}), h('span', {class: 'meta'}, [task.status]), button]);
   });
   const handoffRows = state.handoffs.map(handoff => {
     const accept = h('button', {class: 'btn'}, ['accept']);
     accept.disabled = handoff.status === 'accepted';
     accept.addEventListener('click', async () => { await api.acceptHandoff(project, handoff.id); void render(); });
-    return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [handoff.summary]), h('span', {class: 'meta'}, [`${handoff.fromSessionId.slice(0, 6)} → ${handoff.toSessionId.slice(0, 6)} · ${handoff.status}`]), accept]);
+    return h('div', {class: 'option-row'}, [selectSubject(handoff.summary, {kind: 'handoff', id: handoff.id}), h('span', {class: 'meta'}, [`${handoff.fromSessionId.slice(0, 6)} → ${handoff.toSessionId.slice(0, 6)} · ${handoff.status}`]), accept]);
   });
   const claimRows = state.claims.map(claim => {
     const release = h('button', {class: 'btn'}, ['release']);
     release.addEventListener('click', async () => { await api.releaseClaim(project, claim.path, claim.sessionId); void render(); });
-    return h('div', {class: 'option-row'}, [h('span', {class: 'label'}, [claim.path]), h('span', {class: 'meta'}, [`${claim.sessionId.slice(0, 8)} · ${claim.origin}`]), release]);
+    return h('div', {class: 'option-row'}, [selectSubject(claim.path, {kind: 'claim', id: claim.id}), h('span', {class: 'meta'}, [`${claim.sessionId.slice(0, 8)} · ${claim.origin}`]), release]);
   });
   // Overlaps read as their own card rather than as decoration on the claims list: an overlap is a
   // thing to act on now, while both lanes are still working, not a property of one claim.
   const conflictRows = conflicts.length === 0
     ? [h('p', {class: 'section-sub'}, ['0 open conflicts — no two lanes are touching the same paths.'])]
     : conflicts.map(conflict => h('div', {class: 'option-row'}, [
-        h('span', {class: 'label'}, [conflict.overlap === 'same' ? conflict.path : `${conflict.path} ↔ ${conflict.claimedPath}`]),
+        selectSubject(conflict.overlap === 'same' ? conflict.path : `${conflict.path} ↔ ${conflict.claimedPath}`, {kind: 'conflict', path: conflict.path, claimedPath: conflict.claimedPath, sessionId: conflict.sessionId}),
         h('span', {class: conflict.hotspot ? 'error' : 'meta'}, [conflict.hotspot ? `hotspot · also held by ${conflict.sessionId.slice(0, 8)}` : `also held by ${conflict.sessionId.slice(0, 8)}`])
       ]));
-  main.append(h('div', {class: 'cards-row'}, [
-    h('div', {class: 'card'}, [h('h3', {}, ['shared task board']), ...taskRows, h('div', {class: 'field'}, [taskInput, addTask])]),
-    h('div', {class: 'card'}, [h('h3', {}, ['file overlaps']), ...conflictRows]),
-    h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimButton, claimNotice])]),
-    h('div', {class: 'card'}, [h('h3', {}, ['project memory']), ...state.decisions.map(decision => h('p', {class: 'section-sub'}, [decision.summary || 'no decisions yet'])), h('div', {class: 'field'}, [decisionInput, decisionButton])]),
-    h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffButton])])
-  ]));
+  const workbenchCards: HTMLElement[] = [];
+  if (explorerScope === 'overview' || explorerScope === 'tasks') {
+    workbenchCards.push(
+      h('div', {class: 'card'}, [h('h3', {}, ['shared task board']), ...taskRows, h('div', {class: 'field'}, [taskInput, addTask])]),
+      h('div', {class: 'card'}, [
+        h('h3', {}, ['project memory']),
+        ...state.decisions.map(decision => h('div', {class: 'option-row'}, [selectSubject(decision.summary || 'decision', {kind: 'decision', id: decision.id})])),
+        h('div', {class: 'field'}, [decisionInput, decisionButton])
+      ])
+    );
+  }
+  if (explorerScope === 'overview' || explorerScope === 'files') {
+    workbenchCards.push(
+      h('div', {class: 'card'}, [h('h3', {}, ['file overlaps']), ...conflictRows]),
+      h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimButton, claimNotice])])
+    );
+  }
+  if (explorerScope === 'overview' || explorerScope === 'reviews') {
+    workbenchCards.push(h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffButton])]));
+  }
+  main.append(h('div', {class: 'cards-row'}, workbenchCards));
 
   // Lanes talking to each other is coordination, so it is shown like every other kind: visible by
   // default, never something happening out of sight (spec §2 principle 3).
   const messageRows = state.messages.length === 0
     ? [h('p', {class: 'section-sub'}, ['No messages between lanes yet — an agent sends one with `fluent-coord send`.'])]
     : [...state.messages].reverse().slice(0, 12).map(message => h('div', {class: 'option-row'}, [
-        h('span', {class: 'label'}, [message.body]),
+        selectSubject(message.body, {kind: 'message', id: message.id}),
         h('span', {class: 'meta'}, [`${message.from.slice(0, 8)} → ${message.to.slice(0, 8)} · ${message.readAt ? 'read' : 'unread'}`])
       ]));
 
@@ -1165,11 +1829,26 @@ async function renderOrchestration(main: HTMLElement) {
     }
   });
 
-  main.append(h('div', {class: 'cards-row'}, [
-    h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows]),
-    h('div', {class: 'card'}, [h('h3', {}, ['collaboration skill']), installNotice, h('div', {class: 'field'}, [installButton])]),
-    h('div', {class: 'card'}, [h('h3', {}, ['eval suite']), evalSummary, ...evalRows, evalNotice, h('div', {class: 'field'}, [evalButton])])
-  ]));
+  const supportCards: HTMLElement[] = [];
+  if (explorerScope === 'overview' || explorerScope === 'reviews') {
+    const verificationRows = live.length > 0
+      ? live.map(lane => h('div', {class: 'option-row'}, [
+          selectSubject(`${lane.provider} · ${lane.id.slice(0, 8)}`, {kind: 'lane', sessionId: lane.id}),
+          verificationPill(lane.verification)
+        ]))
+      : [h('p', {class: 'section-sub'}, ['No running lanes in this project.'])];
+    supportCards.push(
+      h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows]),
+      h('div', {class: 'card'}, [h('h3', {}, ['current lane verification']), ...verificationRows])
+    );
+  }
+  if (explorerScope === 'overview') {
+    supportCards.push(
+      h('div', {class: 'card'}, [h('h3', {}, ['collaboration skill']), installNotice, h('div', {class: 'field'}, [installButton])]),
+      h('div', {class: 'card'}, [h('h3', {}, ['eval suite']), evalSummary, ...evalRows, evalNotice, h('div', {class: 'field'}, [evalButton])])
+    );
+  }
+  if (supportCards.length > 0) main.append(h('div', {class: 'cards-row'}, supportCards));
 }
 
 // --- Design workspace & visual check ----------------------------------------
@@ -1243,7 +1922,7 @@ async function renderDesignWorkspace(main: HTMLElement) {
   const add = h('button', {class: 'btn primary'}, ['create design task']);
   add.addEventListener('click', async () => {
     if (!title.value.trim()) return title.focus();
-    await api.createTask(project, `design: ${title.value.trim()}`);
+    await api.createTask(project, {title: `design: ${title.value.trim()}`, role: 'design', source: 'manual'});
     void render();
   });
   main.append(h('div', {class: 'cards-row'}, [
@@ -1266,11 +1945,18 @@ async function renderDesignWorkspace(main: HTMLElement) {
 }
 
 async function renderPreview(main: HTMLElement) {
-  const stored = localStorage.getItem('fluent.preview-url') ?? 'http://localhost:3000';
-  const urlInput = h('input', {type: 'url', value: stored, placeholder: 'http://localhost:3000'});
+  const stored = localStorage.getItem('fluent.preview-url');
+  const urlInput = h('input', {type: 'url', value: stored ?? 'http://localhost:3000', placeholder: 'http://localhost:3000'});
   const open = h('button', {class: 'btn primary'}, ['open preview']);
-  const status = h('p', {class: 'section-sub'}, ['local URLs only — Fluent never proxies preview traffic']);
-  const frame = h('iframe', {class: 'preview-frame', title: 'local preview', src: stored});
+  const status = h('p', {class: 'section-sub'}, [stored ? `previewing ${stored}` : 'local URLs only — Fluent never proxies preview traffic']);
+  const frame = h('iframe', {class: 'preview-frame', title: 'local preview', src: stored ?? 'about:blank'}) as HTMLIFrameElement;
+  const empty = h('div', {class: 'preview-empty'}, [
+    h('strong', {}, ['local preview is ready when your app is']),
+    h('p', {}, ['Enter a localhost URL above to inspect it here. Fluent keeps preview traffic on your machine.'])
+  ]);
+  const stage = h('div', {class: 'preview-stage'}, [frame, empty]);
+  frame.hidden = !stored;
+  empty.hidden = Boolean(stored);
   open.addEventListener('click', () => {
     const value = urlInput.value.trim();
     if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/.test(value)) {
@@ -1280,6 +1966,8 @@ async function renderPreview(main: HTMLElement) {
     }
     localStorage.setItem('fluent.preview-url', value);
     frame.src = value;
+    frame.hidden = false;
+    empty.hidden = true;
     status.textContent = `previewing ${value}`;
     status.className = 'section-sub';
   });
@@ -1291,7 +1979,7 @@ async function renderPreview(main: HTMLElement) {
       inspect
     ]),
     h('div', {class: 'field preview-controls'}, [urlInput, open]),
-    frame
+    stage
   );
 }
 
@@ -1307,10 +1995,21 @@ async function renderRemote(main: HTMLElement) {
     void render();
   });
   main.append(
-    h('h1', {class: 'section-title'}, [markEl(), 'remote servers']),
-    h('p', {class: 'section-sub'}, ['connects through SSH Unix-socket forwarding; Fluent never exposes a daemon port publicly.']),
-    h('div', {class: 'field'}, [name, host, add])
+    h('div', {class: 'toolbar'}, [
+      h('div', {}, [
+        h('h1', {class: 'section-title'}, [markEl(), 'remote servers']),
+        h('p', {class: 'section-sub'}, ['connects through SSH Unix-socket forwarding; Fluent never exposes a daemon port publicly.'])
+      ])
+    ]),
+    h('div', {class: 'card remote-connect-card'}, [
+      h('h3', {}, ['add a remote target']),
+      h('p', {class: 'section-sub'}, ['Name a server, then use your existing SSH identity to establish an owner-controlled tunnel.']),
+      h('div', {class: 'field'}, [name, host, add])
+    ])
   );
+  if (profiles.length === 0) {
+    main.append(h('div', {class: 'empty-state remote-empty'}, ['No remote servers configured. Your local machine remains the active target.']));
+  }
   for (const profile of profiles) {
     const action = h('button', {class: profile.status === 'connected' ? 'btn' : 'btn primary'}, [profile.status === 'connected' ? 'disconnect' : 'connect']);
     action.addEventListener('click', async () => {
@@ -1342,8 +2041,8 @@ async function renderRemote(main: HTMLElement) {
       main.append(h('div', {class: 'cards-row'}, [
         h('div', {class: 'card'}, [
           h('h3', {}, ['active remote hardware']),
-          h('p', {class: 'trace cpu'}, [`cpu     ${sparkline(hardware.history, 'cpuPercent')}`]),
-          h('p', {class: 'trace memory'}, [`memory  ${sparkline(hardware.history, 'memoryUsedBytes')}`]),
+          h('p', {class: 'trace cpu'}, ['cpu', sparklineChart(hardware.history.map(sample => sample.cpuPercent), 'var(--success)')]),
+          h('p', {class: 'trace memory'}, ['memory', sparklineChart(hardware.history.map(sample => sample.memoryUsedBytes), 'var(--fg-muted)')]),
           h('p', {class: 'section-sub'}, [`${hardware.current.cpuPercent.toFixed(1)}% fluentd CPU · ${memory} memory · uptime ${duration(hardware.current.uptimeSeconds)}`])
         ]),
         h('div', {class: 'card'}, [
@@ -1403,7 +2102,10 @@ async function renderThemes(main: HTMLElement) {
 }
 
 function navButton(label: string, name: Route['name']): HTMLButtonElement {
-  const button = h('button', {}, [label]);
+  // Most navigation lives in the rail, which supplies its compact treatment. A few contextual
+  // actions (for example “open preview” in Design) reuse this helper outside the rail, where a
+  // plain browser button looks broken; the base button treatment keeps both cases intentional.
+  const button = h('button', {class: 'btn'}, [label]);
   if (route.name === name) {
     button.classList.add('active');
     button.setAttribute('aria-current', 'page');
@@ -1418,16 +2120,35 @@ function markEl(): HTMLElement {
 
 // --- Splash ---------------------------------------------------------------
 
+/** The packaged daemon is started by Tauri immediately before the webview loads. Give its
+ * owner-local socket a bounded moment to come up instead of presenting a false startup failure
+ * on a fast first render. A genuine daemon failure remains visible and retryable afterwards. */
+async function waitForLocalDaemon() {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    try {
+      return await api.ping();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 24) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  throw lastError;
+}
+
 async function renderSplash(main: HTMLElement) {
   const container = h('div', {class: 'splash'});
   main.append(container);
+  const wordmark = h('div', {class: 'wordmark'}, [markEl(), 'fluent code']);
+  container.append(wordmark, h('p', {class: 'version'}, ['starting local engine…']));
 
   let ping: {ok: boolean; pid: number};
   try {
-    ping = await api.ping();
+    ping = await waitForLocalDaemon();
   } catch (error) {
+    container.innerHTML = '';
     container.append(
-      h('div', {class: 'wordmark'}, [markEl(), 'fluent code']),
+      wordmark,
       h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]),
       retryButton(() => void render())
     );
@@ -1441,8 +2162,9 @@ async function renderSplash(main: HTMLElement) {
     {id: 'gemini', label: 'google gemini'}
   ];
 
+  container.innerHTML = '';
   container.append(
-    h('div', {class: 'wordmark'}, [markEl(), 'fluent code']),
+    wordmark,
     h('p', {class: 'version'}, [`fluentd connected · pid ${ping.pid}`]),
     h('div', {class: 'providers'}, providers.map(provider => {
       const chain = chains.find(c => c.provider === provider.id);
@@ -1488,11 +2210,12 @@ async function renderOnboarding(main: HTMLElement) {
 
   // Provider CLIs retain their own login flows; Fluent launches each one unchanged and supplies
   // an explicitly selected secure API-key credential only when the user has configured it.
-  const dirInput = h('input', {type: 'text', placeholder: '/path/to/project'});
+  const dirInput = h('input', {type: 'text', placeholder: '/path/to/project', value: workspacePath}) as HTMLInputElement;
   const loginButton = h('button', {class: 'btn primary'}, ['connect via CLI login']);
   loginButton.addEventListener('click', async () => {
     const directory = dirInput.value.trim();
     if (!directory) return dirInput.focus();
+    setWorkspacePath(directory);
     const summary = await api.createSession({provider: 'claude', directory});
     navigate({name: 'active-session', sessionId: summary.id});
   });
@@ -1585,7 +2308,7 @@ async function renderOnboarding(main: HTMLElement) {
     h('div', {class: 'card'}, [
       h('h3', {}, ['Claude Code']),
       h('p', {class: 'subtitle'}, ['Anthropic']),
-      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['CLI login — working directory']), dirInput, loginButton]),
+      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['CLI login — working directory']), directoryField(dirInput), h('p', {class: 'section-sub'}, ['browse folders on this computer, or enter a path']), loginButton]),
       h('div', {class: 'field'}, [
         h('label', {class: 'field-label'}, ['or use an API key']),
         keyLabel,
@@ -1647,7 +2370,7 @@ async function renderSessions(main: HTMLElement) {
   for (const session of sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
     const name = session.task?.trim() || session.directory.split('/').filter(Boolean).pop() || session.directory;
     const row = h('tr', {}, [
-      h('td', {}, [name]),
+      h('td', {}, [h('div', {class: 'session-name'}, [name, ...(session.error ? [h('p', {class: 'error'}, [session.error])] : [])])]),
       h('td', {}, [session.provider]),
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
@@ -1722,12 +2445,12 @@ async function renderNewSession(main: HTMLElement) {
   renderAccounts();
   main.append(accountsContainer);
 
-  const dirInput = h('input', {type: 'text', placeholder: '/path/to/project'});
+  const dirInput = h('input', {type: 'text', placeholder: '/path/to/project', value: workspacePath}) as HTMLInputElement;
   const taskInput = h('textarea', {placeholder: 'what should this session start with? (optional)'});
   const isolateInput = h('input', {type: 'checkbox'}) as HTMLInputElement;
   const isolateLabel = h('label', {class: 'check-label'}, [isolateInput, ' run in an isolated Git worktree']);
   main.append(
-    h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['working directory']), dirInput]),
+    h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['working directory']), directoryField(dirInput), h('p', {class: 'section-sub'}, ['browse folders on this computer, or enter a path'])]),
     h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['starting task (optional)']), taskInput, isolateLabel, h('p', {class: 'section-sub'}, ['recommended for parallel agents — creates a separate checkout beside the project'])])
   );
 
@@ -1753,15 +2476,261 @@ async function renderNewSession(main: HTMLElement) {
   void renderHeadroom();
 
   const startButton = h('button', {class: 'btn primary'}, ['start session']);
+  const startNotice = h('p', {class: 'action-status', role: 'status'}, []);
   startButton.addEventListener('click', async () => {
     const directory = dirInput.value.trim();
     if (!directory) return dirInput.focus();
-    const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked});
-    navigate({name: 'active-session', sessionId: summary.id});
+    startButton.disabled = true;
+    startNotice.className = 'action-status';
+    startNotice.textContent = 'starting session…';
+    try {
+      setWorkspacePath(directory);
+      const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked});
+      navigate({name: 'active-session', sessionId: summary.id});
+    } catch (error) {
+      const message = actionErrorText(error);
+      startNotice.className = 'error action-status';
+      startNotice.textContent = message;
+      showActionError(error);
+    } finally {
+      startButton.disabled = false;
+    }
   });
   const cancelButton = h('button', {class: 'btn'}, ['cancel']);
   cancelButton.addEventListener('click', () => navigate({name: 'sessions'}));
-  main.append(h('div', {class: 'toolbar'}, [h('span', {}, []), h('div', {class: 'actions'}, [cancelButton, startButton])]));
+  main.append(h('div', {class: 'toolbar'}, [startNotice, h('div', {class: 'actions'}, [cancelButton, startButton])]));
+}
+
+// --- Lane terminals ------------------------------------------------------------
+
+type LaneTerminal = {snapshot: SessionSnapshot; dispose: () => void};
+
+/**
+ * Mounts one lane's live terminal: xterm.js on the lane's PTY stream, keystrokes back to the lane.
+ *
+ * Two things a plain write-and-forward got wrong. Output pushed before the snapshot arrives has to
+ * be held and written after it, or the screen is drawn out of order. And replaying the snapshot
+ * re-runs every terminal query the CLI sent while nobody was watching — cursor position, colours,
+ * device attributes — which xterm.js answers again; those stale answers would be typed into the
+ * lane as if the user had typed them.
+ */
+async function attachLaneTerminal(sessionId: string, container: HTMLElement, options: {fontSize?: number; onStatus?: (summary: SessionSummary) => void} = {}): Promise<LaneTerminal> {
+  const terminal = new Terminal({
+    fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+    fontSize: options.fontSize ?? terminalFontSize(),
+    theme: terminalTheme()
+  });
+  const fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
+  terminal.open(container);
+  let replaying = true;
+  const pending: string[] = [];
+  terminal.onData(data => {
+    if (replaying) return;
+    void api.send(sessionId, data).catch(error => {
+      terminal.write(`\r\n[Fluent] ${actionErrorText(error)}\r\n`);
+      showActionError(error);
+    });
+  });
+  const subscription = subscribeSession(sessionId, {
+    onOutput: chunk => {
+      if (replaying) pending.push(chunk);
+      else terminal.write(chunk);
+    },
+    onStatus: summary => options.onStatus?.(summary)
+  });
+  let disposed = false;
+  let lastSize = '';
+  // The daemon spawns the PTY at a fixed default size before any view has measured itself, and a
+  // grid tile is much smaller than the single-lane view — keep the PTY at whatever is rendered, or
+  // the CLI draws (and wraps) for a grid that doesn't match the screen.
+  const fit = () => {
+    if (disposed || !container.isConnected) return;
+    fitAddon.fit();
+    const size = `${terminal.cols}x${terminal.rows}`;
+    if (size === lastSize) return;
+    lastSize = size;
+    void api.resize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
+  };
+  const resizeObserver = new ResizeObserver(() => fit());
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    resizeObserver.disconnect();
+    void subscription.unsubscribe();
+    terminal.dispose();
+  };
+  let snapshot: SessionSnapshot;
+  try {
+    snapshot = await subscription.snapshot;
+  } catch (error) {
+    dispose();
+    throw error;
+  }
+  await new Promise<void>(resolve => terminal.write(snapshot.output, resolve));
+  replaying = false;
+  for (const chunk of pending.splice(0)) terminal.write(chunk);
+  // The page may have been replaced while the snapshot loaded; nothing would release this later.
+  if (!container.isConnected) {
+    dispose();
+    return {snapshot, dispose};
+  }
+  resizeObserver.observe(container);
+  fit();
+  return {snapshot, dispose};
+}
+
+/**
+ * Where context goes into lanes: one paste per lane, then Enter — what a person pasting a brief
+ * into each terminal and pressing return would do, never a change to what the CLI does with it.
+ * `targets` is read at click time, so a lane selection changed after mounting is honoured.
+ */
+function contextComposer(targets: () => string[], label = 'inject context'): HTMLElement {
+  const input = h('textarea', {class: 'context-input', rows: '3', placeholder: 'context to paste into the lane — the task, files to read first, constraints…', 'aria-label': 'Context to inject'}) as HTMLTextAreaElement;
+  const submit = h('input', {type: 'checkbox', checked: ''}) as HTMLInputElement;
+  const status = h('p', {class: 'action-status', role: 'status'}, []);
+  const button = h('button', {class: 'btn primary'}, [label]);
+  button.addEventListener('click', async () => {
+    const text = input.value;
+    const ids = targets();
+    if (!text.trim()) return input.focus();
+    if (ids.length === 0) {
+      status.className = 'error action-status';
+      status.textContent = 'select at least one running lane';
+      return;
+    }
+    button.disabled = true;
+    status.className = 'action-status';
+    status.textContent = `injecting into ${ids.length} lane${ids.length === 1 ? '' : 's'}…`;
+    const results = await Promise.allSettled(ids.map(id => api.inject(id, text, submit.checked)));
+    const failed = results.flatMap((result, index) => result.status === 'rejected' ? [`${ids[index]!.slice(0, 8)}: ${actionErrorText(result.reason)}`] : []);
+    status.className = failed.length ? 'error action-status' : 'action-status';
+    status.textContent = failed.length
+      ? `injected into ${ids.length - failed.length} of ${ids.length} — ${failed.join(' · ')}`
+      : `injected into ${ids.length} lane${ids.length === 1 ? '' : 's'}${submit.checked ? ' and submitted' : ''}`;
+    if (!failed.length) input.value = '';
+    button.disabled = false;
+  });
+  return h('div', {class: 'context-composer'}, [
+    input,
+    h('div', {class: 'toolbar'}, [status, h('div', {class: 'actions'}, [h('label', {class: 'check-label'}, [submit, ' press enter after pasting']), button])])
+  ]);
+}
+
+const laneCount = (value: string) => Math.max(0, Math.min(10, Number.parseInt(value, 10) || 0));
+
+/**
+ * Starts several lanes at once, each the real, unmodified provider CLI in its own terminal. They
+ * start one after another rather than all at once: each Claude lane needs its own daemon-issued
+ * consent to write the project's hook settings, and a failure is reported against the lane it
+ * belongs to.
+ */
+function laneLauncher(defaultDirectory: string): HTMLElement {
+  const directory = h('input', {type: 'text', placeholder: '/path/to/project', value: defaultDirectory}) as HTMLInputElement;
+  const claudeCount = h('input', {type: 'number', min: '0', max: '10', value: '5', 'aria-label': 'Claude Code lanes'}) as HTMLInputElement;
+  const codexCount = h('input', {type: 'number', min: '0', max: '10', value: '5', 'aria-label': 'Codex lanes'}) as HTMLInputElement;
+  const isolate = h('input', {type: 'checkbox'}) as HTMLInputElement;
+  const task = h('textarea', {rows: '2', placeholder: 'starting task for every lane (optional) — each CLI receives it as its first prompt'}) as HTMLTextAreaElement;
+  const status = h('p', {class: 'action-status', role: 'status'}, []);
+  const launch = h('button', {class: 'btn primary'}, ['launch lanes']);
+  launch.addEventListener('click', async () => {
+    const path = directory.value.trim();
+    if (!path) return directory.focus();
+    const plan: ProviderId[] = [
+      ...Array<ProviderId>(laneCount(claudeCount.value)).fill('claude'),
+      ...Array<ProviderId>(laneCount(codexCount.value)).fill('codex')
+    ];
+    if (plan.length === 0) return claudeCount.focus();
+    launch.disabled = true;
+    setWorkspacePath(path);
+    const failures: string[] = [];
+    for (const [index, provider] of plan.entries()) {
+      status.className = 'action-status';
+      status.textContent = `starting lane ${index + 1} of ${plan.length} · ${provider}…`;
+      try {
+        await api.createSession({provider, directory: path, task: task.value.trim() || undefined, isolate: isolate.checked});
+      } catch (error) {
+        failures.push(`${provider}: ${actionErrorText(error)}`);
+      }
+    }
+    orchestrationProject = path;
+    launch.disabled = false;
+    if (failures.length) showActionError(new Error(`${failures.length} of ${plan.length} lanes did not start — ${failures[0]}`));
+    void render();
+  });
+  return h('div', {class: 'card lane-launcher'}, [
+    h('h3', {}, ['launch agent lanes']),
+    h('p', {class: 'section-sub'}, ['each lane runs the real CLI in its own terminal, on the login or account that CLI would use']),
+    h('div', {class: 'lane-launcher-grid'}, [
+      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['working directory']), directoryField(directory)]),
+      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['claude code']), claudeCount]),
+      h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['codex']), codexCount])
+    ]),
+    h('div', {class: 'field'}, [task, h('label', {class: 'check-label'}, [isolate, ' give each lane its own Git worktree'])]),
+    h('div', {class: 'toolbar'}, [status, launch])
+  ]);
+}
+
+/**
+ * Every live lane in the project as a working terminal: type into any tile to answer that lane (a
+ * trust prompt, a permission question), or select tiles and inject one brief into all of them.
+ */
+async function renderLaneGrid(main: HTMLElement, lanes: SessionSummary[]) {
+  const selected = new Set(lanes.map(lane => lane.id));
+  const disposers: Array<() => void> = [];
+  routeCleanup = () => { for (const dispose of disposers.splice(0)) dispose(); };
+  const grid = h('div', {class: 'lane-grid'});
+  main.append(h('section', {class: 'lane-section'}, [
+    h('div', {}, [
+      h('h2', {}, [`live lanes · ${lanes.length}`]),
+      h('p', {class: 'section-sub'}, ['click a terminal to type into that lane · checked lanes receive injected context'])
+    ]),
+    lanes.length > 0
+      ? contextComposer(() => [...selected], 'inject into checked lanes')
+      : h('p', {class: 'section-sub'}, ['No lanes are running in this project — launch some above.']),
+    grid
+  ]));
+  await Promise.all(lanes.map(async lane => {
+    const statusPill = h('span', {class: `pill status-${lane.status}`}, [lane.status]);
+    const pick = h('input', {type: 'checkbox', checked: '', 'aria-label': `Inject into ${lane.provider} lane ${lane.id.slice(0, 8)}`}) as HTMLInputElement;
+    pick.addEventListener('change', () => {
+      if (pick.checked) selected.add(lane.id);
+      else selected.delete(lane.id);
+    });
+    const open = h('button', {class: 'btn'}, ['open']);
+    open.addEventListener('click', () => navigate({name: 'active-session', sessionId: lane.id}));
+    const stop = h('button', {class: 'btn'}, ['stop']);
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      await api.stop(lane.id).catch(showActionError);
+    });
+    const screen = h('div', {class: 'lane-terminal'});
+    grid.append(h('article', {class: 'lane-tile', 'data-session-id': lane.id}, [
+      h('header', {class: 'lane-tile-head'}, [
+        h('label', {class: 'check-label'}, [pick, ` ${lane.provider} · ${lane.id.slice(0, 8)}`]),
+        statusPill,
+        h('div', {class: 'actions'}, [open, stop])
+      ]),
+      screen
+    ]));
+    try {
+      const attached = await attachLaneTerminal(lane.id, screen, {
+        fontSize: 11,
+        onStatus: summary => {
+          statusPill.className = `pill status-${summary.status}`;
+          statusPill.textContent = summary.status;
+          if (summary.status !== 'running' && summary.status !== 'starting') {
+            stop.disabled = true;
+            pick.checked = false;
+            selected.delete(lane.id);
+          }
+        }
+      });
+      disposers.push(attached.dispose);
+    } catch (error) {
+      screen.append(h('p', {class: 'error'}, [actionErrorText(error)]));
+    }
+  }));
 }
 
 // --- Active session ------------------------------------------------------------
@@ -1773,34 +2742,11 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
   const review = h('div', {class: 'review-panel'});
   const terminalContainer = h('div', {id: 'terminal'});
   let currentRun: Run | undefined;
-  main.append(header, banner, review, terminalContainer);
-
-  const terminal = new Terminal({
-    convertEol: true,
-    fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
-    fontSize: terminalFontSize(),
-    theme: terminalTheme()
-  });
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
-  terminal.open(terminalContainer);
-  fitAddon.fit();
-  // The daemon spawns the PTY at a fixed default size (session-manager.ts) before the frontend
-  // has ever mounted a terminal to fit against — sync the real size now, or the CLI keeps
-  // drawing (and wrapping) for a grid that doesn't match what's rendered.
-  void api.resize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
-  const onWindowResize = () => {
-    fitAddon.fit();
-    void api.resize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
-  };
-  window.addEventListener('resize', onWindowResize);
-
-  terminal.onData(data => {
-    void api.send(sessionId, data).catch(() => undefined);
-  });
+  main.append(header, banner, review, terminalContainer, contextComposer(() => [sessionId]));
 
   function renderHeader(summary: SessionSummary) {
     header.innerHTML = '';
+    const sessionName = summary.task?.trim() || summary.directory.split('/').filter(Boolean).at(-1) || summary.directory;
     const stopButton = h('button', {class: 'btn'}, ['stop session']);
     stopButton.disabled = summary.status !== 'running';
     stopButton.addEventListener('click', async () => {
@@ -1855,14 +2801,19 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
       }
     });
     header.append(
-      h('div', {class: 'meta'}, [
-        h('span', {class: 'pill status-default'}, [summary.provider]),
-        h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
-        h('span', {class: `pill status-${summary.status}`}, [summary.status]),
-        ...(currentRun ? [h('span', {class: `pill status-${currentRun.state}`}, [`run · ${currentRun.state}${currentRun.delivery === 'unknown' ? ' · delivery review' : ''}`])] : []),
-        ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),
-        verificationPill(summary.verification),
-        h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
+      h('div', {class: 'session-ident'}, [
+        h('span', {class: 'eyebrow'}, ['live session']),
+        h('h1', {class: 'session-title'}, [sessionName]),
+        ...(summary.error ? [h('p', {class: 'error'}, [summary.error])] : []),
+        h('div', {class: 'meta'}, [
+          h('span', {class: 'pill status-default'}, [summary.provider]),
+          h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
+          h('span', {class: `pill status-${summary.status}`}, [summary.status]),
+          ...(currentRun ? [h('span', {class: `pill status-${currentRun.state}`}, [`run · ${currentRun.state}${currentRun.delivery === 'unknown' ? ' · delivery review' : ''}`])] : []),
+          ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),
+          verificationPill(summary.verification),
+          h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
+        ])
       ]),
       h('div', {class: 'actions'}, [mergeLane, runChecks, reviewChanges, removeWorktree, stopButton])
     );
@@ -1953,16 +2904,15 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     banner.append(h('div', {class: 'banner'}, [h('span', {}, [message]), actions]));
   }
 
-  const {snapshot, unsubscribe} = subscribeSession(sessionId, {
-    onOutput: chunk => terminal.write(chunk),
+  const lane = await attachLaneTerminal(sessionId, terminalContainer, {
     onStatus: summary => {
       void api.getRun(sessionId).then(run => { currentRun = run; renderHeader(summary); }, () => renderHeader(summary));
     }
   });
-  const initial = await snapshot;
+  routeCleanup = lane.dispose;
+  const initial = lane.snapshot;
   currentRun = await api.getRun(sessionId).catch(() => undefined);
   renderHeader(initial);
-  terminal.write(initial.output);
 
   const unlistenNotice = await onCredentialNotice(event => {
     if (event.provider !== initial.provider) return;
@@ -1986,14 +2936,12 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     showBanner(`switched to ${accountLabel(event.accountId, chains)} (${event.reason})`);
   });
 
-  activeSessionCleanup = () => {
-    window.removeEventListener('resize', onWindowResize);
-    void unsubscribe();
+  routeCleanup = () => {
+    lane.dispose();
     unlistenNotice();
     unlistenSwitched();
     unlistenVerification();
     unlistenAdmission();
-    terminal.dispose();
   };
 }
 
@@ -2067,6 +3015,22 @@ async function renderCredentials(main: HTMLElement) {
       }
       if (auth?.detail) list.append(h('p', {class: 'section-sub'}, [auth.detail]));
     });
+    const manualAccounts = chain.accounts.filter(account => !chain.chain.includes(account.id));
+    if (manualAccounts.length > 0) {
+      list.append(h('p', {class: 'field-label'}, ['separate logins — manual session selection']));
+      list.append(h('p', {class: 'section-sub'}, ['These profiles stay out of automatic fallback. Select one explicitly when starting a new session.']));
+      for (const account of manualAccounts) {
+        const auth = authByAccount[account.id];
+        const connection = auth ? (auth.loggedIn ? 'connected' : 'not connected') : '';
+        list.append(h('div', {class: 'option-row'}, [
+          h('span', {class: 'label'}, [account.label]),
+          h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, connection, 'manual only'].filter(Boolean).join(' · ')])
+        ]));
+        if (auth && !auth.loggedIn && auth.loginCommand) {
+          list.append(h('p', {class: 'section-sub'}, [`connect it with:  ${auth.loginCommand}`]));
+        }
+      }
+    }
     if (chain.accounts.length === 0) list.append(h('p', {class: 'section-sub'}, ['No accounts yet — add one below or from onboarding.']));
   }
   renderList();
@@ -2096,25 +3060,63 @@ async function renderCredentials(main: HTMLElement) {
       ? `if ${activeLabel} reaches a limit, Fluent tries the next credential and reverts after reset.`
       : `if ${activeLabel} reaches a limit, Fluent waits and does not switch credentials.`]));
 
-  main.append(h('label', {class: 'field-label'}, ['add an API key account']));
+  main.append(h('label', {class: 'field-label'}, ['add an account']));
+  const modeInput = h('select') as HTMLSelectElement;
+  // Claude is the only runtime where we have verified isolated config directories for distinct
+  // subscription / Console profiles. Other providers remain honest API-key paths until their
+  // respective CLIs expose equivalent profile isolation.
+  const modes: CredentialMode[] = credentialProvider === 'claude'
+    ? ['subscription', 'platform-credits', 'api-key']
+    : ['api-key'];
+  for (const mode of modes) modeInput.append(h('option', {value: mode}, [mode === 'platform-credits' ? 'platform API credits' : mode]));
   const labelInput = h('input', {type: 'text', placeholder: 'label'});
   const keyInput = h('input', {type: 'password', placeholder: credentialProvider === 'claude' ? 'sk-ant-...' : 'sk-...'});
   const baseUrlInput = h('input', {type: 'text', placeholder: 'base URL (optional — e.g. OpenRouter preset)'});
+  const identityInput = h('select') as HTMLSelectElement;
+  identityInput.append(h('option', {value: 'automatic'}, ['identity · automatic']));
+  identityInput.append(h('option', {value: 'new'}, ['identity · separate login']));
+  const seenIdentities = new Set<string>();
+  for (const account of chain.accounts) {
+    if (seenIdentities.has(account.identityId)) continue;
+    seenIdentities.add(account.identityId);
+    identityInput.append(h('option', {value: `link:${account.id}`}, [`identity · same login as ${account.label}`]));
+  }
+  const status = h('p', {class: 'section-sub'}, []);
   const addButton = h('button', {class: 'btn'}, ['add account']);
+  const syncAccountForm = () => {
+    const apiKeyMode = modeInput.value === 'api-key';
+    keyInput.hidden = !apiKeyMode;
+    baseUrlInput.hidden = !apiKeyMode || credentialProvider !== 'claude';
+    addButton.textContent = apiKeyMode ? 'save API key' : 'add CLI profile';
+    status.textContent = apiKeyMode
+      ? 'Keys are stored in the operating-system credential store.'
+      : 'This creates an isolated CLI profile. Fluent shows the exact provider login command after saving.';
+  };
+  modeInput.addEventListener('change', syncAccountForm);
+  syncAccountForm();
   addButton.addEventListener('click', async () => {
+    const mode = modeInput.value as CredentialMode;
     const apiKey = keyInput.value.trim();
-    if (!apiKey) return keyInput.focus();
-    await api.upsertAccount({
-      provider: credentialProvider,
-      id: crypto.randomUUID(),
-      mode: 'api-key',
-      label: labelInput.value.trim() || 'API key',
-      apiKey,
-      baseUrl: credentialProvider === 'claude' ? baseUrlInput.value.trim() || undefined : undefined
-    });
-    await renderCredentials(replaceMain(main));
+    if (mode === 'api-key' && !apiKey) return keyInput.focus();
+    const identityChoice = identityInput.value;
+    try {
+      await api.upsertAccount({
+        provider: credentialProvider,
+        id: crypto.randomUUID(),
+        mode,
+        label: labelInput.value.trim() || (mode === 'api-key' ? 'API key' : mode === 'subscription' ? 'subscription' : 'platform API credits'),
+        apiKey: mode === 'api-key' ? apiKey : undefined,
+        baseUrl: mode === 'api-key' && credentialProvider === 'claude' ? baseUrlInput.value.trim() || undefined : undefined,
+        sameIdentityAs: identityChoice.startsWith('link:') ? identityChoice.slice('link:'.length) : undefined,
+        forceNewIdentity: identityChoice === 'new'
+      });
+      await renderCredentials(replaceMain(main));
+    } catch (error) {
+      status.textContent = error instanceof Error ? error.message : String(error);
+      status.className = 'error';
+    }
   });
-  main.append(h('div', {class: 'field'}, [labelInput, keyInput, ...(credentialProvider === 'claude' ? [baseUrlInput] : []), addButton]));
+  main.append(h('div', {class: 'field'}, [modeInput, labelInput, identityInput, keyInput, baseUrlInput, addButton, status]));
 }
 
 void render();

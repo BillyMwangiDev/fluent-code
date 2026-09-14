@@ -3,7 +3,7 @@ import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {after, describe, it} from 'node:test';
-import {CoordinationManager} from './coordination.js';
+import {coordinationEventLimit, CoordinationManager} from './coordination.js';
 
 const directories: string[] = [];
 
@@ -210,5 +210,116 @@ describe('claim leases', () => {
 
     assert.equal(claim?.origin, 'declared');
     assert.ok(claim && new Date(claim.expiresAt).getTime() > Date.now());
+  });
+});
+
+describe('retained coordination history', () => {
+  it('persists a master brief and specialist ticket assignment across a daemon restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const coordination = new CoordinationManager(directory);
+    await coordination.setMasterBrief('/project', 'Ship the settings flow with explicit account choice.');
+    const created = await coordination.task('/project', {
+      title: 'Build credential form', description: 'Keep keyboard flow and validation visible.',
+      role: 'frontend', provider: 'claude', source: 'spec'
+    });
+    const task = created.tasks[0]!;
+    await coordination.assignTask('/project', task.id, {sessionId: 'lane-frontend', provider: 'claude', role: 'frontend'});
+
+    const state = coordination.get('/project');
+    assert.equal(state.masterBrief, 'Ship the settings flow with explicit account choice.');
+    assert.equal(state.tasks[0]?.status, 'active');
+    assert.equal(state.tasks[0]?.provider, 'claude');
+    assert.equal(state.tasks[0]?.role, 'frontend');
+    assert.equal(state.tasks[0]?.source, 'spec');
+    assert.deepEqual(state.events.map(event => event.kind), ['master_brief.set', 'task.created', 'task.assigned']);
+
+    const afterRestart = new CoordinationManager(directory);
+    await afterRestart.restore();
+    const restored = afterRestart.get('/project');
+    assert.equal(restored.masterBrief, state.masterBrief);
+    assert.deepEqual(restored.tasks[0], state.tasks[0]);
+  });
+
+  it('records meaningful board changes but not read, lease-heartbeat, or idempotent noise', async () => {
+    const coordination = await manager();
+    const task = (await coordination.task('/project', {title: 'history task'}, 'lane-a')).tasks[0]!;
+    await coordination.updateTask('/project', task.id, 'active', 'lane-a', 'lane-a');
+    await coordination.updateTask('/project', task.id, 'active', 'lane-a', 'lane-a');
+    await coordination.claim('/project', 'src/declared.ts', 'lane-a');
+    await coordination.claim('/project', 'src/declared.ts', 'lane-a');
+    await coordination.claim('/project', 'src/declared.ts', 'lane-b');
+    await coordination.observe('/project', 'lane-a', ['src/observed.ts']);
+    await coordination.observe('/project', 'lane-a', []);
+    await coordination.releaseClaim('/project', 'src/declared.ts', 'lane-a', 'lane-a');
+    await coordination.decision('/project', 'keep it local', 'lane-a', 'lane-a');
+    const handoff = (await coordination.handoff('/project', 'lane-a', 'lane-b', 'review it', 'lane-a')).handoffs[0]!;
+    await coordination.acceptHandoff('/project', handoff.id);
+    await coordination.acceptHandoff('/project', handoff.id);
+    await coordination.send('/project', 'lane-a', 'lane-b', 'ready');
+    await coordination.inbox('/project', 'lane-b');
+    const countBeforeHeartbeat = coordination.get('/project').events.length;
+    await coordination.renewLeases(['lane-a']);
+
+    const events = coordination.get('/project').events;
+    assert.deepEqual([...events.map(event => event.kind)].sort(), [
+      'task.created', 'task.status_changed', 'claim.declared', 'claim.conflicted', 'claim.observed',
+      'claim.released', 'claim.released', 'decision.recorded', 'handoff.requested', 'handoff.accepted', 'message.sent'
+    ].sort());
+    assert.deepEqual([...events.filter(event => event.kind === 'claim.released').map(event => event.releaseReason)].sort(), ['observed_cleared', 'released']);
+    assert.equal(events.find(event => event.kind === 'task.created')?.actorSessionId, 'lane-a');
+    assert.equal(events.find(event => event.kind === 'handoff.accepted')?.actorSessionId, undefined, 'user acceptance is not falsely attributed to a lane');
+    assert.equal(events.length, countBeforeHeartbeat, 'lease renewal does not add journal noise');
+  });
+
+  it('records session and lease claim releases, and bounds history oldest-first', async () => {
+    const coordination = await manager();
+    await coordination.claim('/project', 'src/session.ts', 'lane-session');
+    await coordination.releaseSession('lane-session');
+    await coordination.claim('/project', 'src/expired.ts', 'lane-expired');
+    coordination.get('/project').claims[0]!.expiresAt = new Date(Date.now() - 1).toISOString();
+    await coordination.renewLeases([]);
+    assert.deepEqual(
+      coordination.get('/project').events.filter(event => event.kind === 'claim.released').map(event => event.releaseReason),
+      ['session_ended', 'lease_expired']
+    );
+
+    const state = coordination.get('/project');
+    state.events = Array.from({length: coordinationEventLimit}, (_, index) => ({
+      id: `old-${String(index).padStart(4, '0')}`,
+      at: `2020-01-01T00:00:${String(index % 60).padStart(2, '0')}.000Z`,
+      kind: 'task.created' as const,
+      sessionIds: [],
+      taskId: `old-task-${index}`
+    }));
+    await coordination.task('/project', {title: 'newest'});
+    assert.equal(state.events.length, coordinationEventLimit);
+    assert.ok(!state.events.some(event => event.id === 'old-0000'));
+    assert.equal(state.events.at(-1)?.kind, 'task.created');
+  });
+
+  it('migrates missing claim IDs and safely ignores malformed historic events', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const {writeFile} = await import('node:fs/promises');
+    await writeFile(join(directory, 'coordination.json'), JSON.stringify([{
+      project: '/project', tasks: [], claims: [{path: 'src/a.ts', sessionId: 'lane-a', createdAt: new Date().toISOString()}], decisions: [], handoffs: [], messages: [],
+      events: [
+        {id: 'valid', at: '2026-09-14T00:00:00.000Z', kind: 'task.created', sessionIds: [], taskId: 'task-a'},
+        {id: 'bad-time', at: 'not-a-date', kind: 'task.created', sessionIds: [], taskId: 'task-b'},
+        {id: 'bad-payload', at: '2026-09-14T00:00:01.000Z', kind: 'claim.released', sessionIds: []},
+        'not an event'
+      ]
+    }]));
+
+    const coordination = new CoordinationManager(directory);
+    await coordination.restore();
+    const migratedClaimId = coordination.get('/project').claims[0]?.id;
+    assert.ok(migratedClaimId, 'pre-history claims receive a stable identity');
+    assert.deepEqual(coordination.get('/project').events.map(event => event.id), ['valid']);
+
+    const afterRestart = new CoordinationManager(directory);
+    await afterRestart.restore();
+    assert.equal(afterRestart.get('/project').claims[0]?.id, migratedClaimId, 'migration persists before a later board mutation can happen');
   });
 });

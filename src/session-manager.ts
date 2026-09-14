@@ -4,11 +4,11 @@ import {realpathSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import * as pty from 'node-pty';
 import {providerAdapter, resolveProviderExecutable} from './providers.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
 import {briefingArgs} from './agent-briefing.js';
+import {ptyRuntime} from './pty-runtime.js';
 import type {CredentialEnvironment, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 import {RunStore} from './execution/run-store.js';
@@ -16,15 +16,41 @@ import {RunStore} from './execution/run-store.js';
 const run = promisify(execFile);
 
 type LiveSession = {
-  terminal?: pty.IPty;
+  terminal?: import('node-pty').IPty;
   output: string;
   summary: SessionSummary;
   directory: string;
+  /** Whether the CLI has turned on bracketed paste, read from its own terminal output. */
+  bracketedPaste?: boolean;
+  /** The end of the previous chunk, so a mode sequence split across two reads is still seen. */
+  modeTail?: string;
 };
 
 type StoredSession = {summary: SessionSummary; directory: string; /** Legacy only; never written again. */ output?: string};
 
 const maxOutputBytes = 160_000;
+
+/**
+ * Variables a parent agent session exports to mark its own children. fluentd is often started from
+ * inside one (a Claude Code or Codex terminal), and a lane that inherits them believes it is that
+ * session's subprocess: Claude Code turns transcript saving off for a "child session", and the lane
+ * would be handed the parent's private messaging socket and token.
+ */
+const inheritedSessionMarkers = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_SESSION_ATTENDED',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_PID',
+  'CODEX_SANDBOX',
+  'CODEX_SANDBOX_NETWORK_DISABLED',
+  'CODEX_THREAD_ID',
+  'FLUENT_SESSION_ID'
+];
 
 /**
  * Builds a lane's environment from the daemon's own, the credential's changes, and any overrides.
@@ -35,8 +61,43 @@ const maxOutputBytes = 160_000;
  */
 export function applyCredentialEnvironment(credential?: CredentialEnvironment, overrides: Record<string, string> = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined));
+  for (const name of inheritedSessionMarkers) delete env[name];
   for (const name of credential?.unset ?? []) delete env[name];
   return {...env, ...(credential?.set ?? {}), ...overrides};
+}
+
+/**
+ * The starting task goes in through the CLI's own launch argument for an interactive session with
+ * a first prompt. Typing it into the terminal after a guessed delay raced the CLI's startup and,
+ * worse, landed on its directory-trust prompt — where Claude Code's default answer is "No, exit".
+ */
+export function initialPromptArgs(provider: ProviderId, task?: string): string[] {
+  const prompt = task?.trim();
+  if (!prompt) return [];
+  if (provider === 'gemini') return ['--prompt-interactive', prompt];
+  // A leading dash would be parsed as an option instead of as the prompt.
+  return [prompt.startsWith('-') ? ` ${prompt}` : prompt];
+}
+
+const privateModeSequence = /\x1b\[\?([\d;]+)([hl])/g;
+
+/** Follows DEC private mode 2004 (bracketed paste) through a CLI's output; the last toggle wins. */
+export function bracketedPasteMode(current: boolean, output: string) {
+  let mode = current;
+  for (const match of output.matchAll(privateModeSequence)) {
+    if (match[1]!.split(';').includes('2004')) mode = match[2] === 'h';
+  }
+  return mode;
+}
+
+/**
+ * Text as a terminal delivers a paste. Inside a bracketed paste a newline is part of the text rather
+ * than a submit, so a multi-line brief arrives whole. A paste-end marker inside the text is removed:
+ * it would close the paste early and let everything after it be read as keystrokes.
+ */
+export function pastePayload(text: string, bracketed: boolean) {
+  const clean = text.replace(/\x1b\[20[01]~/g, '');
+  return bracketed ? `\x1b[200~${clean}\x1b[201~` : clean;
 }
 
 /** Emits 'output' (sessionId, chunk) and 'status' (sessionId, summary) so daemon.ts can push
@@ -134,23 +195,30 @@ export class SessionManager extends EventEmitter {
     // node-pty creates the terminal; Fluent still launches the provider CLI unchanged apart from
     // the coordination briefing, which goes in through that CLI's own flag for project direction
     // (spec §7.5) — never by rewriting what the CLI does or what it prints.
-    let terminal: pty.IPty;
+    let terminal: import('node-pty').IPty;
     try {
-      terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider)], {
+      const pty = await ptyRuntime();
+      terminal = pty.spawn(executable, [...adapter.args, ...briefingArgs(provider), ...initialPromptArgs(provider, summary.task)], {
       cwd: sessionDirectory,
       env: applyCredentialEnvironment(env, {
         // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
         // `env node` shebang resolves inside the detached daemon as well.
-        PATH: [dirname(executable), process.env.PATH].filter(Boolean).join(delimiter)
+        PATH: [dirname(executable), process.env.PATH].filter(Boolean).join(delimiter),
+        // Lets the lane's hook relay and `fluent-coord` name their lane exactly. The working
+        // directory alone cannot tell apart several lanes sharing one checkout.
+        FLUENT_SESSION_ID: id
       }),
       name: process.env.TERM ?? 'xterm-256color',
       cols: 120,
       rows: 40
       });
     } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      session.summary.error = `Could not start ${adapter.label}: ${detail}`;
+      this.append(session, `[Fluent] ${session.summary.error}\n`);
       await this.runStore.transition(id, 'failed', 'provider process could not start', {adapter: 'pty'});
       this.setStatus(session, 'failed');
-      throw error;
+      throw new Error(session.summary.error);
     }
     session.terminal = terminal;
     session.summary.pid = terminal.pid;
@@ -166,12 +234,25 @@ export class SessionManager extends EventEmitter {
       this.setStatus(session, session.summary.status === 'stopped' ? 'stopped' : 'exited');
       void this.finishRun(session.summary.id, session.summary.status, exitCode).catch(error => console.error(`fluentd could not finalize run ${session.summary.id}: ${error.message}`));
     });
-
-    if (summary.task) {
-      // Give the interactive CLI a brief moment to initialize before delivering the first prompt.
-      setTimeout(() => this.send(summary.id, `${summary.task}\n`).catch(() => undefined), 600).unref();
-    }
     return summary;
+  }
+
+  /**
+   * Delivers context into a lane the way a person pasting it would: one paste, so a multi-line brief
+   * is not submitted line by line, then Enter on its own. The pause lets the CLI finish taking in the
+   * paste first; an Enter that arrives in the same read can be swallowed as part of it.
+   */
+  async inject(sessionId: string, text: string, submit = true) {
+    const session = this.sessions.get(sessionId);
+    if (!session?.terminal || session.summary.status !== 'running') throw new Error('Session is not accepting input');
+    if (!text.trim()) throw new Error('There is no context to inject');
+    const bracketedPaste = session.bracketedPaste ?? false;
+    await this.send(sessionId, pastePayload(text, bracketedPaste));
+    if (submit) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      await this.send(sessionId, '\r');
+    }
+    return {injected: true, submitted: submit, bracketedPaste};
   }
 
   async send(sessionId: string, input: string) {
@@ -291,6 +372,8 @@ export class SessionManager extends EventEmitter {
   }
 
   private append(session: LiveSession, chunk: string) {
+    session.bracketedPaste = bracketedPasteMode(session.bracketedPaste ?? false, (session.modeTail ?? '') + chunk);
+    session.modeTail = chunk.slice(-32);
     session.output = (session.output + chunk).slice(-maxOutputBytes);
     session.summary.updatedAt = new Date().toISOString();
     this.queuePersist();

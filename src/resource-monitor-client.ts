@@ -2,7 +2,7 @@ import {spawn, type ChildProcessByStdio} from 'node:child_process';
 import type {Readable, Writable} from 'node:stream';
 import {existsSync} from 'node:fs';
 import {arch, platform} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 
@@ -50,13 +50,15 @@ function binaryName(): string {
   return platform() === 'win32' ? 'fluent-resource-monitor.exe' : 'fluent-resource-monitor';
 }
 
-/** Dev-build candidate paths; a packaged app would bundle the binary and set
- * FLUENT_RESOURCE_MONITOR_PATH instead of relying on any of these. */
+/** A packaged daemon and its monitor are Tauri external binaries placed beside one another. The
+ * source-checkout candidates keep development straightforward; an explicit override remains for
+ * diagnostics and non-Tauri deployments. */
 function candidatePaths(): string[] {
   const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
   const name = binaryName();
   const overridePath = process.env.FLUENT_RESOURCE_MONITOR_PATH;
   const candidates = [
+    join(dirname(process.execPath), name),
     join(packageRoot, 'native', 'resource-monitor', 'target', 'release', name),
     join(packageRoot, 'native', 'resource-monitor', 'target', 'debug', name)
   ];
@@ -91,20 +93,28 @@ export class ResourceMonitorClient {
     this.child = child;
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => this.onData(chunk));
+    // A monitor is advisory. In particular, it may exit between a request and a write; make
+    // that a normal unavailable state instead of an unhandled EPIPE that takes fluentd down.
+    child.stdin.on('error', () => this.handleChildFailure(child, 'fluent-resource-monitor input closed'));
+    child.on('error', () => this.handleChildFailure(child, 'fluent-resource-monitor failed to start'));
     child.on('exit', () => {
+      if (this.child !== child) return;
       this.child = undefined;
       this.configured = false;
-      for (const pending of this.pending.values()) pending.reject(new Error('fluent-resource-monitor exited'));
-      this.pending.clear();
+      this.rejectPending('fluent-resource-monitor exited');
     });
     this.write({type: 'configure', version: PROTOCOL_VERSION, rootPid, sampleIntervalMs, externalProcesses: []});
     this.configured = true;
   }
 
   stop() {
-    if (this.child) this.write({type: 'shutdown', version: PROTOCOL_VERSION});
-    this.child?.kill();
+    const child = this.child;
     this.child = undefined;
+    this.configured = false;
+    this.rejectPending('fluent-resource-monitor stopped');
+    // Killing our owned helper is sufficient. Writing a shutdown command immediately before
+    // killing it can race a closed stdin and used to surface an EPIPE in fluentd.
+    child?.kill();
   }
 
   get available(): boolean {
@@ -124,7 +134,24 @@ export class ResourceMonitorClient {
   }
 
   private write(command: Record<string, unknown>) {
-    this.child?.stdin.write(`${JSON.stringify(command)}\n`);
+    const stdin = this.child?.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded || !stdin.writable) return;
+    try {
+      stdin.write(`${JSON.stringify(command)}\n`);
+    } catch {
+      // The stdin error handler records the monitor as unavailable when a stream fails.
+    }
+  }
+
+  private handleChildFailure(child: ChildProcessByStdio<Writable, Readable, null>, message: string) {
+    if (this.child !== child) return;
+    this.configured = false;
+    this.rejectPending(message);
+  }
+
+  private rejectPending(message: string) {
+    for (const pending of this.pending.values()) pending.reject(new Error(message));
+    this.pending.clear();
   }
 
   private request<T>(command: Record<string, unknown>, isHistory = false): Promise<T> {

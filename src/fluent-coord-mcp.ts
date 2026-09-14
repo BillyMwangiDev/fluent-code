@@ -67,30 +67,32 @@ function textResult(value: unknown): ToolResult {
 /** Maps one compact MCP call onto Fluent's existing lane-authenticated RPC surface. */
 export async function callFluentCoord(args: Arguments, cwd = process.cwd(), request: Request = defaultRequest): Promise<ToolResult> {
   const action = string(args.action, 'action') as typeof fluentCoordTool.inputSchema.properties.action.enum[number];
+  // FLUENT_SESSION_ID names the exact lane when several share this directory (see coord-cli.ts).
+  const lane = {cwd, ...(process.env.FLUENT_SESSION_ID ? {sessionId: process.env.FLUENT_SESSION_ID} : {})};
   switch (action) {
     case 'status':
-      return textResult(await request('agent.status', {cwd, since: string(args.since, 'since', false)}));
+      return textResult(await request('agent.status', {...lane, since: string(args.since, 'since', false)}));
     case 'claim':
-      return textResult(await request('agent.claim', {cwd, paths: paths(args.paths)}));
+      return textResult(await request('agent.claim', {...lane, paths: paths(args.paths)}));
     case 'release':
-      return textResult(await request('agent.release', {cwd, paths: paths(args.paths)}));
+      return textResult(await request('agent.release', {...lane, paths: paths(args.paths)}));
     case 'note':
-      return textResult(await request('agent.note', {cwd, summary: string(args.summary, 'summary')}));
+      return textResult(await request('agent.note', {...lane, summary: string(args.summary, 'summary')}));
     case 'task': {
       const taskAction = string(args.taskAction, 'taskAction');
       if (taskAction !== 'add' && taskAction !== 'start' && taskAction !== 'done') throw new Error('taskAction must be add, start, or done');
       return textResult(await request('agent.task', {
-        cwd,
+        ...lane,
         action: taskAction,
         ...(taskAction === 'add' ? {title: string(args.title, 'title')} : {taskId: string(args.taskId, 'taskId')})
       }));
     }
     case 'send':
-      return textResult(await request('agent.send', {cwd, to: string(args.to, 'to'), body: string(args.body, 'body')}));
+      return textResult(await request('agent.send', {...lane, to: string(args.to, 'to'), body: string(args.body, 'body')}));
     case 'inbox':
-      return textResult(await request('agent.inbox', {cwd, peek: args.peek === true}));
+      return textResult(await request('agent.inbox', {...lane, peek: args.peek === true}));
     case 'handoff':
-      return textResult(await request('agent.handoff', {cwd, to: string(args.to, 'to'), summary: string(args.summary, 'summary')}));
+      return textResult(await request('agent.handoff', {...lane, to: string(args.to, 'to'), summary: string(args.summary, 'summary')}));
   }
   throw new Error(`Unsupported action: ${action}`);
 }

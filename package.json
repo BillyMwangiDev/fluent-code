@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.23.0",
   "bin": {
     "fluent": "dist/index.js",
     "fluentd": "dist/daemon.js",
@@ -18,11 +19,18 @@
     "start": "tsx src/index.tsx",
     "check": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "test:frontend": "node --import tsx --test 'app/src/**/*.test.ts'",
     "evals": "tsx scripts/run-evals.mts",
     "evals:check": "tsx scripts/run-evals.mts --validate-only",
     "benchmark": "tsx scripts/benchmark.mts",
     "check:frontend": "tsc --noEmit -p app/tsconfig.json",
     "build:frontend": "esbuild app/src/main.ts --bundle --outdir=app/dist --format=esm --platform=browser --target=es2022 --loader:.woff=file --loader:.woff2=file",
+    "build:daemon-sidecar": "pnpm build && node scripts/build-daemon-sidecar.mjs",
+    "build:resource-monitor-sidecar": "node scripts/build-resource-monitor-sidecar.mjs",
+    "build:sidecars": "pnpm build:daemon-sidecar && pnpm build:resource-monitor-sidecar && pnpm verify:daemon-sidecar",
+    "verify:daemon-sidecar": "node scripts/verify-daemon-sidecar.mjs",
+    "package:mac": "pnpm tauri build --bundles dmg",
+    "package:windows": "pnpm tauri build --bundles nsis",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -30,6 +38,7 @@
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@napi-rs/keyring": "^2.0.0",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ink": "^6.3.0",
@@ -40,11 +49,12 @@
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.6.0",
     "@types/react": "^19.1.10",
+    "@yao-pkg/pkg": "^6.22.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.20.4",
     "typescript": "^5.9.2"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

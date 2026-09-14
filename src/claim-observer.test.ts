@@ -168,6 +168,17 @@ describe('observing lanes', () => {
 
     assert.equal(state.get(root).claims.length, 1, 'an unreadable tree is not the same as an empty one');
   });
+
+  it('does not record an observed claim when the daemon rejects the lane for this project', async () => {
+    const root = await project();
+    const laneA = await lane(root, 'lane-a');
+    const state = await coordination();
+    const observer = new ClaimObserver(state, () => { throw new Error('lane does not belong to this project'); });
+    await writeFile(join(laneA.directory, 'src', 'a.ts'), 'changed\n');
+
+    await assert.rejects(() => observer.sweep([laneA]), /does not belong to this project/);
+    assert.deepEqual(state.get(root).claims, []);
+  });
 });
 
 describe('collision hotspots', () => {

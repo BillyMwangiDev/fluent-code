@@ -1,4 +1,4 @@
-import {createServer, type Socket} from 'node:net';
+import {connect, createServer, type Socket} from 'node:net';
 import {chmod, unlink} from 'node:fs/promises';
 import {join} from 'node:path';
 import {daemonSocketPath, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
@@ -16,6 +16,7 @@ import {OpenDesignManager} from './open-design-manager.js';
 import {DesignToolManager} from './design-tool-manager.js';
 import {VerificationRunner, discoverCommand} from './verification.js';
 import {ClaimObserver, type Lane} from './claim-observer.js';
+import {requireSessionInProject} from './coordination-membership.js';
 import {MergeQueue} from './merge-queue.js';
 import {CodexAppServer} from './codex-app-server.js';
 import {renderAgentView, renderClaimResult, renderInbox, resolveId, shortId, viewCursor, type AgentView} from './agent-view.js';
@@ -41,7 +42,7 @@ const spend = new SpendTracker();
 const openDesign = new OpenDesignManager();
 const designTools = new DesignToolManager();
 const verification = new VerificationRunner();
-const claimObserver = new ClaimObserver(coordination);
+const claimObserver = new ClaimObserver(coordination, coordinationLane);
 const merges = new MergeQueue(verification);
 /** One structured control channel per running Codex lane, alongside its PTY (R1). */
 const codexChannels = new Map<string, CodexAppServer>();
@@ -305,14 +306,26 @@ async function sampleLaneCost() {
  * nothing else about fluentd, so the working directory is the whole identity — the same
  * correlation the Claude Code hook relay already relies on.
  */
-function laneFor(cwd: string) {
-  const session = manager.findActiveByDirectory(cwd);
+function laneFor(cwd: string, sessionId?: string) {
+  const session = liveSession(sessionId) ?? manager.findActiveByDirectory(cwd);
   if (!session) throw new Error(`No running Fluent lane is working in ${cwd}`);
   return {session, project: session.projectDirectory ?? session.directory};
 }
 
-async function agentView(cwd: string): Promise<AgentView> {
-  const {session, project} = laneFor(cwd);
+/** The lane a caller named by the `FLUENT_SESSION_ID` it was launched with, if that lane is live. */
+function liveSession(sessionId?: string) {
+  if (!sessionId) return undefined;
+  return manager.list().find(session => session.id === sessionId && (session.status === 'running' || session.status === 'starting'));
+}
+
+/** Mutable coordination records name a lane, so validate the lane against the board's project
+ * before accepting a caller-supplied id. The frontend is not the security boundary. */
+function coordinationLane(project: string, sessionId: string) {
+  return requireSessionInProject(project, sessionId, manager.list());
+}
+
+async function agentView(cwd: string, sessionId?: string): Promise<AgentView> {
+  const {session, project} = laneFor(cwd, sessionId);
   const state = coordination.get(project);
   const conflicts = await claimObserver.rank(project, coordination.conflicts(project));
   const branch = await gitBranch(project);
@@ -340,14 +353,14 @@ async function gitBranch(project: string) {
  * nothing has changed it gets one short line back instead of the whole picture again, which is the
  * difference between a lane that can afford to check often and one that cannot (spec §11).
  */
-async function agentStatus(cwd: string, since?: string) {
-  const view = await agentView(cwd);
+async function agentStatus(cwd: string, since?: string, sessionId?: string) {
+  const view = await agentView(cwd, sessionId);
   if (since && since === view.cursor) return {text: `unchanged ${view.cursor}`, view};
   return {text: renderAgentView(view), view};
 }
 
-async function agentClaim(cwd: string, paths: string[]) {
-  const {session, project} = laneFor(cwd);
+async function agentClaim(cwd: string, paths: string[], sessionId?: string) {
+  const {session, project} = laneFor(cwd, sessionId);
   if (paths.length === 0) throw new Error('Name at least one path to claim');
   const refused: Array<{path: string; conflicts: Awaited<ReturnType<typeof claimObserver.rank>>}> = [];
   const claimed: string[] = [];
@@ -372,8 +385,8 @@ function activeSessionCount(provider: ProviderId) {
   return manager.list().filter(session => session.provider === provider && (session.status === 'running' || session.status === 'starting')).length;
 }
 
-async function handleHookReport({cwd, event, payload}: {cwd: string; event: string; payload: Record<string, unknown>}) {
-  const session = manager.findActiveByDirectory(cwd);
+async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; sessionId?: string; event: string; payload: Record<string, unknown>}) {
+  const session = liveSession(sessionId) ?? manager.findActiveByDirectory(cwd);
   if (!session) return {handled: false};
   if (event === 'StatusLine' && session.provider === 'claude') {
     await usage.recordClaude(session.id, payload);
@@ -421,6 +434,7 @@ async function dispatch(request: RpcRequest) {
     }
     case 'sessions.get': return manager.get(request.params.sessionId);
     case 'sessions.send': await manager.send(request.params.sessionId, request.params.input); return {sent: true};
+    case 'sessions.inject': return manager.inject(request.params.sessionId, request.params.text, request.params.submit ?? true);
     case 'sessions.stop': return manager.stop(request.params.sessionId);
     case 'sessions.removeWorktree': {
       const session = manager.get(request.params.sessionId);
@@ -443,35 +457,36 @@ async function dispatch(request: RpcRequest) {
       return integrateSession(request.params.sessionId);
     }
     case 'merge.pending': return merges.pending(request.params.project);
-    case 'agent.status': return agentStatus(request.params.cwd, request.params.since);
-    case 'agent.claim': return agentClaim(request.params.cwd, request.params.paths);
+    case 'agent.status': return agentStatus(request.params.cwd, request.params.since, request.params.sessionId);
+    case 'agent.claim': return agentClaim(request.params.cwd, request.params.paths, request.params.sessionId);
     case 'agent.release': {
-      const {session, project} = laneFor(request.params.cwd);
-      for (const path of request.params.paths) await coordination.releaseClaim(project, path, session.id);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
+      for (const path of request.params.paths) await coordination.releaseClaim(project, path, session.id, session.id);
       return {text: `released ${request.params.paths.join(' ')}`};
     }
     case 'agent.note': {
-      const {session, project} = laneFor(request.params.cwd);
-      await coordination.decision(project, request.params.summary, session.id);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
+      await coordination.decision(project, request.params.summary, session.id, session.id);
       return {text: 'noted'};
     }
     case 'agent.task': {
-      const {session, project} = laneFor(request.params.cwd);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       if (request.params.action === 'add') {
         if (!request.params.title?.trim()) throw new Error('A task needs a title');
-        const state = await coordination.task(project, request.params.title.trim());
+        const state = await coordination.task(project, {title: request.params.title.trim()}, session.id);
         return {text: `added ${shortId(state.tasks[0]!.id)}`};
       }
       if (!request.params.taskId) throw new Error('Name the task to update');
       const task = resolveId(coordination.get(project).tasks, request.params.taskId);
-      await coordination.updateTask(project, task.id, request.params.action === 'start' ? 'active' : 'done', session.id);
+      await coordination.updateTask(project, task.id, request.params.action === 'start' ? 'active' : 'done', session.id, session.id);
       return {text: `${request.params.action === 'start' ? 'started' : 'done'} ${shortId(task.id)}`};
     }
     case 'agent.send': {
-      const {session, project} = laneFor(request.params.cwd);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
       if (!target) throw new Error(`No lane matches ${request.params.to}`);
       if (target.id === session.id) throw new Error('That is your own lane');
+      coordinationLane(project, target.id);
       const message = await coordination.send(project, session.id, target.id, request.params.body);
       // Cross-lane traffic is shown, never hidden (spec §2 principle 3) — including to the user
       // whose two agents are talking to each other.
@@ -479,7 +494,7 @@ async function dispatch(request: RpcRequest) {
       return {text: `sent to ${shortId(target.id)} — it will read this when it next checks its inbox`};
     }
     case 'agent.inbox': {
-      const {session, project} = laneFor(request.params.cwd);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       return {text: renderInbox(await coordination.inbox(project, session.id, {peek: request.params.peek}))};
     }
     case 'skills.status': return collaborationStatus();
@@ -518,10 +533,11 @@ async function dispatch(request: RpcRequest) {
       return result;
     }
     case 'agent.handoff': {
-      const {session, project} = laneFor(request.params.cwd);
+      const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));
       if (!target) throw new Error(`No lane matches ${request.params.to}`);
-      await coordination.handoff(project, session.id, target.id, request.params.summary);
+      coordinationLane(project, target.id);
+      await coordination.handoff(project, session.id, target.id, request.params.summary, session.id);
       // Deliberately only proposed: a handoff is an explicit, visible action the user accepts
       // (spec §11), never something one lane can impose on another.
       return {text: `proposed handoff to ${shortId(target.id)} — waiting for the user to accept it`};
@@ -543,10 +559,13 @@ async function dispatch(request: RpcRequest) {
       await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.pluginId}`, `plugin install ${request.params.pluginId}`);
       return catalog.installPlugin(request.params.target, request.params.pluginId);
     }
-    case 'catalog.marketplaces': return catalog.claudeMarketplaceList();
+    case 'catalog.marketplaces': return catalog.allMarketplaces();
     case 'catalog.addMarketplace': {
-      await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.source}`, `marketplace add ${request.params.source}`);
-      return catalog.addMarketplace(request.params.target, request.params.source);
+      // Validate before consuming the one-time approval. An invalid source must not spend the
+      // user's consent record or reach a provider CLI as a surprising option/remote string.
+      const source = catalog.validateMarketplaceSource(request.params.source).source;
+      await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${source}`, `marketplace add ${source}`);
+      return catalog.addMarketplace(request.params.target, source);
     }
     case 'catalog.mcpServers': return catalog.mcpServers();
     case 'catalog.addMcpServer': {
@@ -560,15 +579,39 @@ async function dispatch(request: RpcRequest) {
     case 'providers.list': return providerHealth();
     case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);
-    case 'coordination.task.create': return coordination.task(request.params.project, request.params.title, request.params.sessionId);
-    case 'coordination.task.update': return coordination.updateTask(request.params.project, request.params.taskId, request.params.status, request.params.sessionId);
-    case 'coordination.claim': return coordination.claim(request.params.project, request.params.path, request.params.sessionId);
+    case 'coordination.brief.set': return coordination.setMasterBrief(request.params.project, request.params.brief);
+    case 'coordination.task.create': {
+      if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.task(request.params.project, request.params);
+    }
+    case 'coordination.task.assign': {
+      if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.assignTask(request.params.project, request.params.taskId, request.params);
+    }
+    case 'coordination.task.update': {
+      if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.updateTask(request.params.project, request.params.taskId, request.params.status, request.params.sessionId);
+    }
+    case 'coordination.claim': {
+      coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.claim(request.params.project, request.params.path, request.params.sessionId);
+    }
     case 'coordination.claims.sweep': return sweepClaimLeases();
     case 'coordination.conflicts': return claimObserver.rank(request.params.project, coordination.conflicts(request.params.project));
     case 'coordination.messages': return coordination.messages(request.params.project);
-    case 'coordination.claim.release': return coordination.releaseClaim(request.params.project, request.params.path, request.params.sessionId);
-    case 'coordination.decision.add': return coordination.decision(request.params.project, request.params.summary, request.params.sessionId);
-    case 'coordination.handoff.create': return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
+    case 'coordination.claim.release': {
+      coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.releaseClaim(request.params.project, request.params.path, request.params.sessionId);
+    }
+    case 'coordination.decision.add': {
+      if (request.params.sessionId) coordinationLane(request.params.project, request.params.sessionId);
+      return coordination.decision(request.params.project, request.params.summary, request.params.sessionId);
+    }
+    case 'coordination.handoff.create': {
+      coordinationLane(request.params.project, request.params.fromSessionId);
+      coordinationLane(request.params.project, request.params.toSessionId);
+      return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
+    }
     case 'coordination.handoff.accept': return coordination.acceptHandoff(request.params.project, request.params.handoffId);
     case 'remote.list': return remotes.list();
     case 'remote.save': {
@@ -613,7 +656,42 @@ async function dispatch(request: RpcRequest) {
   }
 }
 
+/** Asks whatever is listening on the socket path for a ping. A hung or dead socket counts as absent. */
+function runningDaemon(path: string): Promise<{pid: number} | undefined> {
+  return new Promise(resolve => {
+    const socket = connect(path);
+    let buffer = '';
+    const finish = (found?: {pid: number}) => {
+      socket.destroy();
+      resolve(found);
+    };
+    socket.setTimeout(1_000, () => finish());
+    socket.once('error', () => finish());
+    socket.once('connect', () => socket.write(`${JSON.stringify({id: 'fluentd-startup-probe', method: 'ping'})}\n`));
+    socket.on('data', chunk => {
+      buffer += chunk.toString();
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      try {
+        const response = JSON.parse(buffer.slice(0, newline)) as RpcResponse;
+        finish(response.ok ? response.result as {pid: number} : undefined);
+      } catch {
+        finish();
+      }
+    });
+  });
+}
+
 async function main() {
+  // Starting a second daemon used to unlink the first one's socket and listen in its place, leaving
+  // the first running but unreachable — together with every lane it held. Each app launch did this,
+  // so the window could end up talking to a stale daemon while live lanes sat orphaned. Defer to the
+  // daemon that is already answering instead, before touching any state it owns.
+  const existing = await runningDaemon(socketPath);
+  if (existing) {
+    console.error(`fluentd is already running on ${socketPath} (pid ${existing.pid}); not starting another`);
+    process.exit(0);
+  }
   await manager.restore();
   await broker.restore();
   await coordination.restore();
@@ -644,8 +722,11 @@ async function main() {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
+  const clients = new Set<Socket>();
   const server = createServer(socket => {
+    clients.add(socket);
     socket.on('close', () => {
+      clients.delete(socket);
       streamingSockets.delete(socket);
       unsubscribe(socket);
       unsubscribeRun(socket);
@@ -709,7 +790,12 @@ async function main() {
     hardware.stop();
     resources.stop();
     for (const channel of codexChannels.values()) channel.stop();
+    // `server.close` only stops new connections and waits for open ones — and the desktop app keeps
+    // streams open indefinitely. Waiting for them left a daemon that had already removed its socket
+    // running on: unreachable by any new client, yet still holding its lanes.
     server.close(() => process.exit(0));
+    for (const client of clients) client.destroy();
+    setTimeout(() => process.exit(0), 2_000).unref();
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

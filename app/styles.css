@@ -14,6 +14,7 @@
   --radius-card: 12px;
   --radius-button: 8px;
   --radius-chip: 999px;
+  --topbar-height: 46px;
   --rail-width: 224px;
   --content-max: 1680px;
   --space-1: 4px;
@@ -86,6 +87,14 @@
 * {
   box-sizing: border-box;
 }
+* {
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); background-clip: padding-box; border: 2px solid transparent; border-radius: var(--radius-chip); }
+*::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); background-clip: padding-box; }
 
 html, body, #app {
   min-height: 100%;
@@ -100,6 +109,22 @@ body {
   line-height: 1.5;
   text-rendering: optimizeLegibility;
 }
+.action-notices {
+  position: fixed;
+  z-index: 100;
+  right: 20px;
+  bottom: 20px;
+  max-width: min(520px, calc(100vw - 40px));
+}
+.action-notice {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--error) 60%, var(--line));
+  border-radius: var(--radius-button);
+  background: color-mix(in srgb, var(--bg-card) 92%, var(--error));
+  box-shadow: var(--shadow-float);
+}
+.action-status { min-height: 1.5em; margin: 0; color: var(--fg-muted); }
+.session-name .error { max-width: 42ch; margin: 3px 0 0; font-size: 11px; line-height: 1.35; }
 
 #app {
   min-height: 100vh;
@@ -110,12 +135,18 @@ button {
   font-size: inherit;
   cursor: pointer;
 }
+a {
+  color: var(--coral);
+  text-decoration-color: color-mix(in srgb, var(--coral) 54%, transparent);
+  text-underline-offset: 3px;
+}
+a:hover { color: var(--coral-hover); text-decoration-color: currentColor; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
-input, textarea {
+input, textarea, select {
   font-family: inherit;
   font-size: inherit;
   color: inherit;
@@ -125,11 +156,18 @@ input, textarea {
   padding: 8px 10px;
   transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
 }
-input:focus, textarea:focus {
+input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--focus-ring);
   box-shadow: 0 0 0 3px var(--focus-soft);
 }
+.directory-field {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+}
+.directory-field input { min-width: 0; flex: 1; }
+.directory-browse { flex: 0 0 auto; white-space: nowrap; }
 
 .wordmark {
   font-family: var(--font-display);
@@ -154,35 +192,57 @@ input:focus, textarea:focus {
 .app-shell {
   display: grid;
   grid-template-columns: var(--rail-width) minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: calc(100vh - var(--topbar-height));
 }
 
-.topbar.app-rail {
+.topbar.app-topbar {
   position: sticky;
   top: 0;
+  z-index: 10;
   display: flex;
-  height: 100vh;
+  align-items: center;
+  gap: 14px;
+  height: var(--topbar-height);
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-raised) 96%, var(--fg));
+  box-shadow: 0 1px 0 rgb(0 0 0 / 10%);
+}
+.topbar .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.topbar-divider {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+}
+.topbar-product, .topbar-project-path {
+  color: var(--fg-muted);
+  font-size: 10px;
+  letter-spacing: .035em;
+  white-space: nowrap;
+}
+.topbar-target { margin-left: auto; }
+
+.app-rail {
+  position: sticky;
+  top: var(--topbar-height);
+  display: flex;
+  height: calc(100vh - var(--topbar-height));
   min-height: 0;
   flex-direction: column;
   border-right: 1px solid var(--line);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-raised) 97%, var(--fg)) 0%, var(--bg-raised) 26%, var(--bg) 100%);
 }
-.rail-head {
-  display: grid;
-  gap: 5px;
-  padding: 22px 18px 16px;
-  border-bottom: 1px solid var(--line-subtle);
-}
-.topbar .brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 15px;
-}
-.rail-version, .rail-project-label, .rail-project-path, .rail-footer {
+.rail-project-label, .rail-project-path, .rail-footer {
   color: var(--fg-muted);
   font-size: 10px;
   letter-spacing: .035em;
@@ -198,6 +258,20 @@ input:focus, textarea:focus {
 }
 .rail-project strong { font-size: 12px; font-weight: 700; }
 .rail-project-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-project-picker {
+  width: max-content;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  color: var(--fg-muted);
+  background: transparent;
+  font-size: 10px;
+  letter-spacing: .035em;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--fg-muted) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.rail-project-picker:hover { color: var(--fg); text-decoration-color: currentColor; }
 .rail-sections {
   display: grid;
   gap: 12px;
@@ -205,7 +279,7 @@ input:focus, textarea:focus {
   overflow: auto;
   padding: 12px;
 }
-.topbar nav {
+.app-rail nav {
   display: grid;
   gap: 2px;
 }
@@ -218,7 +292,7 @@ input:focus, textarea:focus {
   letter-spacing: .09em;
   text-transform: uppercase;
 }
-.topbar nav button {
+.app-rail nav button {
   width: 100%;
   text-align: left;
   background: transparent;
@@ -228,15 +302,17 @@ input:focus, textarea:focus {
   border-radius: var(--radius-button);
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
-.topbar nav button:hover {
+.app-rail nav button.btn { box-shadow: none; }
+.app-rail nav button:hover {
   color: var(--fg);
   background: var(--bg-hover);
 }
-.topbar nav button.active {
+.app-rail nav button.active {
   color: var(--fg);
-  border-color: var(--line);
-  background: var(--bg-elevated);
-  box-shadow: inset 2px 0 0 var(--coral);
+  border-color: var(--line-strong);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-elevated) 94%, var(--fg)) 0%, var(--bg-elevated) 100%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 9%, transparent), 0 1px 2px rgb(0 0 0 / 14%);
+  font-weight: 700;
 }
 .rail-footer {
   display: grid;
@@ -255,14 +331,20 @@ input:focus, textarea:focus {
 }
 .target-pill.local { color: var(--fg-muted); border-color: var(--line-strong); }
 
+/* `main` is the single scroll owner for the work plane — it always spans the full remaining grid
+   column, edge to edge, so its scrollbar renders at the true panel edge instead of at the edge of
+   a narrower centered column. `.page` is the separate, width-capped content wrapper inside it;
+   splitting the two is what keeps the scrollbar out of the middle of the window on wide screens. */
 main {
-  width: min(100%, var(--content-max));
   min-width: 0;
-  min-height: 100vh;
-  margin: 0 auto;
-  padding: 30px clamp(22px, 3vw, 48px) 48px;
+  min-height: calc(100vh - var(--topbar-height));
   overflow: auto;
   scrollbar-color: var(--line-strong) transparent;
+}
+.page {
+  width: min(100%, var(--content-max));
+  margin: 0 auto;
+  padding: 30px clamp(22px, 3vw, 48px) 48px;
 }
 .splash-main {
   display: grid;
@@ -344,7 +426,7 @@ h1.section-title {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-6);
 }
 .card {
   background:
@@ -354,7 +436,11 @@ h1.section-title {
   border-radius: var(--radius-card);
   padding: 16px;
   box-shadow: var(--shadow-card);
+  margin-bottom: var(--space-6);
 }
+/* Cards inside a `.cards-row` grid are spaced by the grid's own gap; the card's own margin would
+   double that spacing and misalign the grid's rows, so it is neutralized here. */
+.cards-row > .card { margin-bottom: 0; }
 .card.selectable { cursor: pointer; transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease; }
 .card.selectable:hover { border-color: var(--line-strong); background-color: var(--bg-elevated); transform: translateY(-1px); }
 .card.selected { border-color: var(--coral); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--coral) 38%, transparent), var(--shadow-card); }
@@ -383,6 +469,27 @@ h1.section-title {
    trailing pills and buttons keep their natural size so long text never crowds them. */
 .option-row > div:first-child { min-width: 0; flex: 1 1 auto; }
 .option-row > button, .option-row > .pill { flex-shrink: 0; }
+
+/* A relationship is an inspectable object, never a decorative string. It remains a native button
+   for keyboard access while looking like compact terminal text instead of a general-purpose CTA. */
+.object-link {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: var(--fg);
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  overflow-wrap: anywhere;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+.object-link:hover { color: var(--fg); text-decoration-color: var(--fg-faint); }
+.object-link:focus-visible { outline-offset: 3px; }
+.option-row > .object-link { flex: 1 1 120px; }
 
 button.btn {
   border-radius: var(--radius-button);
@@ -429,7 +536,7 @@ table.sessions td {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-6);
 }
 .metric-card {
   display: flex;
@@ -444,7 +551,8 @@ table.sessions td {
 .metric-label, .metric-detail { color: var(--fg-muted); font-size: 11px; letter-spacing: .02em; }
 .metric-card strong { font-family: var(--font-display); font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
 .metric-card strong, .usage-row, .trace { font-variant-numeric: tabular-nums; }
-.trace { margin: 6px 0; letter-spacing: .07em; }
+.trace { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.trace .sparkline { width: 96px; height: 20px; flex-shrink: 0; }
 .trace.cpu { color: var(--success); }
 .trace.memory { color: var(--fg-muted); }
 .segmented { display: flex; gap: 6px; margin: 8px 0 12px; }
@@ -463,6 +571,23 @@ table.sessions td {
   border-radius: var(--radius-card);
   background: #fff;
 }
+.preview-stage { position: relative; }
+.preview-stage [hidden] { display: none; }
+.preview-empty {
+  display: grid;
+  place-content: center;
+  min-height: 620px;
+  padding: 36px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-card);
+  background:
+    linear-gradient(135deg, var(--panel-glow), transparent 44%),
+    var(--bg-card);
+  color: var(--fg-muted);
+  text-align: center;
+}
+.preview-empty strong { color: var(--fg); font-family: var(--font-display); font-size: 18px; }
+.preview-empty p { max-width: 50ch; margin: 8px 0 0; }
 :root[data-bundle='High Contrast Dark'] {
   --bg: #000000;
   --bg-raised: #0c0c0c;
@@ -495,15 +620,64 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 /* A field is a vertical stack of one or more inputs/buttons/notices; without an explicit gap they
    render flush against each other (inputs touch inputs, buttons touch the input above them). */
 .field { margin-bottom: 20px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
-.field input, .field textarea { width: 100%; }
+.field input, .field textarea, .field select { width: 100%; }
 .field .check-label { display: flex; width: auto; align-items: center; gap: 8px; color: var(--fg); font-size: 13px; cursor: pointer; }
 .field .check-label input { width: auto; accent-color: var(--coral); }
 .field textarea { min-height: 80px; resize: vertical; }
 .usage-row { display: grid; grid-template-columns: minmax(120px, 0.8fr) minmax(150px, 1fr) minmax(260px, 1.6fr) minmax(180px, 1fr); gap: 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .usage-row:first-of-type { border-top: 0; }
 
-.toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 22px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: var(--space-6); }
 .toolbar > div:first-child { display: grid; gap: 4px; }
+.orchestration-project-picker { max-width: min(34rem, 100%); }
+.orchestration-project-actions { display: flex; justify-content: flex-end; margin: -8px 0 16px; }
+
+/* Derived current-state browser: the scope is intentionally a local preference, while every
+   object shown is fetched from fluentd's current coordination projection. */
+.coordination-explorer {
+  margin-bottom: var(--space-6);
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  background: linear-gradient(145deg, var(--panel-glow), transparent 35%), var(--bg-raised);
+}
+.explorer-header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 14px; }
+.explorer-header h2 { margin: 0 0 2px; font-family: var(--font-display); font-size: 18px; letter-spacing: -.02em; }
+.scope-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+.scope-button {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-chip);
+  padding: 5px 9px;
+  color: var(--fg-muted);
+  background: var(--bg-inset);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: .025em;
+}
+.scope-button:hover { color: var(--fg); border-color: var(--line-strong); background: var(--bg-hover); }
+.scope-button.active { color: var(--fg); border-color: var(--line-strong); background: var(--bg-elevated); font-weight: 700; }
+.explorer-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(260px, .7fr); gap: 12px; }
+.explorer-grid > .card { min-width: 0; margin: 0; }
+.coordination-inspector { min-height: 190px; }
+.inspector-title { margin: 8px 0 2px; color: var(--fg); font-weight: 700; overflow-wrap: anywhere; }
+.relationship-group { margin-top: 14px; }
+.relationship-group h4 { margin: 0 0 5px; color: var(--fg-faint); font-size: 10px; letter-spacing: .075em; text-transform: uppercase; }
+.relationship-row, .activity-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 5px 0;
+  border-top: 1px solid var(--line-subtle);
+}
+.relationship-row:first-of-type { border-top: 0; }
+.relationship-row .object-link { flex: 1 1 auto; }
+.relationship-missing { margin: 0; }
+.current-record-activity h3 { margin-bottom: 3px; }
+.activity-row { align-items: flex-start; }
+.activity-time { flex: 0 0 76px; color: var(--fg-faint); font-size: 10px; white-space: nowrap; }
+.activity-kind { flex: 0 0 106px; color: var(--fg-muted); font-size: 11px; }
+.activity-row .object-link { flex: 1 1 120px; font-weight: 400; }
 
 /* A generic grouped-button row. Scoped rules like `.banner .actions` used to be the only source of
    this spacing, so any `.actions` div outside a banner (session header, toolbars, dialogs) rendered
@@ -530,11 +704,25 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 
 .session-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px 16px;
   margin-bottom: 12px;
+}
+.session-ident { display: grid; min-width: 0; gap: 4px; }
+.eyebrow {
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.session-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(20px, 2vw, 24px);
+  letter-spacing: -.025em;
 }
 .session-header .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .session-header .dir { color: var(--fg-muted); font-size: 12px; }
@@ -545,9 +733,58 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
   background: var(--bg-inset);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 3%, transparent), var(--shadow-card);
   padding: 10px;
-  height: calc(100vh - 178px);
+  height: max(360px, calc(100vh - var(--topbar-height) - 200px));
 }
 .review-panel { margin-bottom: 12px; }
+
+/* Parallel lanes: a launcher, one context composer, and a grid of live, typeable terminals. */
+.lane-launcher { margin-bottom: 24px; }
+.lane-launcher-grid { display: grid; grid-template-columns: minmax(0, 1fr) 110px 110px; gap: 16px; align-items: end; }
+.lane-launcher-grid .field { margin-bottom: 12px; align-items: stretch; }
+.lane-launcher textarea, .context-composer textarea { width: 100%; box-sizing: border-box; }
+.lane-section { margin-bottom: 28px; }
+.lane-section h2 { margin: 0; font-family: var(--font-display); font-size: 18px; letter-spacing: -.02em; }
+.context-composer { margin: 12px 0 16px; display: flex; flex-direction: column; gap: 8px; }
+.lane-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 12px; }
+.lane-tile { border: 1px solid var(--line-strong); border-radius: var(--radius-card); background: var(--bg-inset); overflow: hidden; min-width: 0; }
+.lane-tile-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--bg-card); }
+.lane-tile-head .actions { margin-left: auto; display: flex; gap: 6px; }
+.lane-terminal { height: 300px; padding: 6px; }
+
+/* Orchestration is a working board, not a project-only landing page. The compact grid makes the
+   master brief, specialist choices, and ticket ownership visible without turning it into chat. */
+.orchestration-command { display: flex; flex-direction: column; gap: 14px; }
+.orchestration-command-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.orchestration-command-head h2 { margin: 0; font-family: var(--font-display); font-size: 19px; letter-spacing: -.02em; }
+.orchestration-notice { min-height: 18px; }
+.orchestration-composer-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.orchestration-panel { display: flex; min-width: 0; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-button); background: var(--bg-inset); }
+.orchestration-panel h3 { margin: 0; font-family: var(--font-mono); font-size: 12px; letter-spacing: .02em; text-transform: uppercase; color: var(--fg-muted); }
+.orchestration-panel textarea, .orchestration-panel input, .orchestration-panel select, .kanban-assignment select { min-width: 0; width: 100%; box-sizing: border-box; }
+.orchestration-master-brief { min-height: 112px; resize: vertical; }
+.orchestration-form-row { display: flex; align-items: center; gap: 8px; }
+.orchestration-form-row > * { min-width: 0; flex: 1 1 0; }
+.orchestration-form-row > button { flex: 0 0 auto; }
+.kanban-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.kanban-column { min-width: 0; min-height: 158px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-button); background: color-mix(in srgb, var(--bg-inset) 74%, transparent); }
+.kanban-column-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.kanban-column-head h3 { margin: 0; font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-muted); }
+.kanban-ticket { display: flex; min-width: 0; flex-direction: column; gap: 8px; margin-bottom: 8px; padding: 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-button); background: var(--bg-card); box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent); }
+.kanban-ticket:last-child { margin-bottom: 0; }
+.kanban-ticket-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; line-height: 1.35; }
+.kanban-ticket-head strong { overflow-wrap: anywhere; }
+.kanban-ticket .section-sub { font-size: 12px; overflow-wrap: anywhere; }
+.kanban-meta { margin: 0; color: var(--fg-muted); font-size: 11px; overflow-wrap: anywhere; }
+.kanban-assignment { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.kanban-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.kanban-empty { padding: 16px 4px; text-align: center; font-size: 12px; }
+@media (max-width: 720px) {
+  .lane-launcher-grid { grid-template-columns: 1fr 1fr; }
+  .lane-launcher-grid .field:first-child { grid-column: 1 / -1; }
+  .orchestration-command-head { align-items: stretch; flex-direction: column; }
+  .orchestration-command-head > .btn { width: 100%; }
+  .orchestration-composer-grid, .kanban-board { grid-template-columns: 1fr; }
+}
 .diff { max-height: 320px; overflow: auto; margin: 10px 0 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-button); background: var(--bg-inset); color: var(--fg); white-space: pre-wrap; font-size: 12px; }
 
 .empty-state {
@@ -555,6 +792,8 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
   text-align: center;
   padding: 60px 0;
 }
+.remote-connect-card { max-width: 760px; }
+.remote-empty { max-width: 760px; padding: 34px 16px; }
 
 /* Spend screen — layout adapted from T3 Code's Usage page (MIT licensed), redrawn in Fluent's
    own vanilla-DOM/brand-token system. Provider dots use data-viz-safe muted tones, never Coral
@@ -565,10 +804,22 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
   gap: 28px;
   margin-bottom: 28px;
 }
+/* One intermediate step before the 720px rail collapse: at "half-page" desktop widths the fixed
+   224px rail plus full content padding was crowding a still-multi-column layout, which is exactly
+   what read as squeezed rather than responsive. */
+@media (max-width: 1180px) {
+  :root { --rail-width: 192px; --content-max: 1280px; }
+  .metrics-grid { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); }
+  .cards-row { grid-template-columns: repeat(auto-fit, minmax(196px, 1fr)); }
+  .explorer-grid { grid-template-columns: 1fr; }
+}
 @media (max-width: 720px) {
   .spend-grid { grid-template-columns: 1fr; }
+  .topbar.app-topbar { gap: 10px; padding: 0 14px; }
+  .topbar-project-divider, .topbar-project-path { display: none; }
+  .topbar-product { overflow: hidden; text-overflow: ellipsis; }
   .app-shell { display: block; }
-  .topbar.app-rail {
+  .app-rail {
     z-index: 5;
     display: flex;
     width: 100%;
@@ -580,15 +831,27 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
     border-bottom: 1px solid var(--line);
     background: var(--bg-raised);
   }
-  .rail-head { flex: 0 0 auto; padding: 10px 14px; border: 0; }
-  .rail-version, .rail-project, .rail-footer, .rail-label { display: none; }
+  .rail-project, .rail-footer, .rail-label { display: none; }
   .rail-sections { display: flex; flex: 1; gap: 2px; overflow-x: auto; padding: 8px 8px 8px 0; }
-  .topbar nav { display: flex; flex: 0 0 auto; gap: 2px; }
-  .topbar nav button { width: max-content; padding: 6px 8px; white-space: nowrap; }
-  .topbar nav button.active { box-shadow: inset 0 -2px 0 var(--coral); }
-  main { min-height: calc(100vh - 52px); padding: 20px 16px 32px; }
+  .app-rail nav { display: flex; flex: 0 0 auto; gap: 2px; }
+  .app-rail nav button { width: max-content; padding: 6px 8px; white-space: nowrap; }
+  .app-rail nav button.active {
+    /* Keep the selected treatment a refined neutral surface on compact rails too.
+       A colored edge reads like a browser focus artifact rather than app chrome. */
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 9%, transparent), 0 1px 2px rgb(0 0 0 / 14%);
+  }
+  main { min-height: calc(100vh - var(--topbar-height) - 52px); }
+  .page { padding: 20px 16px 32px; }
   .toolbar, .banner, .session-header, .preview-controls { align-items: stretch; flex-direction: column; }
   .toolbar { gap: 12px; }
+  .orchestration-project-actions { justify-content: stretch; margin-top: -4px; }
+  .orchestration-project-actions .btn { width: 100%; }
+  .explorer-header { align-items: stretch; }
+  .scope-tabs { width: 100%; }
+  .scope-button { flex: 1 1 auto; }
+  .activity-row { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 2px 10px; }
+  .activity-kind { grid-column: 2; }
+  .activity-row .object-link { grid-column: 2; }
   .banner .actions { flex-wrap: wrap; }
   .usage-row { grid-template-columns: 1fr 1fr; gap: 8px; }
   .override-form { grid-template-columns: 1fr; }
@@ -605,12 +868,24 @@ table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 .provider-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .provider-dot.claude { background: #b08968; }
 .provider-dot.codex { background: #6b8fb0; }
+.provider-dot.gemini { background: #8a9a6b; }
 
-.bar-chart { display: flex; align-items: flex-end; gap: 3px; height: 160px; padding-top: 8px; }
-.bar-chart .bar-col { flex: 1; display: flex; flex-direction: column-reverse; height: 100%; min-width: 2px; border-radius: 2px 2px 0 0; overflow: hidden; background: var(--bg-inset); }
-.bar-chart .bar-seg.claude { background: #b08968; }
-.bar-chart .bar-seg.codex { background: #6b8fb0; }
-.bar-chart-axis { display: flex; justify-content: space-between; color: var(--fg-faint); font-size: 10px; margin-top: 4px; }
+/* Multi-series line chart — same shape as the Usage Observatory artboard (design/previews/hNqHb.png):
+   smooth per-series lines over a fill, gridlines, a legend, and start/mid/end axis labels. Built as
+   plain inline SVG (no charting library) to stay consistent with the rest of app/ (vanilla TS, no
+   framework, esbuild-bundled). */
+.line-chart { display: flex; flex-direction: column; gap: 8px; }
+.line-chart-body { display: flex; gap: 10px; }
+.chart-y-axis { position: relative; width: 56px; flex-shrink: 0; height: 200px; }
+.chart-y-axis span { position: absolute; right: 0; transform: translateY(-50%); font-size: 10px; color: var(--fg-faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.line-chart-plot { position: relative; flex: 1; min-width: 0; height: 200px; }
+.line-chart-svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart-grid-line { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart-hit-area { fill: transparent; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px; color: var(--fg-muted); }
+.chart-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend-swatch { display: inline-block; width: 10px; height: 2px; border-radius: 999px; }
+.chart-axis-labels { display: flex; justify-content: space-between; padding-left: 66px; color: var(--fg-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .02em; }
 
 table.spend { width: 100%; border-collapse: collapse; font-size: 12px; }
 table.spend th { text-align: left; color: var(--fg-muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -644,3 +919,11 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
 /* Catalog section switcher — keeps plugins and MCP servers in their own dedicated views instead of
    one long stacked scroll, per the brand's dense-but-organized information design. */
 .catalog-sections { margin-bottom: 4px; }
+.catalog-filter-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 8px 0 12px;
+}
+.catalog-filter-row .segmented { flex-wrap: wrap; margin: 0; }

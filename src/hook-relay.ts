@@ -43,7 +43,9 @@ async function main() {
     socket.once('timeout', finish);
     socket.setTimeout(500);
     socket.once('connect', () => {
-      socket.write(`${JSON.stringify({id: randomUUID(), method: 'hooks.report', params: {cwd, event: eventName, payload}})}\n`);
+      // FLUENT_SESSION_ID names the exact lane when several share this directory.
+      const sessionId = process.env.FLUENT_SESSION_ID;
+      socket.write(`${JSON.stringify({id: randomUUID(), method: 'hooks.report', params: {cwd, ...(sessionId ? {sessionId} : {}), event: eventName, payload}})}\n`);
     });
     socket.once('data', finish);
   });

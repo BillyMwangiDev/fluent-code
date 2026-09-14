@@ -1,0 +1,56 @@
+name: desktop package checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: ${{ matrix.os }} bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check daemon and frontend
+        run: pnpm check && pnpm run check:frontend
+      - name: Test daemon behavior
+        run: pnpm test
+      # Native runners are deliberate: fluentd includes platform-native PTY and keyring modules.
+      # These are unsigned test installers. A public release additionally needs platform signing
+      # credentials and macOS notarization.
+      - name: Assemble unsigned macOS DMG
+        if: matrix.os == 'macos-latest'
+        run: pnpm run package:mac
+      - name: Assemble unsigned Windows installer
+        if: matrix.os == 'windows-latest'
+        run: pnpm run package:windows
+      - name: Upload macOS test installer
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fluent-Code-macOS
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload Windows test installer
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Fluent-Code-Windows
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30

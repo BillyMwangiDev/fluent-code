@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {realpathSync} from 'node:fs';
 import {dirname, join} from 'node:path';
-import type {ClaimConflict, ClaimResult, CoordinationState, FileClaim, LaneMessage} from './daemon-protocol.js';
+import type {ClaimConflict, ClaimReleaseReason, ClaimResult, CoordinationEvent, CoordinationEventKind, CoordinationState, CoordinationTask, FileClaim, LaneMessage, ProviderId, TaskSource} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 /**
@@ -10,6 +10,142 @@ import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
  * at all, because it blocks live lanes forever with no way to tell it is stale.
  */
 const claimLeaseMs = 15 * 60_000;
+/** Per-project retained board history. This is a compact coordination journal, not an audit log. */
+export const coordinationEventLimit = 500;
+
+const coordinationEventKinds: readonly CoordinationEventKind[] = [
+  'task.created', 'task.assigned', 'task.status_changed', 'master_brief.set', 'claim.declared', 'claim.observed', 'claim.conflicted',
+  'claim.released', 'decision.recorded', 'handoff.requested', 'handoff.accepted', 'message.sent'
+];
+const claimReleaseReasons: readonly ClaimReleaseReason[] = ['released', 'observed_cleared', 'session_ended', 'lease_expired'];
+const providers: readonly ProviderId[] = ['claude', 'codex', 'gemini'];
+const taskSources: readonly TaskSource[] = ['manual', 'spec', 'planner'];
+const taskTitleLimit = 240;
+const taskDescriptionLimit = 12_000;
+const taskRoleLimit = 100;
+const masterBriefLimit = 20_000;
+
+export type TaskDraft = {
+  title: string;
+  description?: string;
+  role?: string;
+  provider?: ProviderId;
+  source?: TaskSource;
+  sessionId?: string;
+};
+
+export type TaskAssignment = Pick<TaskDraft, 'sessionId' | 'provider' | 'role'>;
+
+function stableEventOrder(left: CoordinationEvent, right: CoordinationEvent) {
+  return left.at.localeCompare(right.at) || left.id.localeCompare(right.id);
+}
+
+function compactSessionIds(ids: readonly (string | undefined)[]) {
+  return [...new Set(ids.filter((id): id is string => typeof id === 'string' && id.length > 0))];
+}
+
+function validTaskStatus(value: unknown): value is 'todo' | 'active' | 'done' {
+  return value === 'todo' || value === 'active' || value === 'done';
+}
+
+function validProvider(value: unknown): value is ProviderId {
+  return typeof value === 'string' && (providers as readonly string[]).includes(value);
+}
+
+function validTaskSource(value: unknown): value is TaskSource {
+  return typeof value === 'string' && (taskSources as readonly string[]).includes(value);
+}
+
+function cleanText(value: unknown, limit: number) {
+  if (typeof value !== 'string') return undefined;
+  const text = value.trim();
+  return text ? text.slice(0, limit) : undefined;
+}
+
+/** Backward-compatible restore for the original bare `{title, status, sessionId}` board cards. */
+function restoredTask(value: unknown): CoordinationTask | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const id = cleanText(raw.id, 200);
+  const title = cleanText(raw.title, taskTitleLimit);
+  const createdAt = typeof raw.createdAt === 'string' && Number.isFinite(Date.parse(raw.createdAt)) ? raw.createdAt : undefined;
+  if (!id || !title || !createdAt || !validTaskStatus(raw.status)) return undefined;
+  const task: CoordinationTask = {id, title, status: raw.status, createdAt};
+  const description = cleanText(raw.description, taskDescriptionLimit);
+  const role = cleanText(raw.role, taskRoleLimit);
+  if (typeof raw.sessionId === 'string' && raw.sessionId) task.sessionId = raw.sessionId;
+  if (description) task.description = description;
+  if (role) task.role = role;
+  if (validProvider(raw.provider)) task.provider = raw.provider;
+  if (validTaskSource(raw.source)) task.source = raw.source;
+  if (typeof raw.updatedAt === 'string' && Number.isFinite(Date.parse(raw.updatedAt))) task.updatedAt = raw.updatedAt;
+  return task;
+}
+
+function validConflict(value: unknown): value is ClaimConflict {
+  if (!value || typeof value !== 'object') return false;
+  const conflict = value as Record<string, unknown>;
+  return typeof conflict.path === 'string'
+    && typeof conflict.claimedPath === 'string'
+    && typeof conflict.sessionId === 'string'
+    && (conflict.overlap === 'same' || conflict.overlap === 'contains' || conflict.overlap === 'contained');
+}
+
+/** One malformed persisted event must never prevent the rest of a project board from restoring. */
+function restoredEvent(value: unknown): CoordinationEvent | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.id !== 'string' || !raw.id || typeof raw.at !== 'string' || !Number.isFinite(Date.parse(raw.at))) return undefined;
+  if (typeof raw.kind !== 'string' || !(coordinationEventKinds as readonly string[]).includes(raw.kind)) return undefined;
+  if (!Array.isArray(raw.sessionIds) || raw.sessionIds.some(id => typeof id !== 'string')) return undefined;
+  const event: CoordinationEvent = {id: raw.id, at: raw.at, kind: raw.kind as CoordinationEventKind, sessionIds: compactSessionIds(raw.sessionIds as string[])};
+  if (typeof raw.actorSessionId === 'string') event.actorSessionId = raw.actorSessionId;
+  if (typeof raw.taskId === 'string') event.taskId = raw.taskId;
+  if (typeof raw.claimId === 'string') event.claimId = raw.claimId;
+  if (typeof raw.path === 'string') event.path = raw.path;
+  if (raw.claimOrigin === 'declared' || raw.claimOrigin === 'observed') event.claimOrigin = raw.claimOrigin;
+  if (validTaskStatus(raw.fromStatus)) event.fromStatus = raw.fromStatus;
+  if (validTaskStatus(raw.toStatus)) event.toStatus = raw.toStatus;
+  if (typeof raw.releaseReason === 'string' && (claimReleaseReasons as readonly string[]).includes(raw.releaseReason)) event.releaseReason = raw.releaseReason as ClaimReleaseReason;
+  if (typeof raw.decisionId === 'string') event.decisionId = raw.decisionId;
+  if (typeof raw.handoffId === 'string') event.handoffId = raw.handoffId;
+  if (typeof raw.messageId === 'string') event.messageId = raw.messageId;
+  if (validProvider(raw.provider)) event.provider = raw.provider;
+  if (typeof raw.role === 'string') event.role = raw.role;
+  if (Array.isArray(raw.conflicts) && raw.conflicts.every(validConflict)) event.conflicts = raw.conflicts;
+
+  switch (event.kind) {
+    case 'task.created': return event.taskId ? event : undefined;
+    case 'task.assigned': return event.taskId ? event : undefined;
+    case 'task.status_changed': return event.taskId && event.fromStatus && event.toStatus ? event : undefined;
+    case 'master_brief.set': return event;
+    case 'claim.declared': case 'claim.observed': return event.claimId && event.path && event.claimOrigin ? event : undefined;
+    case 'claim.conflicted': return event.path && event.conflicts?.length ? event : undefined;
+    case 'claim.released': return event.claimId && event.path && event.releaseReason ? event : undefined;
+    case 'decision.recorded': return event.decisionId ? event : undefined;
+    case 'handoff.requested': case 'handoff.accepted': return event.handoffId ? event : undefined;
+    case 'message.sent': return event.messageId ? event : undefined;
+  }
+}
+
+function eventFingerprint(event: CoordinationEvent) {
+  return JSON.stringify([
+    event.id, event.at, event.kind, event.actorSessionId, event.sessionIds, event.taskId, event.claimId,
+    event.path, event.claimOrigin, event.fromStatus, event.toStatus, event.releaseReason, event.decisionId,
+    event.handoffId, event.messageId, event.provider, event.role,
+    event.conflicts?.map(conflict => [conflict.path, conflict.claimedPath, conflict.sessionId, conflict.overlap])
+  ]);
+}
+
+/** Compare normalized fields rather than object property order, so a valid journal does not get
+ * rewritten on every daemon start merely because it was reconstructed into a new object. */
+function eventsNeedMigration(original: unknown, normalized: readonly CoordinationEvent[]) {
+  if (!Array.isArray(original) || original.length !== normalized.length) return true;
+  return original.some((event, index) => {
+    const restored = restoredEvent(event);
+    return !restored || eventFingerprint(restored) !== eventFingerprint(normalized[index]!);
+  });
+}
 
 /**
  * Normalizes a claim path so overlap comparison is meaningful: POSIX separators, no leading `./`
@@ -51,20 +187,58 @@ export class CoordinationManager {
     try {
       const parsed = await readPrivateJson<CoordinationState[]>(this.stateFile);
       if (!parsed) return;
+      let migrated = false;
       for (const state of parsed) {
+        const originalTasks = state.tasks;
+        state.tasks = (Array.isArray(originalTasks) ? originalTasks : [])
+          .map(restoredTask)
+          .filter((task): task is CoordinationTask => task !== undefined);
+        if (!Array.isArray(originalTasks) || originalTasks.length !== state.tasks.length
+          || originalTasks.some((task, index) => JSON.stringify(task) !== JSON.stringify(state.tasks[index]))) migrated = true;
+        const originalBrief = state.masterBrief;
+        const brief = cleanText(originalBrief, masterBriefLimit);
+        if (brief) state.masterBrief = brief;
+        else delete state.masterBrief;
+        if (state.masterBrief !== originalBrief) migrated = true;
+        if (state.masterBrief) {
+          if (typeof state.masterBriefUpdatedAt !== 'string' || !Number.isFinite(Date.parse(state.masterBriefUpdatedAt))) {
+            state.masterBriefUpdatedAt = new Date().toISOString();
+            migrated = true;
+          }
+        } else if (state.masterBriefUpdatedAt !== undefined) {
+          delete state.masterBriefUpdatedAt;
+          migrated = true;
+        }
         // Claims written before leases existed carry no expiry. Give them one starting now rather
         // than dropping them: a restored claim from a lane that is still running gets renewed on
         // the next heartbeat, and one from a lane that is gone expires on its own.
-        state.claims = (state.claims ?? []).map(claim => ({
+        const originalClaims = state.claims;
+        state.claims = (Array.isArray(originalClaims) ? originalClaims : []).map(claim => ({
           ...claim,
+          id: claim.id ?? randomUUID(),
           origin: claim.origin ?? 'declared',
           renewedAt: claim.renewedAt ?? claim.createdAt,
           expiresAt: claim.expiresAt ?? new Date(Date.now() + claimLeaseMs).toISOString()
         }));
-        state.messages ??= [];
+        if (!Array.isArray(originalClaims) || state.claims.some((claim, index) => claim.id !== originalClaims[index]?.id || claim.origin !== originalClaims[index]?.origin || claim.renewedAt !== originalClaims[index]?.renewedAt || claim.expiresAt !== originalClaims[index]?.expiresAt)) migrated = true;
+        const originalMessages = state.messages;
+        state.messages = Array.isArray(originalMessages) ? originalMessages : [];
+        if (!Array.isArray(originalMessages)) migrated = true;
+        const originalEvents = state.events;
+        state.events = (Array.isArray(originalEvents) ? originalEvents : [])
+          .map(restoredEvent)
+          .filter((event): event is CoordinationEvent => event !== undefined)
+          .sort(stableEventOrder)
+          .slice(-coordinationEventLimit);
+        if (eventsNeedMigration(originalEvents, state.events)) migrated = true;
+        const originalProject = state.project;
         state.project = this.canonicalProject(state.project);
+        if (state.project !== originalProject) migrated = true;
         this.states.set(state.project, state);
       }
+      // Stable claim IDs are a relationship key, not an in-memory convenience. Persist each
+      // compatibility migration before the daemon can restart and generate a different identity.
+      if (migrated) await this.persist();
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -74,19 +248,82 @@ export class CoordinationManager {
     return this.ensure(project);
   }
 
-  async task(project: string, title: string, sessionId?: string) {
+  async setMasterBrief(project: string, brief: string, actorSessionId?: string) {
     const state = this.ensure(project);
-    state.tasks.unshift({id: randomUUID(), title, status: sessionId ? 'active' : 'todo', sessionId, createdAt: new Date().toISOString()});
+    const nextBrief = cleanText(brief, masterBriefLimit);
+    if (state.masterBrief === nextBrief) return state;
+    if (nextBrief) {
+      state.masterBrief = nextBrief;
+      state.masterBriefUpdatedAt = new Date().toISOString();
+    } else {
+      delete state.masterBrief;
+      delete state.masterBriefUpdatedAt;
+    }
+    this.record(state, {kind: 'master_brief.set', actorSessionId, sessionIds: []});
     await this.persist();
     return state;
   }
 
-  async updateTask(project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string) {
+  async task(project: string, draft: TaskDraft, actorSessionId?: string) {
+    const state = this.ensure(project);
+    const title = cleanText(draft.title, taskTitleLimit);
+    if (!title) throw new Error('A task needs a title');
+    const description = cleanText(draft.description, taskDescriptionLimit);
+    const role = cleanText(draft.role, taskRoleLimit);
+    const sessionId = cleanText(draft.sessionId, 200);
+    const createdAt = new Date().toISOString();
+    const task: CoordinationTask = {
+      id: randomUUID(), title, status: sessionId ? 'active' : 'todo', sessionId, createdAt,
+      description, role, provider: validProvider(draft.provider) ? draft.provider : undefined,
+      source: validTaskSource(draft.source) ? draft.source : 'manual'
+    };
+    state.tasks.unshift(task);
+    this.record(state, {
+      kind: 'task.created', actorSessionId, sessionIds: compactSessionIds([sessionId]), taskId: task.id,
+      provider: task.provider, role: task.role
+    });
+    await this.persist();
+    return state;
+  }
+
+  async assignTask(project: string, taskId: string, assignment: TaskAssignment, actorSessionId?: string) {
     const state = this.ensure(project);
     const task = state.tasks.find(item => item.id === taskId);
     if (!task) throw new Error('Coordination task not found');
+    // Assignment fields are independently optional: choosing an existing lane must not erase the
+    // ticket's already declared provider or role merely because this particular action omitted it.
+    const sessionId = assignment.sessionId === undefined ? task.sessionId : cleanText(assignment.sessionId, 200);
+    const role = assignment.role === undefined ? task.role : cleanText(assignment.role, taskRoleLimit);
+    const provider = assignment.provider === undefined ? task.provider : validProvider(assignment.provider) ? assignment.provider : undefined;
+    const changed = task.sessionId !== sessionId || task.provider !== provider || task.role !== role;
+    if (!changed) return state;
+    task.sessionId = sessionId;
+    task.provider = provider;
+    task.role = role;
+    if (sessionId && task.status === 'todo') task.status = 'active';
+    task.updatedAt = new Date().toISOString();
+    this.record(state, {
+      kind: 'task.assigned', actorSessionId, sessionIds: compactSessionIds([sessionId]), taskId: task.id,
+      provider: task.provider, role: task.role
+    });
+    await this.persist();
+    return state;
+  }
+
+  async updateTask(project: string, taskId: string, status: 'todo' | 'active' | 'done', sessionId?: string, actorSessionId?: string) {
+    const state = this.ensure(project);
+    const task = state.tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('Coordination task not found');
+    const fromStatus = task.status;
+    const nextSessionId = sessionId ?? task.sessionId;
+    if (fromStatus === status && task.sessionId === nextSessionId) return state;
     task.status = status;
-    task.sessionId = sessionId ?? task.sessionId;
+    task.sessionId = nextSessionId;
+    task.updatedAt = new Date().toISOString();
+    this.record(state, {
+      kind: 'task.status_changed', actorSessionId, sessionIds: compactSessionIds([task.sessionId]),
+      taskId: task.id, fromStatus, toStatus: status
+    });
     await this.persist();
     return state;
   }
@@ -116,8 +353,27 @@ export class CoordinationManager {
     if (granted) {
       const existing = state.claims.find(claim => claim.path === claimPath && claim.sessionId === sessionId);
       const lease = {renewedAt: now.toISOString(), expiresAt: new Date(now.getTime() + claimLeaseMs).toISOString()};
-      if (existing) Object.assign(existing, lease, {origin: existing.origin === 'declared' ? 'declared' : origin});
-      else state.claims.push({path: claimPath, sessionId, origin, createdAt: now.toISOString(), ...lease});
+      if (existing) {
+        const promoteToDeclared = existing.origin === 'observed' && origin === 'declared';
+        Object.assign(existing, lease, {origin: promoteToDeclared ? 'declared' : existing.origin});
+        if (promoteToDeclared) this.record(state, {
+          kind: 'claim.declared', actorSessionId: sessionId, sessionIds: [sessionId],
+          claimId: existing.id, path: existing.path, claimOrigin: existing.origin
+        });
+      } else {
+        const claim: FileClaim = {id: randomUUID(), path: claimPath, sessionId, origin, createdAt: now.toISOString(), ...lease};
+        state.claims.push(claim);
+        this.record(state, {
+          kind: origin === 'declared' ? 'claim.declared' : 'claim.observed', actorSessionId: sessionId,
+          sessionIds: [sessionId], claimId: claim.id, path: claim.path, claimOrigin: claim.origin
+        });
+      }
+    } else {
+      this.record(state, {
+        kind: 'claim.conflicted', actorSessionId: sessionId,
+        sessionIds: compactSessionIds([sessionId, ...conflicts.map(conflict => conflict.sessionId)]),
+        path: claimPath, claimOrigin: origin, conflicts
+      });
     }
 
     await this.persist();
@@ -154,12 +410,31 @@ export class CoordinationManager {
     const declaredPaths = new Set(mineDeclared.map(claim => claim.path));
     // Keep the original createdAt for a path this lane was already touching: conflict ordering
     // depends on who arrived first, and re-observing the same file is not a new arrival.
-    const previouslyObserved = new Map(state.claims.filter(claim => claim.sessionId === sessionId).map(claim => [claim.path, claim.createdAt]));
+    const previouslyObserved = new Map(state.claims
+      .filter(claim => claim.sessionId === sessionId && claim.origin === 'observed')
+      .map(claim => [claim.path, claim]));
     const observed: FileClaim[] = [...normalized]
       .filter(path => !declaredPaths.has(path))
-      .map(path => ({path, sessionId, origin: 'observed', createdAt: previouslyObserved.get(path) ?? now.toISOString(), ...lease}));
+      .map(path => {
+        const previous = previouslyObserved.get(path);
+        return {id: previous?.id ?? randomUUID(), path, sessionId, origin: 'observed' as const, createdAt: previous?.createdAt ?? now.toISOString(), ...lease};
+      });
 
     state.claims = [...others, ...mineDeclared, ...observed];
+    for (const claim of observed) {
+      if (previouslyObserved.has(claim.path)) continue;
+      this.record(state, {
+        kind: 'claim.observed', actorSessionId: sessionId, sessionIds: [sessionId],
+        claimId: claim.id, path: claim.path, claimOrigin: claim.origin
+      });
+    }
+    for (const claim of previouslyObserved.values()) {
+      if (normalized.has(claim.path) && !declaredPaths.has(claim.path)) continue;
+      this.record(state, {
+        kind: 'claim.released', sessionIds: [sessionId], claimId: claim.id, path: claim.path,
+        releaseReason: 'observed_cleared'
+      });
+    }
 
     await this.persist();
     return {state, conflicts: this.conflicts(project)};
@@ -186,12 +461,15 @@ export class CoordinationManager {
     return conflicts;
   }
 
-  async releaseClaim(project: string, path: string, sessionId: string) {
+  async releaseClaim(project: string, path: string, sessionId: string, actorSessionId?: string) {
     const state = this.ensure(project);
     const claimPath = normalizeClaimPath(path);
-    const before = state.claims.length;
+    const released = state.claims.filter(claim => claim.path === claimPath && claim.sessionId === sessionId);
     state.claims = state.claims.filter(claim => !(claim.path === claimPath && claim.sessionId === sessionId));
-    if (state.claims.length === before) throw new Error('File claim not found for this agent');
+    if (released.length === 0) throw new Error('File claim not found for this agent');
+    for (const claim of released) this.record(state, {
+      kind: 'claim.released', actorSessionId, sessionIds: [sessionId], claimId: claim.id, path: claim.path, releaseReason: 'released'
+    });
     await this.persist();
     return state;
   }
@@ -227,6 +505,10 @@ export class CoordinationManager {
           continue;
         }
         expired.push({...claim, project: state.project});
+        this.record(state, {
+          kind: 'claim.released', sessionIds: [claim.sessionId], claimId: claim.id, path: claim.path,
+          releaseReason: 'lease_expired'
+        });
         changed = true;
       }
       state.claims = keep;
@@ -241,9 +523,13 @@ export class CoordinationManager {
   async releaseSession(sessionId: string) {
     let changed = false;
     for (const state of this.states.values()) {
-      const before = state.claims.length;
+      const released = state.claims.filter(claim => claim.sessionId === sessionId);
       state.claims = state.claims.filter(claim => claim.sessionId !== sessionId);
-      if (state.claims.length !== before) changed = true;
+      for (const claim of released) this.record(state, {
+        kind: 'claim.released', sessionIds: [sessionId], claimId: claim.id, path: claim.path,
+        releaseReason: 'session_ended'
+      });
+      if (released.length > 0) changed = true;
     }
     if (changed) await this.persist();
     return changed;
@@ -258,6 +544,7 @@ export class CoordinationManager {
     const state = this.ensure(project);
     const message: LaneMessage = {id: randomUUID(), from, to, body: body.trim(), createdAt: new Date().toISOString()};
     state.messages.push(message);
+    this.record(state, {kind: 'message.sent', actorSessionId: from, sessionIds: compactSessionIds([from, to]), messageId: message.id});
     await this.persist();
     return message;
   }
@@ -285,16 +572,22 @@ export class CoordinationManager {
     return this.ensure(project).messages;
   }
 
-  async decision(project: string, summary: string, sessionId?: string) {
+  async decision(project: string, summary: string, sessionId?: string, actorSessionId?: string) {
     const state = this.ensure(project);
-    state.decisions.unshift({id: randomUUID(), summary, sessionId, createdAt: new Date().toISOString()});
+    const decision = {id: randomUUID(), summary, sessionId, createdAt: new Date().toISOString()};
+    state.decisions.unshift(decision);
+    this.record(state, {kind: 'decision.recorded', actorSessionId, sessionIds: compactSessionIds([sessionId]), decisionId: decision.id});
     await this.persist();
     return state;
   }
 
-  async handoff(project: string, fromSessionId: string, toSessionId: string, summary: string) {
+  async handoff(project: string, fromSessionId: string, toSessionId: string, summary: string, actorSessionId?: string) {
     const state = this.ensure(project);
-    state.handoffs.unshift({id: randomUUID(), fromSessionId, toSessionId, summary, createdAt: new Date().toISOString(), status: 'open'});
+    const handoff = {id: randomUUID(), fromSessionId, toSessionId, summary, createdAt: new Date().toISOString(), status: 'open' as const};
+    state.handoffs.unshift(handoff);
+    this.record(state, {
+      kind: 'handoff.requested', actorSessionId, sessionIds: compactSessionIds([fromSessionId, toSessionId]), handoffId: handoff.id
+    });
     await this.persist();
     return state;
   }
@@ -303,7 +596,11 @@ export class CoordinationManager {
     const state = this.ensure(project);
     const handoff = state.handoffs.find(item => item.id === handoffId);
     if (!handoff) throw new Error('Coordination handoff not found');
+    if (handoff.status === 'accepted') return state;
     handoff.status = 'accepted';
+    this.record(state, {
+      kind: 'handoff.accepted', sessionIds: compactSessionIds([handoff.fromSessionId, handoff.toSessionId]), handoffId: handoff.id
+    });
     await this.persist();
     return state;
   }
@@ -312,15 +609,19 @@ export class CoordinationManager {
     const canonicalProject = this.canonicalProject(project);
     let state = this.states.get(canonicalProject);
     if (!state) {
-      state = {project: canonicalProject, tasks: [], claims: [], decisions: [], handoffs: [], messages: []};
+      state = {project: canonicalProject, tasks: [], claims: [], decisions: [], handoffs: [], messages: [], events: []};
       this.states.set(canonicalProject, state);
     }
     return state;
   }
 
   /** `/var` and `/private/var` name the same macOS worktree. State must not fork by spelling. */
-  private canonicalProject(project: string) {
-    try { return realpathSync.native(project); } catch { return project; }
+  private canonicalProject(project: string) { return canonicalProjectPath(project); }
+
+  private record(state: CoordinationState, event: Omit<CoordinationEvent, 'id' | 'at'>) {
+    state.events.push({id: randomUUID(), at: new Date().toISOString(), ...event, sessionIds: compactSessionIds(event.sessionIds)});
+    state.events.sort(stableEventOrder);
+    if (state.events.length > coordinationEventLimit) state.events.splice(0, state.events.length - coordinationEventLimit);
   }
 
   private async persist() {
@@ -330,4 +631,9 @@ export class CoordinationManager {
     this.queue = run.catch(() => undefined);
     return run;
   }
+}
+
+/** Keep project-key comparisons consistent between the durable coordination store and RPC guards. */
+export function canonicalProjectPath(project: string) {
+  try { return realpathSync.native(project); } catch { return project; }
 }
