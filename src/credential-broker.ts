@@ -218,14 +218,11 @@ export class CredentialBroker extends EventEmitter {
     if (existing >= 0) state.accounts[existing] = account;
     else state.accounts.push(account);
     if (!state.chain.includes(id)) {
-      if (existing >= 0) {
-        // Updating an existing account, restore it to the chain
-        state.chain.push(id);
-      } else if (state.chain.length === 0) {
+      if (state.chain.length === 0) {
         // First account for this provider
         state.chain.push(id);
       } else {
-        // New account being added to a provider with existing accounts
+        // Adding to a provider with existing accounts (whether new or updating)
         // Only add to chain if it has the same identity as the existing chain
         const firstChainAccountId = state.chain[0];
         const firstChainAccount = state.accounts.find(acc => acc.id === firstChainAccountId);

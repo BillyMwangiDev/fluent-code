@@ -333,4 +333,19 @@ describe('credential chains stay within one identity', () => {
 
     assert.deepEqual(state.chain, ['work-credits', 'work-sub']);
   });
+
+  it('does not rejoin a chain-excluded account on re-upsert if it has a different identity', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription');
+
+    // personal-sub was correctly excluded from the chain on first upsert
+    let [state] = instance.list().filter(entry => entry.provider === 'claude');
+    assert.deepEqual(state!.chain, ['work-sub', 'work-credits'], 'first upsert of different identity excludes from chain');
+
+    // Re-upsert personal-sub (e.g., relabel or reconnect) must not rejoin it
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription (relabeled)');
+
+    [state] = instance.list().filter(entry => entry.provider === 'claude');
+    assert.deepEqual(state!.chain, ['work-sub', 'work-credits'], 're-upsert of different-identity account must not rejoin chain');
+  });
 });
