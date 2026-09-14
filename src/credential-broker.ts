@@ -217,7 +217,23 @@ export class CredentialBroker extends EventEmitter {
     };
     if (existing >= 0) state.accounts[existing] = account;
     else state.accounts.push(account);
-    if (!state.chain.includes(id)) state.chain.push(id);
+    if (!state.chain.includes(id)) {
+      if (existing >= 0) {
+        // Updating an existing account, restore it to the chain
+        state.chain.push(id);
+      } else if (state.chain.length === 0) {
+        // First account for this provider
+        state.chain.push(id);
+      } else {
+        // New account being added to a provider with existing accounts
+        // Only add to chain if it has the same identity as the existing chain
+        const firstChainAccountId = state.chain[0];
+        const firstChainAccount = state.accounts.find(acc => acc.id === firstChainAccountId);
+        if (firstChainAccount && firstChainAccount.identityId === account.identityId) {
+          state.chain.push(id);
+        }
+      }
+    }
     this.recomputeActive(state);
     await this.persist();
     return this.publicState(state);
@@ -244,8 +260,13 @@ export class CredentialBroker extends EventEmitter {
 
   async setChain(provider: ProviderId, accountIds: string[]) {
     const state = this.ensure(provider);
-    const known = new Set(state.accounts.map(account => account.id));
-    state.chain = accountIds.filter(id => known.has(id));
+    const known = new Map(state.accounts.map(account => [account.id, account]));
+    const filtered = accountIds.filter(id => known.has(id));
+    const identities = new Set(filtered.map(id => known.get(id)!.identityId));
+    if (identities.size > 1) {
+      throw new Error('A credential chain cannot mix accounts from different logins — assign a lane to the other account directly instead of adding it to this chain.');
+    }
+    state.chain = filtered;
     this.recomputeActive(state);
     await this.persist();
     return this.publicState(state);

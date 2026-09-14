@@ -304,3 +304,33 @@ describe('account identity', () => {
     assert.notEqual(byId['mystery-key']!.identityId, byId['personal-sub']!.identityId);
   });
 });
+
+describe('credential chains stay within one identity', () => {
+  it('refuses a chain that spans two different logins', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription');
+
+    await assert.rejects(
+      instance.setChain('claude', ['work-sub', 'personal-sub']),
+      /different logins/
+    );
+  });
+
+  it('leaves the existing chain untouched after a refused setChain', async () => {
+    const instance = await broker();
+    await instance.upsertAccount('claude', 'personal-sub', 'subscription', 'personal · subscription');
+
+    await assert.rejects(instance.setChain('claude', ['work-sub', 'personal-sub']));
+
+    const [state] = instance.list().filter(entry => entry.provider === 'claude');
+    assert.deepEqual(state!.chain, ['work-sub', 'work-credits'], 'a rejected setChain must not partially apply');
+  });
+
+  it('still accepts a chain within one identity', async () => {
+    const instance = await broker();
+
+    const state = await instance.setChain('claude', ['work-credits', 'work-sub']);
+
+    assert.deepEqual(state.chain, ['work-credits', 'work-sub']);
+  });
+});
