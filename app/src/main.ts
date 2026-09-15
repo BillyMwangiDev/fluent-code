@@ -40,6 +40,7 @@ import {
   type ExplorerScope
 } from './coordination-explorer';
 import {currentProject} from './project-scope';
+import {leadLoad, sessionTree} from './session-tree';
 
 const root = document.getElementById('app')!;
 
@@ -2739,7 +2740,7 @@ async function renderSessions(main: HTMLElement) {
     h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checks', 'checkout', 'ready in', 'last active', 'actions'].map(label => h('th', {}, [label])))])
   );
   const tbody = h('tbody');
-  for (const session of sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
+  for (const {session, depth} of sessionTree(sessions)) {
     const name = session.task?.trim() || session.directory.split('/').filter(Boolean).pop() || session.directory;
     const isLive = session.status === 'running' || session.status === 'starting';
     const actions = h('div', {class: 'session-actions'});
@@ -2768,7 +2769,12 @@ async function renderSessions(main: HTMLElement) {
     });
     actions.append(session.archivedAt ? restore : archive, remove);
     const row = h('tr', {}, [
-      h('td', {}, [h('div', {class: 'session-name'}, [name, ...(session.error ? [h('p', {class: 'error'}, [session.error])] : [])])]),
+      h('td', {}, [h('div', {class: `session-name${depth ? ' session-lane' : ''}`}, [
+        depth ? `↳ ${name}` : name,
+        ...(session.lead ? [h('span', {class: 'pill lead-pill'}, [leadLoad(session, allSessions) ?? 'lead'])] : []),
+        ...(session.parentSessionId ? [h('p', {class: 'meta'}, [`started by lead ${session.parentSessionId.slice(0, 8)}`])] : []),
+        ...(session.error ? [h('p', {class: 'error'}, [session.error])] : [])
+      ])]),
       h('td', {}, [session.model ? `${providerLabel[session.provider]} · ${session.model}` : providerLabel[session.provider]]),
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
@@ -2848,9 +2854,12 @@ async function renderNewSession(main: HTMLElement) {
   const taskInput = h('textarea', {placeholder: 'what should this session start with? (optional)'});
   const isolateInput = h('input', {type: 'checkbox'}) as HTMLInputElement;
   const isolateLabel = h('label', {class: 'check-label'}, [isolateInput, ' run in an isolated Git worktree']);
+  const leadInput = h('input', {type: 'checkbox'}) as HTMLInputElement;
+  const leadBudget = h('input', {type: 'number', min: '1', max: '10', step: '1', value: '3', class: 'lead-budget', 'aria-label': 'Lane budget'}) as HTMLInputElement;
+  const leadLabel = h('label', {class: 'check-label'}, [leadInput, ' lead session — may start and direct up to ', leadBudget, ' lanes of its own at once']);
   main.append(
     h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['working directory']), directoryField(dirInput), h('p', {class: 'section-sub'}, ['browse folders on this computer, or enter a path'])]),
-    h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['starting task (optional)']), taskInput, isolateLabel, h('p', {class: 'section-sub'}, ['recommended for parallel agents — creates a separate checkout beside the project'])])
+    h('div', {class: 'field'}, [h('label', {class: 'field-label'}, ['starting task (optional)']), taskInput, isolateLabel, h('p', {class: 'section-sub'}, ['recommended for parallel agents — creates a separate checkout beside the project']), leadLabel, h('p', {class: 'section-sub'}, ['each lane a lead starts is a full agent on your account; it appears under this session, where you can open or stop it'])])
   );
 
   // Headroom is shown where the decision is made, and it never blocks the button: the advice is
@@ -2884,7 +2893,7 @@ async function renderNewSession(main: HTMLElement) {
     startNotice.textContent = 'starting session…';
     try {
       setWorkspacePath(directory);
-      const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked});
+      const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked, lead: leadInput.checked ? {maxLanes: Number(leadBudget.value)} : undefined});
       navigate({name: 'active-session', sessionId: summary.id});
     } catch (error) {
       const message = actionErrorText(error);
@@ -3106,7 +3115,7 @@ async function renderLaneGrid(main: HTMLElement, lanes: SessionSummary[]) {
     const screen = h('div', {class: 'lane-terminal'});
     grid.append(h('article', {class: 'lane-tile', 'data-session-id': lane.id}, [
       h('header', {class: 'lane-tile-head'}, [
-        h('label', {class: 'check-label'}, [pick, ` ${lane.provider} · ${lane.id.slice(0, 8)}`]),
+        h('label', {class: 'check-label'}, [pick, ` ${lane.provider} · ${lane.id.slice(0, 8)}${lane.lead ? ' · lead' : ''}${lane.parentSessionId ? ` · ↳ lead ${lane.parentSessionId.slice(0, 8)}` : ''}`]),
         statusPill,
         h('div', {class: 'actions'}, [open, stop])
       ]),
@@ -3141,10 +3150,49 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
   const review = h('div', {class: 'review-panel'});
   const terminalContainer = h('div', {id: 'terminal'});
   let currentRun: Run | undefined;
-  main.append(header, banner, review, terminalContainer, contextComposer(() => [sessionId]));
+  const lanesPanel = h('div', {class: 'lead-lanes'});
+  let laneSessions: SessionSummary[] = [];
+  let currentLeadPill: HTMLElement | undefined;
+  main.append(header, banner, lanesPanel, review, terminalContainer, contextComposer(() => [sessionId]));
+
+  /** The lanes this lead started — each a full agent the user can open or stop from here. */
+  async function refreshLanes(summary: SessionSummary) {
+    if (!summary.lead) {
+      lanesPanel.innerHTML = '';
+      return;
+    }
+    const budget = summary.lead.maxLanes;
+    laneSessions = (await api.listSessions()).filter(session => session.parentSessionId === sessionId);
+    if (currentLeadPill) currentLeadPill.textContent = leadLoad(summary, laneSessions) ?? 'lead';
+    const isLive = (lane: SessionSummary) => lane.status === 'running' || lane.status === 'starting';
+    lanesPanel.innerHTML = '';
+    lanesPanel.append(h('div', {class: 'card'}, [
+      h('h3', {}, [`lanes started by this lead · ${laneSessions.filter(isLive).length}/${budget} running`]),
+      ...(laneSessions.length === 0
+        ? [h('p', {class: 'section-sub'}, ['This lead has not started any lanes yet.'])]
+        : laneSessions.map(lane => {
+            const open = h('button', {class: 'btn', type: 'button'}, ['open']);
+            open.addEventListener('click', () => navigate({name: 'active-session', sessionId: lane.id}));
+            const stop = h('button', {class: 'btn', type: 'button'}, ['stop']);
+            stop.disabled = !isLive(lane);
+            stop.addEventListener('click', async () => {
+              stop.disabled = true;
+              await api.stop(lane.id).catch(showActionError);
+              void refreshLanes(summary);
+            });
+            return h('div', {class: 'option-row'}, [
+              h('span', {class: 'label'}, [`${providerLabel[lane.provider]} · ${lane.id.slice(0, 8)}`]),
+              h('span', {class: 'meta'}, [`${lane.status} · ${lane.task?.split('\n')[0]?.slice(0, 80) || 'no prompt'}`]),
+              h('div', {class: 'actions'}, [open, stop])
+            ]);
+          }))
+    ]));
+  }
 
   function renderHeader(summary: SessionSummary) {
     header.innerHTML = '';
+    currentLeadPill = summary.lead ? h('span', {class: 'pill lead-pill'}, [leadLoad(summary, laneSessions) ?? 'lead']) : undefined;
+    void refreshLanes(summary);
     const sessionName = summary.task?.trim() || summary.directory.split('/').filter(Boolean).at(-1) || summary.directory;
     const stopButton = h('button', {class: 'btn'}, ['stop session']);
     stopButton.disabled = summary.status !== 'running';
@@ -3253,6 +3301,13 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
           h('span', {class: 'pill status-default'}, [summary.model ? `${providerLabel[summary.provider]} · ${summary.model}` : providerLabel[summary.provider]]),
           h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
           h('span', {class: `pill status-${summary.status}`}, [summary.status]),
+          ...(currentLeadPill ? [currentLeadPill] : []),
+          ...(summary.parentSessionId ? [(() => {
+            const parent = summary.parentSessionId;
+            const link = h('button', {class: 'btn pill-button', type: 'button'}, [`started by lead ${parent.slice(0, 8)}`]);
+            link.addEventListener('click', () => navigate({name: 'active-session', sessionId: parent}));
+            return link;
+          })()] : []),
           ...(currentRun ? [h('span', {class: `pill status-${currentRun.state}`}, [`run · ${currentRun.state}${currentRun.delivery === 'unknown' ? ' · delivery review' : ''}`])] : []),
           ...(currentRun?.checkpoint ? [h('span', {class: 'pill'}, [`checkpoint · ${currentRun.checkpoint.gitRef?.slice(0, 8) ?? 'no git ref'} · ${currentRun.checkpoint.workingTree}`])] : []),
           ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),

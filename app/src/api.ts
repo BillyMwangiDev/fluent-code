@@ -8,7 +8,7 @@ export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidi
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';
-export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
+export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'session.lead' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
 export type ApprovalRecord = {id: string; action: ApprovalAction; target: string; commandHash?: string; baseSha?: string; issuedAt: string; expiresAt: string; consumedAt?: string};
 
 export type SessionSummary = {
@@ -30,6 +30,8 @@ export type SessionSummary = {
   warmedPaths?: string[];
   verification?: VerificationStatus;
   archivedAt?: string;
+  lead?: {maxLanes: number};
+  parentSessionId?: string;
 };
 
 export type FallbackGuidance = {
@@ -306,11 +308,12 @@ export function selectRemoteSocket(socketPath?: string) {
 export const api = {
   ping: () => daemonRequest<{ok: boolean; pid: number; protocolVersion: number}>('ping'),
   listSessions: (includeArchived = false) => daemonRequest<SessionSummary[]>('sessions.list', includeArchived ? {includeArchived: true} : {}),
-  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean}) => {
+  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}}) => {
     const approval = params.provider === 'claude'
       ? await issueApproval('project.configure', params.directory, 'configure Claude hooks')
       : undefined;
-    return daemonRequest<SessionSummary>('sessions.create', {...params, approvalId: approval?.id});
+    const leadApproval = params.lead ? await issueApproval('session.lead', params.directory, `lead ${params.lead.maxLanes}`) : undefined;
+    return daemonRequest<SessionSummary>('sessions.create', {...params, approvalId: approval?.id, leadApprovalId: leadApproval?.id});
   },
   getSession: (sessionId: string) => daemonRequest<SessionSnapshot>('sessions.get', {sessionId}),
   getRun: (runId: string) => daemonRequest<Run>('runs.get', {runId}),

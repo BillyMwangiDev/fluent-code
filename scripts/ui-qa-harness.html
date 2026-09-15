@@ -23,7 +23,8 @@
           id: 'lane-claude-01', provider: 'claude', command: 'claude', directory: project,
           projectDirectory: project, worktreePath: project + '/.fluent-worktrees/fluent-code/lane-claude-01',
           task: 'Refine desktop shell and credential states', status: 'running', accountId: 'claude-subscription',
-          createdAt: now, updatedAt: now, prepareMs: 1200, warmedPaths: ['app/src', 'app/styles.css'], verification: 'passed'
+          createdAt: now, updatedAt: now, prepareMs: 1200, warmedPaths: ['app/src', 'app/styles.css'], verification: 'passed',
+          lead: {maxLanes: 3}
         };
         const credentials = [
           {
@@ -68,11 +69,12 @@
           'ping': () => ({ok: true, pid: 4242}),
           'sessions.list': () => [
             session,
-            {...session, id: 'lane-codex-02', provider: 'codex', task: 'Review platform-specific IPC', accountId: 'codex-api', status: 'running', verification: 'running'},
-            {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}
+            {...session, id: 'lane-codex-02', provider: 'codex', task: 'Review platform-specific IPC', accountId: 'codex-api', status: 'running', verification: 'running', lead: undefined},
+            {...session, id: 'lane-child-04', provider: 'codex', task: 'Parse the config file', accountId: 'codex-api', status: 'running', lead: undefined, parentSessionId: 'lane-claude-01', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-child-04'},
+            {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', lead: undefined, archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}
           ],
           'sessions.get': () => ({...session, output: '› pnpm check:frontend\n✓ typecheck passed\n'}),
-          'sessions.subscribe': () => ({...session, output: '› inspect the current desktop shell\n\nI am reviewing the session chrome and the credential surface before making changes.\n\n$ pnpm run check:frontend\n✓ typecheck passed\n'}),
+          'sessions.subscribe': params => ({...(byMethod['sessions.list']().find(item => item.id === params?.sessionId) ?? session), output: '› inspect the current desktop shell\n\nI am reviewing the session chrome and the credential surface before making changes.\n\n$ pnpm run check:frontend\n✓ typecheck passed\n'}),
           'sessions.create': params => ({...session, provider: params.provider || session.provider, directory: params.directory || session.directory, task: params.task || session.task, accountId: params.accountId || session.accountId}),
           'sessions.resize': () => ({resized: true}),
           'sessions.send': () => ({sent: true}),
@@ -155,7 +157,7 @@
         window.__TAURI_INTERNALS__ = {
           invoke: async (command, args = {}) => {
             if (command === 'daemon_request') return (byMethod[args.method] || (() => null))(args.params || {});
-            if (command === 'sessions_subscribe') return byMethod['sessions.subscribe']();
+            if (command === 'sessions_subscribe') return byMethod['sessions.subscribe'](args);
             if (command === 'plugin:dialog|open') return project;
             if (command.startsWith('plugin:event|')) return ++callbackId;
             return null;

@@ -634,6 +634,12 @@ table.sessions td {
 table.sessions tr:hover td { background: var(--bg-raised); cursor: pointer; }
 .session-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .session-actions .btn { padding: 5px 7px; font-size: 11px; }
+.session-name.session-lane { padding-left: 14px; color: var(--fg-muted); }
+.session-name .meta { margin: 2px 0 0; font-size: 11px; }
+.lead-pill { margin-left: 8px; }
+button.btn.pill-button { padding: 2px 10px; border-radius: var(--radius-chip); font-size: 11px; }
+.lead-lanes .card { margin-bottom: 16px; }
+.field .check-label input.lead-budget { width: 4.5em; }
 
 .field-label {
   color: var(--fg-muted);
