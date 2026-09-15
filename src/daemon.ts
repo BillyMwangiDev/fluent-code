@@ -32,6 +32,9 @@ import {ApprovalRecords, type ApprovalAction} from './security/approval-records.
 import {ExtensionSourcePolicy, type ExtensionSourcePolicyMode} from './security/extension-source-policy.js';
 import {RunEventBus} from './execution/event-bus.js';
 import {RecipeRunner} from './recipe-runner.js';
+import {isLaneProvider} from './lane-commands.js';
+import {assertTicketReady, isLiveLane, laneReadiness, renderLanes, renderWait, screenText, ticketBrief, validLeadBudget} from './lead-lanes.js';
+import {coordCommand} from './agent-briefing.js';
 
 const socketPath = daemonSocketPath();
 const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
@@ -462,6 +465,112 @@ function activeSessionCount(provider: ProviderId) {
   return manager.list().filter(session => session.provider === provider && (session.status === 'running' || session.status === 'starting')).length;
 }
 
+/**
+ * A lead lane directing the lanes it started (docs/superpowers/specs/2026-09-15-lead-sessions-design.md).
+ * Authority comes only from the user's grant on the lead's own session record, and reaches only
+ * lanes whose `parentSessionId` is that lead — never lanes the user or another lead started.
+ */
+async function laneCommand(params: Extract<RpcRequest, {method: 'agent.lane'}>['params']) {
+  const {session: caller, project} = laneFor(params.cwd, params.sessionId);
+  const lead = caller.lead;
+  if (!lead) {
+    throw new Error(caller.parentSessionId
+      ? `Only a lead session can start or direct lanes. This lane was started by lead ${shortId(caller.parentSessionId)}; message it with fluent-coord send instead.`
+      : 'Only a lead session can start or direct lanes. The user can start a lead session from Fluent Code.');
+  }
+  const ownLanes = () => manager.list().filter(session => session.parentSessionId === caller.id);
+  const ownLane = (reference: string) => {
+    const matches = ownLanes().filter(session => session.id === reference || session.id.startsWith(reference));
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length === 0) throw new Error(`${reference} is not one of your lanes — run fluent-coord lane list`);
+    throw new Error(`${reference} matches ${matches.length} of your lanes — use more of the id`);
+  };
+  const bounded = (value: unknown, fallback: number, max: number) =>
+    Math.min(Math.max(Math.trunc(typeof value === 'number' && Number.isFinite(value) ? value : fallback), 1), max);
+
+  switch (params.action) {
+    case 'list':
+      return {text: renderLanes(caller, ownLanes(), coordination.get(project))};
+    case 'start': {
+      if (!isLaneProvider(params.provider)) throw new Error(`Unknown provider ${String(params.provider)}`);
+      const provider = params.provider;
+      const running = ownLanes().filter(isLiveLane).length;
+      if (running >= lead.maxLanes) {
+        throw new Error(`Lane budget reached: ${running}/${lead.maxLanes} running. Stop one of your lanes, or wait for one to finish, before starting another.`);
+      }
+      const board = coordination.get(project);
+      const task = params.taskId ? resolveId(board.tasks, params.taskId) : undefined;
+      if (task) assertTicketReady(board, task);
+      const prompt = [params.prompt?.trim(), task ? ticketBrief(task, board, caller.id, coordCommand()) : undefined].filter(Boolean).join('\n\n');
+      if (!prompt) throw new Error('Give the lane a prompt, or a ticket with --task');
+      // The user's lead grant for this project covers the Claude hook write a sessions.create
+      // request would otherwise need its own approval for.
+      const lane = await manager.create({
+        provider,
+        directory: project,
+        task: prompt,
+        env: await broker.resolveEnv(provider),
+        accountId: broker.list().find(state => state.provider === provider)?.activeAccountId,
+        isolate: !params.shared,
+        parentSessionId: caller.id
+      });
+      if (task) await coordination.assignTask(project, task.id, {sessionId: lane.id, provider}, caller.id);
+      let verdict: ReturnType<typeof assessAdmission> | undefined;
+      try {
+        verdict = assessAdmission(provider);
+      } catch {
+        // Headroom advice is never the reason a lane start reports failure.
+      }
+      return {text: [
+        `started ${shortId(lane.id)} ${provider} ${lane.worktreePath ? 'isolated' : 'shared'} lanes ${running + 1}/${lead.maxLanes}`,
+        ...(task ? [`assigned ${shortId(task.id)}`] : []),
+        // Advisory only (spec §2.4): headroom is reported, never a reason the lane did not start.
+        ...(verdict && verdict.decision !== 'clear' ? [`headroom ${verdict.decision} — ${verdict.reasons[0] ?? 'see Fluent Code'}`] : [])
+      ].join('\n')};
+    }
+    case 'assign': {
+      const lane = ownLane(params.lane);
+      if (!isLiveLane(lane)) throw new Error(`Lane ${shortId(lane.id)} is ${lane.status}`);
+      const board = coordination.get(project);
+      const task = resolveId(board.tasks, params.taskId);
+      assertTicketReady(board, task);
+      // Delivery first, as in the orchestration screen: the board never says a lane has a ticket
+      // its terminal did not accept.
+      await manager.inject(lane.id, ticketBrief(task, board, caller.id, coordCommand()));
+      await coordination.assignTask(project, task.id, {sessionId: lane.id, provider: lane.provider}, caller.id);
+      return {text: `assigned ${shortId(task.id)} to ${shortId(lane.id)} — it has the ticket brief`};
+    }
+    case 'read': {
+      const lane = ownLane(params.lane);
+      const {cols, rows} = manager.terminalSize(lane.id);
+      const screen = await screenText(manager.get(lane.id).output, cols, rows, bounded(params.lines, 40, 200));
+      return {text: `screen ${shortId(lane.id)} ${lane.status}\n${screen || '(blank)'}`};
+    }
+    case 'wait': {
+      const targets = params.lanes?.length ? params.lanes.map(reference => ownLane(reference).id) : ownLanes().map(session => session.id);
+      if (targets.length === 0) throw new Error('You have no lanes to wait on');
+      const timeoutSeconds = bounded(params.timeoutSeconds, 60, 540);
+      const deadline = Date.now() + timeoutSeconds * 1000;
+      for (;;) {
+        const lanes = manager.list().filter(session => targets.includes(session.id));
+        const board = coordination.get(project);
+        const ready = lanes.filter(session => laneReadiness(session, caller.id, board));
+        if (ready.length > 0 || Date.now() >= deadline) {
+          return {text: renderWait(ready.map(session => session.id), timeoutSeconds, renderLanes(caller, lanes, board))};
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    case 'stop': {
+      const lane = ownLane(params.lane);
+      if (!isLiveLane(lane)) return {text: `${shortId(lane.id)} is already ${lane.status}`};
+      await manager.stop(lane.id);
+      return {text: `stopped ${shortId(lane.id)}${lane.worktreePath ? ' — its worktree is kept for review' : ''}`};
+    }
+  }
+  throw new Error('Unknown lane action');
+}
+
 async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; sessionId?: string; event: string; payload: Record<string, unknown>}) {
   const session = callerLane(cwd, sessionId);
   if (!session) return {handled: false};
@@ -497,14 +606,22 @@ async function dispatch(request: RpcRequest) {
     case 'ping': return {ok: true, pid: process.pid, protocolVersion: fluentProtocolVersion};
     case 'sessions.list': return manager.list(request.params?.includeArchived);
     case 'sessions.create': {
+      // Letting a session start and direct other agents spends quota on the user's behalf, so the
+      // grant and its budget are approval-bound here, never only a frontend checkbox. Validated
+      // before any approval is consumed.
+      const lead = request.params.lead ? {maxLanes: validLeadBudget(request.params.lead.maxLanes)} : undefined;
       // Claude's additive hook relay writes `.claude/settings.json` in the selected project.
       // Creating a terminal is user-initiated, but that project configuration write still needs a
       // daemon-issued, action-bound consent record rather than a frontend-only affordance.
       if (request.params.provider === 'claude') {
         await requireApproval(request.params.approvalId, 'project.configure', request.params.directory, 'configure Claude hooks');
       }
+      if (lead) await requireApproval(request.params.leadApprovalId, 'session.lead', request.params.directory, `lead ${lead.maxLanes}`);
       return manager.create({
         ...request.params,
+        lead,
+        // Only a lead's own `lane start` may record a parent; a raw request cannot forge one.
+        parentSessionId: undefined,
         env: await broker.resolveEnv(request.params.provider, request.params.accountId),
         accountId: request.params.accountId ?? broker.list().find(state => state.provider === request.params.provider)?.activeAccountId
       });
@@ -616,6 +733,7 @@ async function dispatch(request: RpcRequest) {
       for (const socket of streamingSockets) pushEvent(socket, {event: 'evals.finished', run: result});
       return result;
     }
+    case 'agent.lane': return laneCommand(request.params);
     case 'agent.handoff': {
       const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       const target = manager.list().find(candidate => candidate.id === request.params.to || candidate.id.startsWith(request.params.to));

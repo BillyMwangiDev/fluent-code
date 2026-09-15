@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {after, before, describe, it} from 'node:test';
 import {daemonRequest} from './daemon-client.js';
-import type {SessionSummary} from './daemon-protocol.js';
+import type {CoordinationState, SessionSummary} from './daemon-protocol.js';
 
 const run = promisify(execFile);
 const sourceDirectory = fileURLToPath(new URL('.', import.meta.url));
@@ -218,5 +218,85 @@ describe('an agent coordinating from its own working directory', () => {
 
   it('prints usage rather than failing when asked for help', async () => {
     assert.match(await coord(laneA.directory, 'help'), /fluent-coord status/);
+  });
+});
+
+describe('a lead lane directing other lanes', () => {
+  let lead: SessionSummary;
+  const short = (id: string) => id.slice(0, 8);
+  const ownLanes = async () => (await daemonRequest<SessionSummary[]>('sessions.list')).filter(session => session.parentSessionId === lead.id);
+
+  before(async () => {
+    const approval = await daemonRequest<{id: string}>('approvals.issue', {action: 'session.lead', target: project, command: 'lead 2'});
+    lead = await daemonRequest<SessionSummary>('sessions.create', {provider: 'codex', directory: project, isolate: true, task: 'lead the config work', lead: {maxLanes: 2}, leadApprovalId: approval.id});
+    await waitFor(async () => (await daemonRequest<SessionSummary>('sessions.get', {sessionId: lead.id})).status === 'running', 'the lead to be running');
+  });
+
+  it('needs the user\'s approval before a session can lead', async () => {
+    await assert.rejects(() => daemonRequest('sessions.create', {provider: 'codex', directory: project, isolate: true, lead: {maxLanes: 2}}), /Approval is required for session\.lead/);
+  });
+
+  it('refuses lane commands from a lane the user did not start as a lead', async () => {
+    await assert.rejects(() => coord(laneB.directory, 'lane', 'list'), /Only a lead session can start or direct lanes/);
+  });
+
+  it('starts lanes within its budget and records itself as their lead', async () => {
+    assert.equal(await coord(lead.directory, 'lane', 'list'), 'lanes 0/2');
+    const reply = await coord(lead.directory, 'lane', 'start', 'codex', 'write', 'the', 'parser');
+    const id = reply.match(/^started ([0-9a-f]{8}) codex isolated lanes 1\/2$/m)?.[1];
+    assert.ok(id, reply);
+    const lanes = await ownLanes();
+    assert.equal(lanes.length, 1);
+    assert.equal(short(lanes[0]!.id), id);
+    assert.match(await coord(lead.directory, 'lane', 'list'), new RegExp(`^${id} codex (starting|running) `, 'm'));
+  });
+
+  it('stops at the budget the user set', async () => {
+    assert.match(await coord(lead.directory, 'lane', 'start', 'claude', 'write', 'the', 'tests'), /^started [0-9a-f]{8} claude isolated lanes 2\/2$/m);
+    await assert.rejects(() => coord(lead.directory, 'lane', 'start', 'codex', 'one', 'too', 'many'), /Lane budget reached: 2\/2/);
+  });
+
+  it('does not let a lane it started lead in turn', async () => {
+    await waitFor(async () => (await ownLanes()).every(session => session.status === 'running'), 'the lead\'s lanes to be running');
+    const [child] = await ownLanes();
+    await assert.rejects(() => coord(child!.directory, 'lane', 'list'), new RegExp(`started by lead ${short(lead.id)}`));
+  });
+
+  it('assigns a ticket by pasting its brief into the lane', async () => {
+    const child = (await ownLanes()).find(session => session.provider === 'codex')!;
+    const taskId = (await coord(lead.directory, 'task', 'add', 'Parse the config file')).replace('added ', '');
+
+    assert.equal(await coord(lead.directory, 'lane', 'assign', short(child.id), taskId), `assigned ${taskId} to ${short(child.id)} — it has the ticket brief`);
+    const board = await daemonRequest<CoordinationState>('coordination.get', {project});
+    assert.equal(board.tasks.find(task => task.id.startsWith(taskId))?.sessionId, child.id);
+    await waitFor(async () => (await coord(lead.directory, 'lane', 'read', short(child.id))).includes('Parse the config file'), 'the brief to show on the lane screen');
+  });
+
+  it('waits on a lane, and wakes when the lane reports its ticket done', async () => {
+    const child = (await ownLanes()).find(session => session.provider === 'codex')!;
+    const taskId = short((await daemonRequest<CoordinationState>('coordination.get', {project})).tasks.find(task => task.sessionId === child.id)!.id);
+
+    assert.match(await coord(lead.directory, 'lane', 'wait', short(child.id), '--timeout', '1'), /^timeout after 1s — no lane is ready$/m);
+    await coord(child.directory, 'task', 'done', taskId);
+    const woke = await coord(lead.directory, 'lane', 'wait', short(child.id), '--timeout', '10');
+    assert.match(woke, new RegExp(`^ready ${short(child.id)}$`, 'm'));
+    assert.match(woke, new RegExp(`^${short(child.id)} codex running done `, 'm'));
+  });
+
+  it('wakes when a lane sends its lead a message', async () => {
+    const child = (await ownLanes()).find(session => session.provider === 'claude')!;
+    await coord(child.directory, 'send', short(lead.id), 'blocked on the schema — which format wins?');
+
+    const woke = await coord(lead.directory, 'lane', 'wait', short(child.id), '--timeout', '10');
+    assert.match(woke, new RegExp(`^${short(child.id)} claude running mail `, 'm'));
+  });
+
+  it('stops only lanes it started, and a stopped lane frees its budget slot', async () => {
+    await assert.rejects(() => coord(lead.directory, 'lane', 'stop', short(laneA.id)), /not one of your lanes/);
+    const child = (await ownLanes()).find(session => session.provider === 'codex')!;
+
+    assert.match(await coord(lead.directory, 'lane', 'stop', short(child.id)), new RegExp(`^stopped ${short(child.id)}`));
+    await waitFor(async () => (await ownLanes()).find(session => session.id === child.id)?.status === 'stopped', 'the lane to stop');
+    assert.match(await coord(lead.directory, 'lane', 'start', 'codex', 'take', 'over'), /^started [0-9a-f]{8} codex isolated lanes 2\/2$/m);
   });
 });

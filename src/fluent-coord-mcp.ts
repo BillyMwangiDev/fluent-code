@@ -12,12 +12,12 @@ import {daemonRequest} from './daemon-client.js';
 export const fluentCoordTool = {
   name: 'fluent_coord',
   title: 'Fluent Code coordination',
-  description: 'Read or update the shared Fluent Code task board, file claims, decisions, handoffs, and mailbox for this agent lane. Use status before editing and claim paths before modifying them.',
+  description: 'Read or update the shared Fluent Code task board, file claims, decisions, handoffs, and mailbox for this agent lane. Use status before editing and claim paths before modifying them. A lead session can also start and direct its own lanes with action lane.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      action: {type: 'string', enum: ['status', 'claim', 'release', 'note', 'task', 'send', 'inbox', 'handoff']},
+      action: {type: 'string', enum: ['status', 'claim', 'release', 'note', 'task', 'send', 'inbox', 'handoff', 'lane']},
       since: {type: 'string', description: 'Cursor returned by a prior status call.'},
       paths: {type: 'array', items: {type: 'string'}, description: 'Repository-relative paths for claim or release.'},
       summary: {type: 'string', description: 'Decision or handoff summary.'},
@@ -26,7 +26,15 @@ export const fluentCoordTool = {
       taskId: {type: 'string', description: 'Task id for task start or done.'},
       to: {type: 'string', description: 'Short lane id for send or handoff.'},
       body: {type: 'string', description: 'Message body for send.'},
-      peek: {type: 'boolean', description: 'Leave inbox entries unread.'}
+      peek: {type: 'boolean', description: 'Leave inbox entries unread.'},
+      laneAction: {type: 'string', enum: ['start', 'list', 'assign', 'read', 'wait', 'stop'], description: 'Lead sessions only: what to do with your own lanes.'},
+      provider: {type: 'string', description: 'Provider for lane start, such as claude or codex.'},
+      prompt: {type: 'string', description: 'First prompt for lane start.'},
+      shared: {type: 'boolean', description: 'Run a started lane in the project checkout instead of its own worktree.'},
+      lane: {type: 'string', description: 'Short lane id for lane assign, read, or stop.'},
+      lanes: {type: 'array', items: {type: 'string'}, description: 'Short lane ids for lane wait; all of your lanes when omitted.'},
+      lines: {type: 'number', description: 'Screen lines for lane read.'},
+      timeoutSeconds: {type: 'number', description: 'Longest lane wait, in seconds.'}
     },
     required: ['action']
   },
@@ -55,6 +63,39 @@ function paths(value: unknown) {
     throw new Error('paths must contain one or more non-empty strings');
   }
   return value.map(path => path.trim());
+}
+
+/** A lead's lane operation, validated to the same shape `fluent-coord lane` sends. */
+function laneOperation(args: Arguments) {
+  const action = string(args.laneAction, 'laneAction');
+  switch (action) {
+    case 'start':
+      return {
+        action, provider: string(args.provider, 'provider'),
+        ...(args.prompt === undefined ? {} : {prompt: string(args.prompt, 'prompt')}),
+        ...(args.taskId === undefined ? {} : {taskId: string(args.taskId, 'taskId')}),
+        ...(args.shared === true ? {shared: true} : {})
+      };
+    case 'list':
+      return {action};
+    case 'assign':
+      return {action, lane: string(args.lane, 'lane'), taskId: string(args.taskId, 'taskId')};
+    case 'read':
+      return {action, lane: string(args.lane, 'lane'), ...(typeof args.lines === 'number' ? {lines: args.lines} : {})};
+    case 'wait': {
+      if (args.lanes !== undefined && (!Array.isArray(args.lanes) || args.lanes.some(lane => typeof lane !== 'string' || !lane.trim()))) {
+        throw new Error('lanes must be a list of lane ids');
+      }
+      return {
+        action,
+        ...(Array.isArray(args.lanes) ? {lanes: (args.lanes as string[]).map(lane => lane.trim())} : {}),
+        ...(typeof args.timeoutSeconds === 'number' ? {timeoutSeconds: args.timeoutSeconds} : {})
+      };
+    }
+    case 'stop':
+      return {action, lane: string(args.lane, 'lane')};
+  }
+  throw new Error('laneAction must be start, list, assign, read, wait, or stop');
 }
 
 function textResult(value: unknown): ToolResult {
@@ -93,6 +134,8 @@ export async function callFluentCoord(args: Arguments, cwd = process.cwd(), requ
       return textResult(await request('agent.inbox', {...lane, peek: args.peek === true}));
     case 'handoff':
       return textResult(await request('agent.handoff', {...lane, to: string(args.to, 'to'), summary: string(args.summary, 'summary')}));
+    case 'lane':
+      return textResult(await request('agent.lane', {...lane, ...laneOperation(args)}));
   }
   throw new Error(`Unsupported action: ${action}`);
 }

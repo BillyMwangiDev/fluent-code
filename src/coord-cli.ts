@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {daemonRequest} from './daemon-client.js';
+import {parseLaneArguments} from './lane-commands.js';
 
 /**
  * The coordination surface agents actually use.
@@ -32,6 +33,17 @@ const usage = `fluent-coord — coordination between agent lanes
   fluent-coord send LANE MESSAGE...      message another lane; it reads it when it next checks
   fluent-coord inbox                     read your unread messages, oldest first
   fluent-coord handoff LANE SUMMARY...   propose handing your work to another lane
+
+Lead sessions only (the user started this lane as a lead):
+  fluent-coord lane start PROVIDER [--shared] [--task ID] PROMPT...
+                                         start a lane of your own
+  fluent-coord lane list                 your lanes, and which of them need you
+  fluent-coord lane assign LANE TASK     give one of your lanes a ticket from the board
+  fluent-coord lane read LANE [--lines N]
+                                         the end of that lane's terminal screen
+  fluent-coord lane wait [LANE...] [--timeout SECONDS]
+                                         return when a lane finishes, messages you, or stops
+  fluent-coord lane stop LANE            stop one of your lanes
 
 Lanes may be different products — a Codex lane and a Claude lane are peers here.
 Run it from inside your working directory; that is how it knows which lane you are.
@@ -78,6 +90,8 @@ async function main(argv: string[]) {
       if (!to) throw new Error('usage: fluent-coord handoff LANE SUMMARY...');
       return print(await daemonRequest<Reply>('agent.handoff', {...lane, to, summary: summary.join(' ')}));
     }
+    case 'lane':
+      return print(await daemonRequest<Reply>('agent.lane', {...lane, ...parseLaneArguments(rest)}));
     default:
       throw new Error(`Unknown command ${command}\n\n${usage}`);
   }

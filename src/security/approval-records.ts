@@ -10,6 +10,7 @@ export type ApprovalAction =
   | 'worktree.rebase'
   | 'integration.merge'
   | 'session.delete'
+  | 'session.lead'
   | 'remote.configure'
   | 'remote.connect'
   | 'extension.install'

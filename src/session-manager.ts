@@ -7,7 +7,7 @@ import {promisify} from 'node:util';
 import {providerAdapter, providerLaunchArgs, resolveProviderExecutable} from './providers.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
-import {briefingArgs} from './agent-briefing.js';
+import {briefingArgs, leadDirection} from './agent-briefing.js';
 import {ptyRuntime} from './pty-runtime.js';
 import type {CredentialEnvironment, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
@@ -29,6 +29,9 @@ type LiveSession = {
   observationTimer?: NodeJS.Timeout;
   /** Settles only after the PTY exit path has written its final durable projection. */
   terminalExited?: Promise<void>;
+  /** The size the CLI is drawing for, once a view has resized it from the spawn default. */
+  cols?: number;
+  rows?: number;
   resolveTerminalExit?: () => void;
 };
 
@@ -174,7 +177,7 @@ export class SessionManager extends EventEmitter {
     return {...session.summary, output: session.output};
   }
 
-  async create({provider, directory, task, env, accountId, isolate}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean}) {
+  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; parentSessionId?: string}) {
     const adapter = providerAdapter(provider);
     const executable = resolveProviderExecutable(adapter);
     const now = new Date().toISOString();
@@ -209,7 +212,9 @@ export class SessionManager extends EventEmitter {
       projectDirectory: worktree?.projectDirectory,
       worktreePath: worktree?.path,
       prepareMs: worktree?.prepareMs,
-      warmedPaths: worktree?.warmedPaths
+      warmedPaths: worktree?.warmedPaths,
+      ...(lead ? {lead} : {}),
+      ...(parentSessionId ? {parentSessionId} : {})
     };
     const session: LiveSession = {summary, output: '', directory: sessionDirectory};
     this.sessions.set(summary.id, session);
@@ -230,7 +235,9 @@ export class SessionManager extends EventEmitter {
       // would otherwise start a lane nothing will stop.
       if (this.closing) throw new Error('fluentd is shutting down');
       const pty = await ptyRuntime();
-      terminal = pty.spawn(executable, [...adapter.args, ...providerLaunchArgs(provider, env), ...briefingArgs(provider), ...initialPromptArgs(provider, summary.task)], {
+      // A lead's instructions travel through the same per-CLI channels as the coordination briefing.
+      const direction = lead ? leadDirection(provider, lead.maxLanes, summary.task) : undefined;
+      terminal = pty.spawn(executable, [...adapter.args, ...providerLaunchArgs(provider, env), ...briefingArgs(provider, direction?.systemPrompt), ...initialPromptArgs(provider, direction ? direction.prompt : summary.task)], {
       cwd: sessionDirectory,
       env: applyCredentialEnvironment(env, {
         // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
@@ -337,7 +344,16 @@ export class SessionManager extends EventEmitter {
    * cols/rows) wraps and truncates against a differently-sized viewport. */
   resize(sessionId: string, cols: number, rows: number) {
     const session = this.sessions.get(sessionId);
-    session?.terminal?.resize(cols, rows);
+    if (!session?.terminal) return;
+    session.terminal.resize(cols, rows);
+    session.cols = cols;
+    session.rows = rows;
+  }
+
+  /** The size a lane's CLI is currently drawing for, so its screen can be replayed at that size. */
+  terminalSize(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    return {cols: session?.cols ?? 120, rows: session?.rows ?? 40};
   }
 
   async stop(sessionId: string) {

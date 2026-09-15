@@ -18,6 +18,8 @@ export const fluentProtocolVersion = 1;
  * transcript and optional structured-control protocol.
  */
 export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidia';
+/** Every provider Fluent can launch, for validating a provider an agent names in a command. */
+export const providerIds = ['claude', 'codex', 'gemini', 'qwen', 'glm', 'nvidia'] as const satisfies readonly ProviderId[];
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 
 export type SessionSummary = {
@@ -55,6 +57,11 @@ export type SessionSummary = {
   /** Set only after a stopped session is deliberately archived. Archived records remain local and
    * inspectable, but stay out of default session/lane lists. */
   archivedAt?: string;
+  /** Set only when the user started this session as a lead: it may start and direct up to
+   * `maxLanes` lanes of its own at once (docs/superpowers/specs/2026-09-15-lead-sessions-design.md). */
+  lead?: {maxLanes: number};
+  /** The lead session that started this lane, when a lead did. */
+  parentSessionId?: string;
 };
 
 export type SessionSnapshot = SessionSummary & {
@@ -343,10 +350,19 @@ export type DesignToolId = 'pen' | 'open-design';
 export type McpTarget = Extract<ProviderId, 'claude' | 'codex'>;
 export type DesignTool = {id: DesignToolId; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
 
+/** What a lead lane asks fluentd to do with the lanes it started. */
+export type LaneOperation =
+  | {action: 'start'; provider: ProviderId; prompt?: string; taskId?: string; shared?: boolean}
+  | {action: 'list'}
+  | {action: 'assign'; lane: string; taskId: string}
+  | {action: 'read'; lane: string; lines?: number}
+  | {action: 'wait'; lanes?: string[]; timeoutSeconds?: number}
+  | {action: 'stop'; lane: string};
+
 export type RpcRequest =
   | {id: string; method: 'ping'}
   | {id: string; method: 'sessions.list'; params?: {includeArchived?: boolean}}
-  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string}}
+  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes: number}; leadApprovalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */
@@ -378,6 +394,7 @@ export type RpcRequest =
   | {id: string; method: 'agent.handoff'; params: {cwd: string; sessionId?: string; to: string; summary: string}}
   | {id: string; method: 'agent.send'; params: {cwd: string; sessionId?: string; to: string; body: string}}
   | {id: string; method: 'agent.inbox'; params: {cwd: string; sessionId?: string; peek?: boolean}}
+  | {id: string; method: 'agent.lane'; params: {cwd: string; sessionId?: string} & LaneOperation}
   | {id: string; method: 'skills.status'}
   | {id: string; method: 'skills.install'; params?: {approvalId?: string}}
   | {id: string; method: 'evals.latest'}

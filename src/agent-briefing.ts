@@ -2,7 +2,7 @@ import {existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {delimiter} from 'node:path';
-import type {ProviderId} from './daemon-protocol.js';
+import {providerIds, type ProviderId} from './daemon-protocol.js';
 import {scriptRunner} from './script-runner.js';
 
 const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -61,4 +61,32 @@ export function coordinationBriefing(command = coordCommand()) {
  */
 export function briefingArgs(provider: ProviderId, briefing = coordinationBriefing()): string[] {
   return provider === 'claude' ? ['--append-system-prompt', briefing] : [];
+}
+
+/**
+ * What a lead lane is told on top of the coordination briefing: that the user let it direct a
+ * bounded number of lanes, the commands for doing so, and when delegation is worth its cost —
+ * every lane is a whole agent's tokens (docs/research/2026-09-13-agent-orchestration.md §2.1).
+ */
+export function leadBriefing(maxLanes: number, command = coordCommand()) {
+  return [
+    `You are a lead lane: the user has let you start and direct up to ${maxLanes} other agent lane${maxLanes === 1 ? '' : 's'} on this project at once. Each lane is a separate agent with its own terminal and, unless you pass --shared, its own Git worktree.`,
+    '',
+    `  ${command} lane start PROVIDER [--shared] [--task ID] PROMPT   start a lane (${providerIds.join(', ')})`,
+    `  ${command} lane list                          your lanes, their status, and which of them need you`,
+    `  ${command} lane assign LANE TASK              give one of your lanes a ticket from the board`,
+    `  ${command} lane read LANE [--lines N]         the end of that lane's terminal screen`,
+    `  ${command} lane wait [LANE...] [--timeout S]  return when a lane finishes, messages you, or stops`,
+    `  ${command} lane stop LANE`,
+    '',
+    `Delegate only work that splits into independent parts; each lane costs a whole agent's tokens. Put each part on the board with \`${command} task add\` first so the user can see it, give each lane one ticket, and use \`wait\` rather than repeatedly reading screens. Check what a lane reports before you build on it. Merging lanes stays with the user.`
+  ].join('\n');
+}
+
+/** Where a lead's instructions go: Claude Code's system-prompt flag, beside the coordination
+ * briefing; for providers without such a flag, ahead of the first prompt. */
+export function leadDirection(provider: ProviderId, maxLanes: number, task?: string, command = coordCommand()): {systemPrompt?: string; prompt?: string} {
+  const briefing = leadBriefing(maxLanes, command);
+  if (provider === 'claude') return {systemPrompt: `${coordinationBriefing(command)}\n\n${briefing}`, prompt: task};
+  return {prompt: [briefing, task?.trim()].filter(Boolean).join('\n\n')};
 }

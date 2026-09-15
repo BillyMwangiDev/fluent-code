@@ -119,7 +119,8 @@ ${command} handoff 9e01ab22 Router refactor is done and tested — please review
 
 A \`note\` goes into the shared project memory every lane can read. A \`handoff\` is *proposed*: the
 human decides whether it happens. You cannot assign work to another lane on your own, and neither
-can they to you.
+can they to you — unless the human started you as a *lead* lane. A lead's briefing lists the
+\`${command} lane\` commands it may use on the lanes it starts, within the budget the human set.
 
 ## The rules
 
