@@ -9,6 +9,9 @@ import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 type RemoteProfileInput = {name: string; host: string; port?: number; remoteSocket?: string; autoReconnect?: boolean};
 type StoredRemoteProfile = Partial<RemoteProfile> & {id?: unknown};
 const reconnectDelaysMs = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
+// ssh binds the forwarded socket only after it has connected (ConnectTimeout=8) and authenticated,
+// and until then every probe is refused at once. So the handshake gets time, not a number of tries.
+const handshakeBudgetMs = 20_000;
 
 const safeName = /^[^\u0000-\u001F\u007F]{1,80}$/;
 const safeUser = /^[A-Za-z0-9._-]{1,64}$/;
@@ -121,7 +124,7 @@ export class RemoteManager {
     let error = '';
     child.stderr?.on('data', chunk => { error += chunk.toString(); });
     child.once('spawn', () => {
-      void this.probe(profile.localSocket).then(result => {
+      void this.probe(profile.localSocket, () => this.processes.get(profileId) === child).then(result => {
         if (this.processes.get(profileId) !== child) return;
         if (result.ok) {
           profile.status = 'connected';
@@ -183,8 +186,10 @@ export class RemoteManager {
     await Promise.all(this.profiles.map(profile => this.disconnect(profile.id).catch(() => undefined)));
   }
   private require(id: string) { const profile = this.profiles.find(item => item.id === id); if (!profile) throw new Error('Remote profile not found'); return profile; }
-  private async probe(socketPath: string) {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
+  /** Waits for the tunnel to answer a Fluent handshake, for as long as ssh is still running. */
+  private async probe(socketPath: string, sshRunning: () => boolean) {
+    const deadline = Date.now() + handshakeBudgetMs;
+    while (sshRunning() && Date.now() < deadline) {
       const result = await new Promise<{ok: true} | {ok: false; error: string; retry: boolean}>(resolve => {
         const socket = connect(socketPath);
         let buffer = '';

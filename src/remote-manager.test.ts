@@ -6,9 +6,9 @@ import {join} from 'node:path';
 import {describe, it} from 'node:test';
 import {normalizeRemoteProfileInput, RemoteManager} from './remote-manager.js';
 
-// Covers the manager's whole handshake budget (12 probes, up to ~8.4s) plus a slow fake-ssh start
-// when the full suite runs every test file at once.
-async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 15_000) {
+// Covers the manager's whole handshake budget (20s) plus a slow fake-ssh start when the full suite
+// runs every test file at once.
+async function waitFor(condition: () => boolean | Promise<boolean>, timeoutMs = 25_000) {
   const deadline = Date.now() + timeoutMs;
   while (!(await condition())) {
     if (Date.now() >= deadline) throw new Error('timed out waiting for remote tunnel');
@@ -26,6 +26,7 @@ const forward = process.argv[process.argv.indexOf('-L') + 1];
 const localSocket = forward.slice(0, forward.indexOf(':'));
 const protocolVersion = process.argv.at(-1).includes('old.') ? 2 : Number(process.env.FLUENT_TEST_PROTOCOL ?? '1');
 const exitOnceFile = process.env.FLUENT_TEST_EXIT_ONCE_FILE;
+const listenDelayMs = Number(process.env.FLUENT_TEST_LISTEN_DELAY_MS ?? '0');
 const failAfterHandshake = Boolean(exitOnceFile && !require('node:fs').existsSync(exitOnceFile));
 if (failAfterHandshake) require('node:fs').writeFileSync(exitOnceFile, 'started');
 let failing = false;
@@ -38,7 +39,8 @@ const server = net.createServer(socket => socket.on('data', () => {
     setTimeout(() => server.close(() => process.exit(1)), 120).unref();
   }
 }));
-server.listen(localSocket);
+// Real ssh binds the forwarded socket only after it has connected and authenticated.
+setTimeout(() => server.listen(localSocket), listenDelayMs);
 process.on('SIGTERM', () => server.close(() => process.exit(0)));
 `);
   await chmod(executable, 0o755);
@@ -88,6 +90,23 @@ describe('remote profile validation', () => {
     } finally {
       // A failed wait must not leave the fake tunnel running: its child process would keep this
       // test file, and so the whole suite, from ever exiting.
+      await manager.shutdown();
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+
+  it('gives a slow SSH connection time to authenticate before judging the tunnel', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-remote-'));
+    const manager = new RemoteManager(join(root, 'state'), {
+      sshExecutable: await fakeSsh(root),
+      sshEnvironment: {...process.env, FLUENT_TEST_LISTEN_DELAY_MS: '3000'}
+    });
+    try {
+      const profile = await manager.save({name: 'slow link', host: 'dev@builder.internal'});
+      await manager.connect(profile.id);
+      await waitFor(() => manager.list()[0]?.status !== 'connecting');
+      assert.equal(manager.list()[0]?.status, 'connected', manager.list()[0]?.error);
+    } finally {
       await manager.shutdown();
       await rm(root, {recursive: true, force: true});
     }
