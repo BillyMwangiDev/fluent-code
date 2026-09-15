@@ -18,7 +18,7 @@ external harnesses and parallel work, where OpenClaw is further along:
 | 2 | Background-task ledger with push completion | Replaces lead `lane wait` polling; one source for notifications | `fluentd` run store + lead sessions |
 | 3 | Queue modes: steer, followup, collect, interrupt | `sessions.inject` is a raw paste today; lead→lane briefs need turn-aware delivery | Inject RPC + Codex `turn/steer` |
 | 4 | Worktree snapshot before removal, `.worktreeinclude`, setup script | "Remove worktree" discards uncommitted work today | `worktree-manager.ts` |
-| 5 | Persisted native session ids for resume | Stopped or daemon-lost lanes are gone for good today | Session manager (in progress) |
+| 5 | Persisted native session ids for resume | Stopped or daemon-lost lanes are gone for good today | Session manager (done in 70f7e4d) |
 | 6 | Board diagnostics (stranded, heartbeat-less, orphaned, missing proof) | Makes stuck parallel work visible instead of silent | Coordination + orchestration screen |
 | 7 | Lane contracts and "specialists do not delegate" | Sharper briefs for lead-started lanes | `ticketBrief` / lead briefing |
 | 8 | Protocol min/max negotiation and operator scopes | Remote daemons and read-only viewers | `daemon-protocol.ts`, remote manager |
@@ -197,8 +197,8 @@ not precede them.
 
 ## Suggested order
 
-1. Persisted native session ids and resume (in progress).
-2. OS notifications from lane status and Claude `Notification` hooks, then a task ledger with push
+1. Persisted native session ids and resume (done in 70f7e4d).
+2. OS notifications from lane status and Claude `Notification` hooks (done in ff96995), then a task ledger with push
    completion that lead sessions use instead of polling.
 3. Worktree snapshot-before-remove and `.worktreeinclude`.
 4. A structured ACP lane mode for Claude Code and Codex, with approval cards and permission modes.
