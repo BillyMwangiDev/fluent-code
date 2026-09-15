@@ -122,7 +122,29 @@ body {
   border-radius: var(--radius-button);
   background: color-mix(in srgb, var(--bg-card) 92%, var(--error));
   box-shadow: var(--shadow-float);
+  white-space: pre-wrap;
 }
+.confirm-dialog {
+  width: min(480px, calc(100vw - 40px));
+  padding: 18px 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  color: var(--fg);
+  box-shadow: var(--shadow-float);
+}
+.confirm-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.confirm-dialog h2 { margin: 0 0 8px; font-family: var(--font-display); font-size: 16px; }
+.confirm-dialog p { margin: 0 0 16px; color: var(--fg-muted); }
+.confirm-dialog .confirm-detail {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: var(--radius-button);
+  background: var(--bg-inset);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.confirm-dialog .actions { justify-content: flex-end; }
 .action-status { min-height: 1.5em; margin: 0; color: var(--fg-muted); }
 .session-name .error { max-width: 42ch; margin: 3px 0 0; font-size: 11px; line-height: 1.35; }
 

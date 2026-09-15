@@ -185,6 +185,35 @@ function showActionError(error: unknown) {
   noticeTimer = window.setTimeout(() => { actionNotices.innerHTML = ''; }, 12_000);
 }
 
+/**
+ * Asks before a consequential action, inside the app. `window.confirm` is unusable here: Tauri's
+ * macOS webview (wry) implements no WKUIDelegate JavaScript panels, so it returns false without
+ * showing anything, and every action gated on it silently did nothing in the desktop app. Escape
+ * and cancel both resolve false; a destructive action starts focused on cancel so a stray Enter
+ * cannot confirm it.
+ */
+function askConfirm(options: {title: string; body: string; detail?: string; confirmLabel: string; danger?: boolean}): Promise<boolean> {
+  return new Promise(resolve => {
+    const cancel = h('button', {class: 'btn', type: 'button'}, ['cancel']);
+    const accept = h('button', {class: options.danger ? 'btn danger' : 'btn primary', type: 'button'}, [options.confirmLabel]);
+    const dialog = h('dialog', {class: 'confirm-dialog', 'aria-label': options.title}, [
+      h('h2', {}, [options.title]),
+      h('p', {}, [options.body]),
+      ...(options.detail ? [h('pre', {class: 'confirm-detail'}, [options.detail])] : []),
+      h('div', {class: 'actions'}, [cancel, accept])
+    ]);
+    cancel.addEventListener('click', () => dialog.close('cancel'));
+    accept.addEventListener('click', () => dialog.close('confirm'));
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      resolve(dialog.returnValue === 'confirm');
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    (options.danger ? cancel : accept).focus();
+  });
+}
+
 window.addEventListener('unhandledrejection', event => {
   event.preventDefault();
   showActionError(event.reason);
@@ -1171,13 +1200,13 @@ async function renderCatalog(main: HTMLElement) {
         pluginList.append(
         pluginRow(plugin, async () => {
             const sourceNotice = `${trustLabel(plugin.trust)}: ${plugin.source}. ${plugin.trust.disclosures.join(' ')}`;
-            if (!confirm(`Install ${plugin.name} for ${providerLabel[plugin.target]}? ${sourceNotice} This runs the provider CLI and may add extension code.`)) return;
+            if (!(await askConfirm({title: `install ${plugin.name}`, body: `Install ${plugin.name} for ${providerLabel[plugin.target]}? ${sourceNotice} This runs the provider CLI and may add extension code.`, confirmLabel: 'install'}))) return;
             const result = await api.installCatalogPlugin(plugin.target, plugin.id);
             if (result.ok) {
               plugin.installed = true;
               draw();
             } else {
-              alert(`Install failed: ${result.output}`);
+              showActionError(`Install failed: ${result.output}`);
             }
           })
         );
@@ -1205,7 +1234,7 @@ async function renderCatalog(main: HTMLElement) {
         sourcePolicy = await api.setCatalogSourcePolicyMode(policyMode.value as ExtensionSourcePolicyState['mode']);
         draw();
       } catch (error) {
-        alert(`Could not save extension source policy: ${error instanceof Error ? error.message : String(error)}`);
+        showActionError(`Could not save extension source policy: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
         savePolicy.disabled = false;
       }
@@ -1217,13 +1246,13 @@ async function renderCatalog(main: HTMLElement) {
       for (const source of sourcePolicy.sources) {
         const remove = h('button', {class: 'btn danger', type: 'button'}, ['remove trust']);
         remove.addEventListener('click', async () => {
-          if (!confirm(`Remove ${source.source} from the trusted extension allowlist? This does not uninstall anything.`)) return;
+          if (!(await askConfirm({title: 'remove trusted source', body: `Remove ${source.source} from the trusted extension allowlist? This does not uninstall anything.`, confirmLabel: 'remove trust', danger: true}))) return;
           remove.disabled = true;
           try {
             sourcePolicy = await api.removeCatalogTrustedSource(source.id);
             draw();
           } catch (error) {
-            alert(`Could not remove trusted source: ${error instanceof Error ? error.message : String(error)}`);
+            showActionError(`Could not remove trusted source: ${error instanceof Error ? error.message : String(error)}`);
           } finally {
             remove.disabled = false;
           }
@@ -1239,12 +1268,12 @@ async function renderCatalog(main: HTMLElement) {
       h('p', {class: 'section-sub'}, ['Source provenance is evidence from the provider configuration, not a permission manifest or safety guarantee.'])
     ]);
     marketplaceListCard.append(...(marketplaces.length ? marketplaces.map(marketplace => marketplaceRow(marketplace, async () => {
-      if (!confirm(`Trust ${marketplace.source} for future marketplace plugin installs? This does not install code or bypass the per-install approval.`)) return;
+      if (!(await askConfirm({title: 'trust marketplace source', body: `Trust ${marketplace.source} for future marketplace plugin installs? This does not install code or bypass the per-install approval.`, confirmLabel: 'trust source'}))) return;
       try {
         sourcePolicy = await api.trustCatalogMarketplaceSource(marketplace.source);
         draw();
       } catch (error) {
-        alert(`Could not trust marketplace source: ${error instanceof Error ? error.message : String(error)}`);
+        showActionError(`Could not trust marketplace source: ${error instanceof Error ? error.message : String(error)}`);
       }
     })) : [h('p', {class: 'section-sub'}, ['No provider marketplaces were reported.'])]));
     wrap.append(marketplaceListCard);
@@ -1263,7 +1292,7 @@ async function renderCatalog(main: HTMLElement) {
       const source = marketplaceSourceInput.value.trim();
       if (!source) return;
       const target = marketplaceTargetSelect.value as ProviderId;
-      if (!confirm(`Add marketplace “${source}” for ${providerLabel[target]}? Fluent will validate the source before the provider CLI is allowed to fetch it. Review any local or third-party code before installing plugins.`)) return;
+      if (!(await askConfirm({title: 'add marketplace', body: `Add marketplace “${source}” for ${providerLabel[target]}? Fluent will validate the source before the provider CLI is allowed to fetch it. Review any local or third-party code before installing plugins.`, confirmLabel: 'add marketplace'}))) return;
       const result = await api.addCatalogMarketplace(target, source, trustNewMarketplace.checked);
       if (result.ok) {
         [plugins, marketplaces, sourcePolicy] = await Promise.all([api.catalogPlugins(), api.catalogMarketplaces(), api.catalogSourcePolicy()]);
@@ -1271,7 +1300,7 @@ async function renderCatalog(main: HTMLElement) {
         trustNewMarketplace.checked = false;
         draw();
       } else {
-        alert(`Add marketplace failed: ${result.output}`);
+        showActionError(`Add marketplace failed: ${result.output}`);
       }
     });
     marketplaceCard.append(h('div', {class: 'marketplace-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]), trustNewMarketplaceLabel);
@@ -1305,7 +1334,7 @@ async function renderCatalog(main: HTMLElement) {
         if (!Array.isArray(parsed) || parsed.some(arg => typeof arg !== 'string')) throw new Error();
         args = parsed;
       } catch {
-        alert('Arguments must be a JSON array of strings, for example ["-y", "@scope/server"].');
+        showActionError('Arguments must be a JSON array of strings, for example ["-y", "@scope/server"].');
         return;
       }
       const selection = mcpTargetSelect.value as ProviderId | 'all';
@@ -1316,7 +1345,7 @@ async function renderCatalog(main: HTMLElement) {
       const boundary = transport === 'stdio'
         ? `This launches the local process “${endpoint}” with ${args.length} structured argument${args.length === 1 ? '' : 's'} when used by an agent.`
         : 'This connects to a remote HTTPS endpoint when used by an agent; it does not launch a local process.';
-      if (!confirm(`Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? ${boundary} Review the server source before use.`)) return;
+      if (!(await askConfirm({title: 'add MCP server', body: `Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? ${boundary} Review the server source before use.`, confirmLabel: 'add server'}))) return;
       const results = await api.addCatalogMcpServer(targets, config, trustMcpSource.checked);
       const failures = results.filter(result => !result.ok);
       if (failures.length === 0) {
@@ -1324,7 +1353,7 @@ async function renderCatalog(main: HTMLElement) {
         trustMcpSource.checked = false;
         draw();
       } else {
-        alert(`MCP setup failed for ${failures.map(result => `${providerLabel[result.target]}: ${result.output}`).join('\n')}`);
+        showActionError(`MCP setup failed for ${failures.map(result => `${providerLabel[result.target]}: ${result.output}`).join('\n')}`);
       }
     });
     mcpCard.append(
@@ -1424,7 +1453,7 @@ async function renderOrchestration(main: HTMLElement) {
   stopProject.addEventListener('click', async () => {
     const projectSessions = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
     if (!projectSessions.length) return;
-    if (!confirm(`Stop ${projectSessions.length} running agent${projectSessions.length === 1 ? '' : 's'} in this project?`)) return;
+    if (!(await askConfirm({title: 'stop project agents', body: `Stop ${projectSessions.length} running agent${projectSessions.length === 1 ? '' : 's'} in this project?`, confirmLabel: 'stop agents', danger: true}))) return;
     await Promise.all(projectSessions.map(session => api.stop(session.id)));
     void render();
   });
@@ -1958,7 +1987,7 @@ async function renderOrchestration(main: HTMLElement) {
   evalButton.addEventListener('click', async () => {
     // Real agent runs on the active credential, so it is never started without being asked for —
     // in the currency that credential is actually spent in.
-    if (!confirm(`Run the eval suite? ${costSentence}`)) return;
+    if (!(await askConfirm({title: 'run the eval suite', body: costSentence, confirmLabel: 'run evals'}))) return;
     evalButton.disabled = true;
     evalButton.textContent = 'eval running…';
     try {
@@ -2035,7 +2064,7 @@ async function renderDesignWorkspace(main: HTMLElement) {
       for (const target of ['claude', 'codex'] as const) {
         const install = h('button', {class: 'btn'}, [`install MCP for ${target}`]);
         install.addEventListener('click', async () => {
-          if (!confirm(`OpenDesign will update ${target}'s MCP configuration. Continue?`)) return;
+          if (!(await askConfirm({title: `install OpenDesign MCP for ${target}`, body: `OpenDesign will update ${target}'s MCP configuration.`, confirmLabel: 'install'}))) return;
           try { const result = await api.installOpenDesignMcp(target); row.append(h('p', {class: 'success'}, [result.output])); }
           catch (error: unknown) { row.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : 'MCP install failed'])); }
         });
@@ -2204,7 +2233,7 @@ async function renderPreview(main: HTMLElement) {
     for (const recipe of recipes) {
       const execute = h('button', {class: 'btn', type: 'button'}, ['run recipe']);
       execute.addEventListener('click', async () => {
-        if (!confirm(`Run recipe “${recipe.name}”?\n\n${recipe.command}\n\nFluent will run this exact command from ${project}.`)) return;
+        if (!(await askConfirm({title: `run recipe “${recipe.name}”`, body: `Fluent will run this exact command from ${project}.`, detail: recipe.command, confirmLabel: 'run recipe'}))) return;
         execute.disabled = true;
         recipeOutput.innerHTML = '';
         try {
@@ -2714,7 +2743,7 @@ async function renderSessions(main: HTMLElement) {
     remove.disabled = !session.archivedAt;
     remove.addEventListener('click', async event => {
       event.stopPropagation();
-      if (!confirm(`Delete the local record for “${name}”? Its project files and any isolated worktree will remain on disk.`)) return;
+      if (!(await askConfirm({title: 'delete session record', body: `Delete the local record for “${name}”? Its project files and any isolated worktree will remain on disk.`, confirmLabel: 'delete', danger: true}))) return;
       await api.deleteSession(session.id);
       void render();
     });
@@ -3106,7 +3135,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     const removeWorktree = h('button', {class: 'btn'}, ['remove worktree']);
     removeWorktree.disabled = !summary.worktreePath || summary.status === 'running' || summary.status === 'starting';
     removeWorktree.addEventListener('click', async () => {
-      if (!confirm('Remove this stopped agent worktree? Uncommitted changes in it will be discarded.')) return;
+      if (!(await askConfirm({title: 'remove worktree', body: 'Remove this stopped agent worktree? Uncommitted changes in it will be discarded.', confirmLabel: 'remove worktree', danger: true}))) return;
       await api.removeWorktree(sessionId);
       void render();
     });
@@ -3128,7 +3157,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     const deleteSession = h('button', {class: 'btn danger'}, ['delete session']);
     deleteSession.disabled = !summary.archivedAt;
     deleteSession.addEventListener('click', async () => {
-      if (!confirm(`Delete the local record for “${sessionName}”? Its project files and any isolated worktree will remain on disk.`)) return;
+      if (!(await askConfirm({title: 'delete session record', body: `Delete the local record for “${sessionName}”? Its project files and any isolated worktree will remain on disk.`, confirmLabel: 'delete', danger: true}))) return;
       await api.deleteSession(sessionId);
       navigate({name: 'sessions'});
     });
