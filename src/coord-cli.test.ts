@@ -300,3 +300,18 @@ describe('a lead lane directing other lanes', () => {
     assert.match(await coord(lead.directory, 'lane', 'start', 'codex', 'take', 'over'), /^started [0-9a-f]{8} codex isolated lanes 2\/2$/m);
   });
 });
+
+describe('the user messaging a lane', () => {
+  it('lands in that lane\'s inbox from the user', async () => {
+    await daemonRequest('coordination.message.send', {project, to: laneA.id, body: 'Please pause after the router change.'});
+
+    const inbox = await coord(laneA.directory, 'inbox');
+
+    assert.match(inbox, /^from user at /m);
+    assert.match(inbox, /Please pause after the router change\./);
+  });
+
+  it('refuses a lane that is not part of the project', async () => {
+    await assert.rejects(() => daemonRequest('coordination.message.send', {project, to: 'not-a-lane', body: 'hello'}));
+  });
+});

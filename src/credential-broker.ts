@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {rm} from 'node:fs/promises';
 import type {
   AccountAuthStatus,
   CredentialAccount,
@@ -306,6 +307,25 @@ export class CredentialBroker extends EventEmitter {
     const identities = new Set(state.accounts.map(account => account.identityId));
     if (mode !== 'subscription' && identities.size === 1) return [...identities][0]!;
     return randomUUID();
+  }
+
+  /**
+   * Removes an account and what Fluent holds for it: its chain position, a stored key, and the
+   * isolated CLI profile Fluent created for its login — otherwise a "removed" subscription could
+   * still sign lanes in through that profile. Past sessions keep their historical account id.
+   */
+  async removeAccount(provider: ProviderId, accountId: string) {
+    const state = this.ensure(provider);
+    const account = state.accounts.find(candidate => candidate.id === accountId);
+    if (!account) throw new Error(`Credential account not found: ${accountId}`);
+    if (account.hasSecret) await this.secrets.delete(provider, accountId).catch(() => undefined);
+    await rm(this.configDirectory(provider, accountId), {recursive: true, force: true});
+    state.accounts = state.accounts.filter(candidate => candidate.id !== accountId);
+    state.chain = state.chain.filter(id => id !== accountId);
+    if (state.limitedAccountId === accountId) state.limitedAccountId = undefined;
+    this.recomputeActive(state);
+    await this.persist();
+    return this.publicState(state);
   }
 
   async setChain(provider: ProviderId, accountIds: string[]) {

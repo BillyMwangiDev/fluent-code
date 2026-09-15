@@ -418,3 +418,71 @@ describe('retained coordination history', () => {
     assert.equal(afterRestart.get('/project').claims[0]?.id, migratedClaimId, 'migration persists before a later board mutation can happen');
   });
 });
+
+describe('handoff decisions', () => {
+  it('lets the user decline an open handoff, and keeps a decided one decided', async () => {
+    const coordination = await manager();
+    const state = await coordination.handoff('/project', 'lane-a', 'lane-b', 'review the router');
+    const handoffId = state.handoffs[0]!.id;
+
+    const declined = await coordination.declineHandoff('/project', handoffId);
+
+    assert.equal(declined.handoffs[0]?.status, 'declined');
+    assert.ok(declined.events.some(event => event.kind === 'handoff.declined' && event.handoffId === handoffId));
+    await assert.rejects(() => coordination.acceptHandoff('/project', handoffId), /declined/);
+  });
+
+  it('does not decline a handoff that was already accepted', async () => {
+    const coordination = await manager();
+    const state = await coordination.handoff('/project', 'lane-a', 'lane-b', 'review the router');
+    await coordination.acceptHandoff('/project', state.handoffs[0]!.id);
+    await assert.rejects(() => coordination.declineHandoff('/project', state.handoffs[0]!.id), /accepted/);
+  });
+});
+
+describe('editing and deleting tasks', () => {
+  it('edits a task title, brief, and role, and refuses an empty title', async () => {
+    const coordination = await manager();
+    const created = await coordination.task('/project', {title: 'Parse config'});
+    const taskId = created.tasks[0]!.id;
+
+    const edited = await coordination.editTask('/project', taskId, {title: 'Parse the config file', description: 'TOML and JSON', role: 'backend'});
+
+    assert.deepEqual(
+      {title: edited.tasks[0]?.title, description: edited.tasks[0]?.description, role: edited.tasks[0]?.role},
+      {title: 'Parse the config file', description: 'TOML and JSON', role: 'backend'}
+    );
+    assert.ok(edited.events.some(event => event.kind === 'task.edited' && event.taskId === taskId));
+    await assert.rejects(() => coordination.editTask('/project', taskId, {title: '   '}), /title/);
+  });
+
+  it('deletes a task and removes it from the tasks that depended on it', async () => {
+    const coordination = await manager();
+    const first = (await coordination.task('/project', {title: 'Schema'})).tasks[0]!;
+    const second = (await coordination.task('/project', {title: 'Parser', dependsOn: [first.id]})).tasks[0]!;
+
+    const state = await coordination.deleteTask('/project', first.id);
+
+    assert.deepEqual(state.tasks.map(task => task.id), [second.id]);
+    assert.equal(state.tasks[0]?.dependsOn, undefined, 'a deleted prerequisite no longer blocks anything');
+    assert.ok(state.events.some(event => event.kind === 'task.deleted' && event.taskId === first.id));
+  });
+
+  it('keeps declines, edits, and deletions in the restored journal', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-coordination-'));
+    directories.push(directory);
+    const coordination = new CoordinationManager(directory);
+    const task = (await coordination.task('/project', {title: 'Parse config'})).tasks[0]!;
+    await coordination.editTask('/project', task.id, {title: 'Parse the config file'});
+    await coordination.deleteTask('/project', task.id);
+    const handoff = (await coordination.handoff('/project', 'lane-a', 'lane-b', 'review')).handoffs[0]!;
+    await coordination.declineHandoff('/project', handoff.id);
+
+    const restored = new CoordinationManager(directory);
+    await restored.restore();
+    const kinds = restored.get('/project').events.map(event => event.kind);
+
+    for (const kind of ['task.edited', 'task.deleted', 'handoff.declined']) assert.ok(kinds.includes(kind as never), `${kind} survives a restart`);
+    assert.equal(restored.get('/project').handoffs[0]?.status, 'declined');
+  });
+});

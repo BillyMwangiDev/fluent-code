@@ -15,7 +15,7 @@ export const coordinationEventLimit = 500;
 
 const coordinationEventKinds: readonly CoordinationEventKind[] = [
   'task.created', 'task.assigned', 'task.status_changed', 'task.dependencies_changed', 'master_brief.set', 'claim.declared', 'claim.observed', 'claim.conflicted',
-  'claim.released', 'decision.recorded', 'handoff.requested', 'handoff.accepted', 'message.sent'
+  'claim.released', 'decision.recorded', 'handoff.requested', 'handoff.accepted', 'handoff.declined', 'message.sent', 'task.edited', 'task.deleted'
 ];
 const claimReleaseReasons: readonly ClaimReleaseReason[] = ['released', 'observed_cleared', 'session_ended', 'lease_expired'];
 const providers: readonly ProviderId[] = ['claude', 'codex', 'gemini', 'qwen', 'glm', 'nvidia'];
@@ -218,7 +218,7 @@ function restoredEvent(value: unknown): CoordinationEvent | undefined {
   if (Array.isArray(raw.conflicts) && raw.conflicts.every(validConflict)) event.conflicts = raw.conflicts;
 
   switch (event.kind) {
-    case 'task.created': case 'task.assigned': return event.taskId ? event : undefined;
+    case 'task.created': case 'task.assigned': case 'task.edited': case 'task.deleted': return event.taskId ? event : undefined;
     case 'task.dependencies_changed': return event.taskId && event.dependsOn ? event : undefined;
     case 'task.status_changed': return event.taskId && event.fromStatus && event.toStatus ? event : undefined;
     case 'master_brief.set': return event;
@@ -226,7 +226,7 @@ function restoredEvent(value: unknown): CoordinationEvent | undefined {
     case 'claim.conflicted': return event.path && event.conflicts?.length ? event : undefined;
     case 'claim.released': return event.claimId && event.path && event.releaseReason ? event : undefined;
     case 'decision.recorded': return event.decisionId ? event : undefined;
-    case 'handoff.requested': case 'handoff.accepted': return event.handoffId ? event : undefined;
+    case 'handoff.requested': case 'handoff.accepted': case 'handoff.declined': return event.handoffId ? event : undefined;
     case 'message.sent': return event.messageId ? event : undefined;
   }
 }
@@ -727,10 +727,66 @@ export class CoordinationManager {
     const handoff = state.handoffs.find(item => item.id === handoffId);
     if (!handoff) throw new Error('Coordination handoff not found');
     if (handoff.status === 'accepted') return state;
+    if (handoff.status === 'declined') throw new Error('This handoff was declined; propose a new one instead');
     handoff.status = 'accepted';
     this.record(state, {
       kind: 'handoff.accepted', sessionIds: compactSessionIds([handoff.fromSessionId, handoff.toSessionId]), handoffId: handoff.id
     });
+    await this.persist();
+    return state;
+  }
+
+  /** The user turns a proposed handoff down. Like accepting, it is a visible board decision. */
+  async declineHandoff(project: string, handoffId: string) {
+    const state = this.ensure(project);
+    const handoff = state.handoffs.find(item => item.id === handoffId);
+    if (!handoff) throw new Error('Coordination handoff not found');
+    if (handoff.status === 'accepted') throw new Error('This handoff was already accepted');
+    if (handoff.status === 'declined') return state;
+    handoff.status = 'declined';
+    this.record(state, {
+      kind: 'handoff.declined', sessionIds: compactSessionIds([handoff.fromSessionId, handoff.toSessionId]), handoffId: handoff.id
+    });
+    await this.persist();
+    return state;
+  }
+
+  /** Edits a ticket's words only. Its lane, status, and prerequisites keep their own visible
+   * board operations, so an edit can never quietly reassign or unblock work. */
+  async editTask(project: string, taskId: string, edits: {title?: string; description?: string; role?: string}, actorSessionId?: string) {
+    const state = this.ensure(project);
+    const task = state.tasks.find(item => item.id === taskId);
+    if (!task) throw new Error('Coordination task not found');
+    const title = edits.title === undefined ? task.title : cleanText(edits.title, taskTitleLimit);
+    if (!title) throw new Error('A task needs a title');
+    const description = edits.description === undefined ? task.description : cleanText(edits.description, taskDescriptionLimit);
+    const role = edits.role === undefined ? task.role : cleanText(edits.role, taskRoleLimit);
+    if (title === task.title && description === task.description && role === task.role) return state;
+    task.title = title;
+    if (description) task.description = description;
+    else delete task.description;
+    if (role) task.role = role;
+    else delete task.role;
+    task.updatedAt = new Date().toISOString();
+    this.record(state, {kind: 'task.edited', actorSessionId, sessionIds: compactSessionIds([task.sessionId]), taskId: task.id});
+    await this.persist();
+    return state;
+  }
+
+  /** Removes a ticket. Tasks that listed it as a prerequisite stop waiting for it; the lane that
+   * held it, its claims, and the board history stay as they were. */
+  async deleteTask(project: string, taskId: string, actorSessionId?: string) {
+    const state = this.ensure(project);
+    const index = state.tasks.findIndex(item => item.id === taskId);
+    if (index < 0) throw new Error('Coordination task not found');
+    const [task] = state.tasks.splice(index, 1);
+    for (const other of state.tasks) {
+      if (!other.dependsOn?.includes(taskId)) continue;
+      const remaining = other.dependsOn.filter(id => id !== taskId);
+      if (remaining.length > 0) other.dependsOn = remaining;
+      else delete other.dependsOn;
+    }
+    this.record(state, {kind: 'task.deleted', actorSessionId, sessionIds: compactSessionIds([task!.sessionId]), taskId});
     await this.persist();
     return state;
   }

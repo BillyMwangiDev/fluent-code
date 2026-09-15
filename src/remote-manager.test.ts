@@ -121,3 +121,26 @@ describe('remote tunnel recovery', () => {
     }
   });
 });
+
+describe('removing a remote profile', () => {
+  it('closes its tunnel and forgets it across a restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-remote-'));
+    const manager = new RemoteManager(join(root, 'state'), {sshExecutable: await fakeSsh(root)});
+    try {
+      const profile = await manager.save({name: 'fixture', host: 'dev@builder.internal'});
+      await manager.connect(profile.id);
+      await waitFor(() => manager.list()[0]?.status === 'connected');
+
+      await manager.remove(profile.id);
+
+      assert.deepEqual(manager.list(), []);
+      assert.equal(existsSync(profile.localSocket), false, 'the forwarded socket is gone');
+      const restored = new RemoteManager(join(root, 'state'));
+      await restored.restore();
+      assert.deepEqual(restored.list(), []);
+    } finally {
+      await manager.shutdown();
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+});

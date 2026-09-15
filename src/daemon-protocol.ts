@@ -281,7 +281,7 @@ export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts
  * the collision hotspots that make late-discovered conflicts expensive. */
 export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type Decision = {id: string; summary: string; sessionId?: string; createdAt: string};
-export type Handoff = {id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'};
+export type Handoff = {id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted' | 'declined'};
 /**
  * A message from one lane to another. Durable and ordered per recipient, because the alternative —
  * one agent writing into another's terminal as it runs — is the kind of invisible coordination
@@ -295,6 +295,8 @@ export type CoordinationEventKind =
   | 'task.assigned'
   | 'task.status_changed'
   | 'task.dependencies_changed'
+  | 'task.edited'
+  | 'task.deleted'
   | 'master_brief.set'
   | 'claim.declared'
   | 'claim.observed'
@@ -303,6 +305,7 @@ export type CoordinationEventKind =
   | 'decision.recorded'
   | 'handoff.requested'
   | 'handoff.accepted'
+  | 'handoff.declined'
   | 'message.sent';
 export type ClaimReleaseReason = 'released' | 'observed_cleared' | 'session_ended' | 'lease_expired';
 export type CoordinationEvent = {
@@ -449,10 +452,16 @@ export type RpcRequest =
   | {id: string; method: 'coordination.decision.add'; params: {project: string; summary: string; sessionId?: string}}
   | {id: string; method: 'coordination.handoff.create'; params: {project: string; fromSessionId: string; toSessionId: string; summary: string}}
   | {id: string; method: 'coordination.handoff.accept'; params: {project: string; handoffId: string}}
+  | {id: string; method: 'coordination.handoff.decline'; params: {project: string; handoffId: string}}
+  | {id: string; method: 'coordination.task.edit'; params: {project: string; taskId: string; title?: string; description?: string; role?: string}}
+  | {id: string; method: 'coordination.task.delete'; params: {project: string; taskId: string}}
+  /** A message from the user to one lane, queued in its inbox like mail from another lane. */
+  | {id: string; method: 'coordination.message.send'; params: {project: string; to: string; body: string}}
   | {id: string; method: 'remote.list'}
   | {id: string; method: 'remote.save'; params: {name: string; host: string; port?: number; remoteSocket?: string; autoReconnect?: boolean; approvalId?: string}}
   | {id: string; method: 'remote.connect'; params: {profileId: string; approvalId?: string}}
   | {id: string; method: 'remote.disconnect'; params: {profileId: string}}
+  | {id: string; method: 'remote.remove'; params: {profileId: string; approvalId?: string}}
   | {id: string; method: 'openDesign.get'}
   | {id: string; method: 'openDesign.save'; params: {url: string}}
   | {id: string; method: 'openDesign.status'}
@@ -461,6 +470,7 @@ export type RpcRequest =
   | {id: string; method: 'credentials.list'}
   | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; model?: string; sameIdentityAs?: string; approvalId?: string}}
   | {id: string; method: 'credentials.setChain'; params: {provider: ProviderId; accountIds: string[]; approvalId?: string}}
+  | {id: string; method: 'credentials.removeAccount'; params: {provider: ProviderId; accountId: string; approvalId?: string}}
   | {id: string; method: 'credentials.setFallbackPolicy'; params: {provider: ProviderId; policy: FallbackPolicy; approvalId?: string}}
   | {id: string; method: 'credentials.confirmFallback'; params: {provider: ProviderId; accept: boolean; resetAt?: string}}
   | {id: string; method: 'credentials.guidance'; params: {provider: ProviderId}}

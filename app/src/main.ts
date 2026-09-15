@@ -1769,6 +1769,39 @@ async function renderOrchestration(main: HTMLElement) {
               saveDependencies.disabled = task.status !== 'todo';
             }
           });
+          const edit = h('button', {class: 'btn', type: 'button'}, ['edit']);
+          const remove = h('button', {class: 'btn danger', type: 'button'}, ['delete']);
+          const editTitle = h('input', {type: 'text', value: task.title, 'aria-label': `Title for ${task.title}`}) as HTMLInputElement;
+          const editRole = h('input', {type: 'text', value: task.role ?? '', placeholder: 'role, e.g. frontend', 'aria-label': `Role for ${task.title}`}) as HTMLInputElement;
+          const editDescription = h('textarea', {rows: '3', placeholder: 'ticket-local brief', 'aria-label': `Brief for ${task.title}`}) as HTMLTextAreaElement;
+          editDescription.value = task.description ?? '';
+          const saveEdit = h('button', {class: 'btn primary', type: 'button'}, ['save ticket']);
+          const cancelEdit = h('button', {class: 'btn', type: 'button'}, ['cancel']);
+          const editor = h('div', {class: 'kanban-editor'}, [editTitle, editRole, editDescription, h('div', {class: 'actions'}, [cancelEdit, saveEdit])]);
+          editor.hidden = true;
+          edit.addEventListener('click', () => { editor.hidden = !editor.hidden; });
+          cancelEdit.addEventListener('click', () => { editor.hidden = true; });
+          saveEdit.addEventListener('click', async () => {
+            saveEdit.disabled = true;
+            try {
+              await api.editTask(project, task.id, {title: editTitle.value, description: editDescription.value, role: editRole.value});
+              void render();
+            } catch (error: unknown) {
+              boardNotice.textContent = actionErrorText(error);
+              boardNotice.className = 'error orchestration-notice';
+              saveEdit.disabled = false;
+            }
+          });
+          remove.addEventListener('click', async () => {
+            if (!(await askConfirm({title: 'delete ticket', body: `Delete “${task.title}” from the board? Tickets that list it as a prerequisite stop waiting for it. A lane already working on it keeps running.`, confirmLabel: 'delete ticket', danger: true}))) return;
+            try {
+              await api.deleteTask(project, task.id);
+              void render();
+            } catch (error: unknown) {
+              boardNotice.textContent = actionErrorText(error);
+              boardNotice.className = 'error orchestration-notice';
+            }
+          });
           const prerequisiteSummary = blocked
             ? `blocked by ${blockers.map(dependency => dependency ? `${dependency.title} (${dependency.status})` : 'a missing ticket').join(' · ')}`
             : `prerequisites complete · ${dependencies.filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency)).map(dependency => dependency.title).join(' · ')}`;
@@ -1786,7 +1819,8 @@ async function renderOrchestration(main: HTMLElement) {
             h('p', {class: 'kanban-meta'}, [`${task.role || 'generalist'} · ${task.provider || 'provider undecided'}${task.sessionId ? ` · lane ${task.sessionId.slice(0, 8)}` : ''}`]),
             h('div', {class: 'kanban-assignment'}, [lanePicker, assignExisting]),
             h('div', {class: 'kanban-assignment'}, [dependencyPicker, saveDependencies]),
-            h('div', {class: 'kanban-actions'}, [launch, review, advance])
+            h('div', {class: 'kanban-actions'}, [launch, review, advance, edit, remove]),
+            editor
           ]);
         });
     return h('section', {class: 'kanban-column'}, [h('div', {class: 'kanban-column-head'}, [h('h3', {}, [column.label]), h('span', {class: 'meta'}, [String(tickets.length)])]), ...cards]);
@@ -1906,9 +1940,12 @@ async function renderOrchestration(main: HTMLElement) {
   });
   const handoffRows = state.handoffs.map(handoff => {
     const accept = h('button', {class: 'btn'}, ['accept']);
-    accept.disabled = handoff.status === 'accepted';
+    accept.disabled = handoff.status !== 'open';
     accept.addEventListener('click', async () => { await api.acceptHandoff(project, handoff.id); void render(); });
-    return h('div', {class: 'option-row'}, [selectSubject(handoff.summary, {kind: 'handoff', id: handoff.id}), h('span', {class: 'meta'}, [`${handoff.fromSessionId.slice(0, 6)} → ${handoff.toSessionId.slice(0, 6)} · ${handoff.status}`]), accept]);
+    const decline = h('button', {class: 'btn'}, ['decline']);
+    decline.disabled = handoff.status !== 'open';
+    decline.addEventListener('click', async () => { await api.declineHandoff(project, handoff.id); void render(); });
+    return h('div', {class: 'option-row'}, [selectSubject(handoff.summary, {kind: 'handoff', id: handoff.id}), h('span', {class: 'meta'}, [`${handoff.fromSessionId.slice(0, 6)} → ${handoff.toSessionId.slice(0, 6)} · ${handoff.status}`]), h('div', {class: 'actions'}, [accept, decline])]);
   });
   const claimRows = state.claims.map(claim => {
     const release = h('button', {class: 'btn'}, ['release']);
@@ -2020,6 +2057,24 @@ async function renderOrchestration(main: HTMLElement) {
     }
   });
 
+  const messageLane = lanePicker('Lane to message');
+  const messageBody = h('textarea', {rows: '2', placeholder: 'message a lane — it reads this when it next checks its inbox', 'aria-label': 'Message to lane'}) as HTMLTextAreaElement;
+  const sendMessage = h('button', {class: 'btn', type: 'button'}, ['send message']);
+  sendMessage.disabled = live.length === 0;
+  const messageNotice = h('p', {class: 'section-sub'}, []);
+  sendMessage.addEventListener('click', async () => {
+    if (!messageBody.value.trim() || !messageLane.value) return messageBody.focus();
+    sendMessage.disabled = true;
+    try {
+      await api.sendLaneMessage(project, messageLane.value, messageBody.value);
+      void render();
+    } catch (error: unknown) {
+      messageNotice.textContent = actionErrorText(error);
+      messageNotice.className = 'error';
+      sendMessage.disabled = false;
+    }
+  });
+
   const supportCards: HTMLElement[] = [];
   if (explorerScope === 'overview' || explorerScope === 'reviews') {
     const verificationRows = live.length > 0
@@ -2029,7 +2084,7 @@ async function renderOrchestration(main: HTMLElement) {
         ]))
       : [h('p', {class: 'section-sub'}, ['No running lanes in this project.'])];
     supportCards.push(
-      h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows]),
+      h('div', {class: 'card'}, [h('h3', {}, ['lane messages']), ...messageRows, h('div', {class: 'field'}, [messageLane, messageBody, sendMessage, messageNotice])]),
       h('div', {class: 'card'}, [h('h3', {}, ['current lane verification']), ...verificationRows])
     );
   }
@@ -2355,11 +2410,25 @@ async function renderRemote(main: HTMLElement) {
     const useHere = h('button', {class: `btn${selectedSocket === profile.localSocket ? ' primary' : ''}`}, [selectedSocket === profile.localSocket ? 'using this server' : 'use this server']);
     useHere.disabled = profile.status !== 'connected';
     useHere.addEventListener('click', () => { selectRemoteSocket(profile.localSocket); void render(); });
+    const removeProfile = h('button', {class: 'btn danger', type: 'button'}, ['remove']);
+    removeProfile.addEventListener('click', async () => {
+      if (!(await askConfirm({title: `remove ${profile.name}`, body: `Remove the saved SSH profile for ${profile.host}? Its tunnel closes if it is open. The remote daemon and its sessions keep running.`, confirmLabel: 'remove profile', danger: true}))) return;
+      removeProfile.disabled = true;
+      try {
+        await api.removeRemote(profile.id);
+        if (selectedSocket === profile.localSocket) selectRemoteSocket();
+        void render();
+      } catch (error) {
+        showActionError(error);
+        removeProfile.disabled = false;
+      }
+    });
     main.append(h('div', {class: 'option-row'}, [
       h('span', {class: 'label'}, [profile.name]),
       h('span', {class: 'meta'}, [`${profile.host}:${profile.port} · ${profile.remoteSocket} · ${profile.autoReconnect ? 'auto-reconnect' : 'manual reconnect'} · ${profile.status}${profile.error ? ` · ${profile.error}` : ''}`]),
       useHere,
-      action
+      action,
+      removeProfile
     ]));
   }
   if (selectedSocket) {
@@ -3492,6 +3561,25 @@ async function renderCredentials(main: HTMLElement) {
   const list = h('div', {});
   main.append(list);
 
+  const removeButton = (account: CredentialChainState['accounts'][number]) => {
+    const button = h('button', {class: 'btn danger', type: 'button'}, ['remove']);
+    button.addEventListener('click', async () => {
+      const detail = account.mode === 'api-key'
+        ? 'Its stored key is deleted from the system keychain.'
+        : 'Fluent’s separate sign-in profile for it is deleted, so you would sign in again if you add it back.';
+      if (!(await askConfirm({title: `remove ${account.label}`, body: `Remove this ${providerLabels[credentialProvider]} account from Fluent? ${detail} Past sessions keep their record.`, confirmLabel: 'remove account', danger: true}))) return;
+      button.disabled = true;
+      try {
+        await api.removeAccount(credentialProvider, account.id);
+        void render();
+      } catch (error) {
+        showActionError(error);
+        button.disabled = false;
+      }
+    });
+    return button;
+  };
+
   function renderList() {
     list.innerHTML = '';
     chain.chain.forEach((accountId, index) => {
@@ -3506,9 +3594,8 @@ async function renderCredentials(main: HTMLElement) {
         h('span', {class: 'label'}, [`${index + 1}. ${account.label}`]),
         h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', connection, isActive ? 'active now' : ''].filter(Boolean).join(' · ')])
       ]);
-      // Only append a third flex child when there is actually a control to show — an always-present
-      // empty div throws off `.option-row`'s space-between distribution on the first row (index 0),
-      // which has no "move up" button and would otherwise get pushed out of its right-aligned slot.
+      // Every row has at least one control now (remove), so they sit in one right-aligned group.
+      const controls = h('div', {class: 'actions'});
       if (index > 0) {
         const up = h('button', {class: 'btn'}, ['↑']);
         up.addEventListener('click', async () => {
@@ -3518,8 +3605,10 @@ async function renderCredentials(main: HTMLElement) {
           chain.chain = reordered;
           renderList();
         });
-        row.append(up);
+        controls.append(up);
       }
+      controls.append(removeButton(account));
+      row.append(controls);
       list.append(row);
       // Subscription and Console credits are both OAuth logins the CLI owns, so Fluent shows the
       // command rather than running it: the browser flow is the user's business with Anthropic
@@ -3538,7 +3627,8 @@ async function renderCredentials(main: HTMLElement) {
         const connection = auth ? (auth.loggedIn ? 'connected' : 'not connected') : '';
         list.append(h('div', {class: 'option-row'}, [
           h('span', {class: 'label'}, [account.label]),
-          h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', connection, 'manual only'].filter(Boolean).join(' · ')])
+          h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', connection, 'manual only'].filter(Boolean).join(' · ')]),
+          h('div', {class: 'actions'}, [removeButton(account)])
         ]));
         if (auth && !auth.loggedIn && auth.loginCommand) {
           list.append(h('p', {class: 'section-sub'}, [`connect it with:  ${auth.loginCommand}`]));

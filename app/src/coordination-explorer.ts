@@ -51,6 +51,8 @@ function eventActivity(event: CoordinationEvent, state: CoordinationState): Coor
   switch (event.kind) {
     case 'task.created': return {...base, label: 'task created', detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
     case 'task.assigned': return {...base, label: 'task assigned', detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
+    case 'task.edited': return {...base, label: 'task edited', detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
+    case 'task.deleted': return {...base, label: 'task deleted', detail: 'removed from the board'};
     case 'task.status_changed': return {...base, label: `task ${event.toStatus ?? 'updated'}`, detail: task?.title ?? 'task no longer retained', subject: task ? {kind: 'task', id: task.id} : undefined};
     case 'task.dependencies_changed': {
       const count = event.dependsOn?.length ?? 0;
@@ -67,6 +69,7 @@ function eventActivity(event: CoordinationEvent, state: CoordinationState): Coor
     case 'decision.recorded': return {...base, label: 'decision recorded', detail: decision?.summary ?? 'decision no longer retained', subject: decision ? {kind: 'decision', id: decision.id} : undefined};
     case 'handoff.requested': return {...base, label: 'handoff requested', detail: handoff?.summary ?? 'handoff no longer retained', subject: handoff ? {kind: 'handoff', id: handoff.id} : undefined};
     case 'handoff.accepted': return {...base, label: 'handoff accepted', detail: handoff?.summary ?? 'handoff no longer retained', subject: handoff ? {kind: 'handoff', id: handoff.id} : undefined};
+    case 'handoff.declined': return {...base, label: 'handoff declined', detail: handoff?.summary ?? 'handoff no longer retained', subject: handoff ? {kind: 'handoff', id: handoff.id} : undefined};
     case 'message.sent': return {...base, label: 'lane message sent', detail: message?.body ?? 'message no longer retained', subject: message ? {kind: 'message', id: message.id} : undefined};
   }
 }

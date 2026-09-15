@@ -80,3 +80,19 @@ describe('coordination explorer helpers', () => {
     assert.equal(inspectCoordination({kind: 'handoff', id: 'handoff-missing'}, state(), [laneA, laneB], conflicts), undefined);
   });
 });
+
+describe('later board decisions in history', () => {
+  it('labels ticket edits, deletions, and declined handoffs', () => {
+    const board = state();
+    board.events = [
+      {id: 'event-edit', at: '2026-09-14T06:00:00.000Z', kind: 'task.edited', sessionIds: [], taskId: 'task-a'},
+      {id: 'event-delete', at: '2026-09-14T06:01:00.000Z', kind: 'task.deleted', sessionIds: [], taskId: 'task-gone'},
+      {id: 'event-decline', at: '2026-09-14T06:02:00.000Z', kind: 'handoff.declined', sessionIds: ['lane-a', 'lane-b'], handoffId: 'handoff-a'}
+    ];
+
+    const activity = retainedCoordinationHistory(board, 3);
+
+    assert.deepEqual(activity.map(item => item.label), ['handoff declined', 'task deleted', 'task edited']);
+    assert.equal(activity[1]?.subject, undefined, 'a deleted task links to nothing');
+  });
+});

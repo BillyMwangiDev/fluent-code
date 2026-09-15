@@ -6,6 +6,9 @@ import {CredentialBroker} from './credential-broker.js';
 import {join} from 'node:path';
 import type {FallbackGuidance, FallbackPolicy} from './daemon-protocol.js';
 import {writePrivateJson} from './security/secure-state.js';
+import {SecretStore} from './secret-store.js';
+import {existsSync} from 'node:fs';
+import {mkdir, writeFile} from 'node:fs/promises';
 
 // The OS keyring is not available in every environment a test runs in (headless CI, containers).
 // The store already has an in-memory mode for exactly this; the key material below is fake.
@@ -460,5 +463,42 @@ describe('migrating state written before identityId existed', () => {
     const byId = Object.fromEntries(state!.accounts.map(account => [account.id, account]));
     assert.equal(byId['work-sub']!.identityId, existingIdentityId, 'the pre-existing identity is preserved');
     assert.equal(byId['work-credits']!.identityId, existingIdentityId, 'the backfilled account reuses the existing identity, not a fresh one');
+  });
+});
+
+describe('removing an account', () => {
+  it('drops it from the chain and moves the active account to the next one', async () => {
+    const instance = await broker();
+
+    const state = await instance.removeAccount('claude', 'work-sub');
+
+    assert.deepEqual(state.accounts.map(account => account.id), ['work-credits']);
+    assert.deepEqual(state.chain, ['work-credits']);
+    assert.equal(state.activeAccountId, 'work-credits');
+  });
+
+  it('deletes the stored key and the account\'s own CLI profile, and stays removed after a restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'fluent-broker-'));
+    directories.push(directory);
+    const instance = new CredentialBroker(directory);
+    await instance.upsertAccount('codex', 'team-key', 'api-key', 'team key', 'sk-test-not-a-real-key');
+    await instance.upsertAccount('claude', 'side-sub', 'subscription', 'side project');
+    const profile = instance.configDirectory('claude', 'side-sub');
+    await mkdir(profile, {recursive: true});
+    await writeFile(join(profile, '.credentials.json'), '{}');
+
+    await instance.removeAccount('codex', 'team-key');
+    await instance.removeAccount('claude', 'side-sub');
+
+    assert.equal(await new SecretStore().get('codex', 'team-key'), undefined);
+    assert.equal(existsSync(profile), false, 'the removed login cannot keep working through its profile');
+    const restored = new CredentialBroker(directory);
+    await restored.restore();
+    assert.deepEqual(restored.list().flatMap(state => state.accounts.map(account => account.id)), []);
+  });
+
+  it('refuses an account it does not know', async () => {
+    const instance = await broker();
+    await assert.rejects(() => instance.removeAccount('claude', 'nobody'), /not found/);
   });
 });

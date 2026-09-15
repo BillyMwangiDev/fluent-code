@@ -173,7 +173,7 @@ export type CoordinationState = {
   claims: Array<{id: string; path: string; sessionId: string; origin: 'declared' | 'observed'; createdAt: string; renewedAt: string; expiresAt: string}>;
   decisions: Array<{id: string; summary: string; sessionId?: string; createdAt: string}>;
   messages: LaneMessage[];
-  handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted'}>;
+  handoffs: Array<{id: string; fromSessionId: string; toSessionId: string; summary: string; createdAt: string; status: 'open' | 'accepted' | 'declined'}>;
   events: CoordinationEvent[];
 };
 export type CoordinationEventKind =
@@ -181,6 +181,8 @@ export type CoordinationEventKind =
   | 'task.assigned'
   | 'task.status_changed'
   | 'task.dependencies_changed'
+  | 'task.edited'
+  | 'task.deleted'
   | 'master_brief.set'
   | 'claim.declared'
   | 'claim.observed'
@@ -189,6 +191,7 @@ export type CoordinationEventKind =
   | 'decision.recorded'
   | 'handoff.requested'
   | 'handoff.accepted'
+  | 'handoff.declined'
   | 'message.sent';
 export type CoordinationEvent = {
   id: string;
@@ -427,6 +430,11 @@ export const api = {
   addDecision: (project: string, summary: string, sessionId?: string) => daemonRequest<CoordinationState>('coordination.decision.add', {project, summary, sessionId}),
   createHandoff: (project: string, fromSessionId: string, toSessionId: string, summary: string) => daemonRequest<CoordinationState>('coordination.handoff.create', {project, fromSessionId, toSessionId, summary}),
   acceptHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.accept', {project, handoffId}),
+  declineHandoff: (project: string, handoffId: string) => daemonRequest<CoordinationState>('coordination.handoff.decline', {project, handoffId}),
+  editTask: (project: string, taskId: string, edits: {title?: string; description?: string; role?: string}) => daemonRequest<CoordinationState>('coordination.task.edit', {project, taskId, ...edits}),
+  deleteTask: (project: string, taskId: string) => daemonRequest<CoordinationState>('coordination.task.delete', {project, taskId}),
+  /** Queues a message from the user in one lane's inbox; the lane reads it when it next checks. */
+  sendLaneMessage: (project: string, to: string, body: string) => daemonRequest<LaneMessage>('coordination.message.send', {project, to, body}),
   listRemotes: () => localDaemonRequest<RemoteProfile[]>('remote.list'),
   saveRemote: async (params: {name: string; host: string; port?: number; remoteSocket?: string; autoReconnect?: boolean}) => {
     const approval = await issueApproval('remote.configure', `${params.host}:${params.port ?? 22}`, params.remoteSocket, undefined, true);
@@ -437,6 +445,10 @@ export const api = {
     return localDaemonRequest<RemoteProfile>('remote.connect', {profileId, approvalId: approval.id});
   },
   disconnectRemote: (profileId: string) => localDaemonRequest<RemoteProfile>('remote.disconnect', {profileId}),
+  removeRemote: async (profileId: string) => {
+    const approval = await issueApproval('remote.configure', profileId, 'remove remote profile', undefined, true);
+    return localDaemonRequest<RemoteProfile[]>('remote.remove', {profileId, approvalId: approval.id});
+  },
   openDesign: () => localDaemonRequest<OpenDesignProfile>('openDesign.get'),
   saveOpenDesign: (url: string) => localDaemonRequest<OpenDesignProfile>('openDesign.save', {url}),
   openDesignStatus: () => localDaemonRequest<OpenDesignStatus>('openDesign.status'),
@@ -461,6 +473,10 @@ export const api = {
   }) => {
     const approval = await issueApproval('credential.change', `${params.provider}:${params.id}`, `credential ${params.mode}`);
     return daemonRequest<CredentialChainState>('credentials.upsertAccount', {...params, approvalId: approval.id});
+  },
+  removeAccount: async (provider: ProviderId, accountId: string) => {
+    const approval = await issueApproval('credential.change', `${provider}:${accountId}`, 'remove account');
+    return daemonRequest<CredentialChainState>('credentials.removeAccount', {provider, accountId, approvalId: approval.id});
   },
   setChain: async (provider: ProviderId, accountIds: string[]) => {
     const approval = await issueApproval('credential.change', provider, `chain ${accountIds.join(',')}`);

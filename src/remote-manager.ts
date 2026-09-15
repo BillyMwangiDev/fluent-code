@@ -168,6 +168,13 @@ export class RemoteManager {
     await this.removeStaleSocket(profile.localSocket).catch(() => undefined);
     await this.persist(); return profile;
   }
+  /** Forgets a profile after closing its tunnel. The remote daemon and its sessions are untouched. */
+  async remove(profileId: string) {
+    await this.disconnect(profileId);
+    this.profiles.splice(this.profiles.findIndex(profile => profile.id === profileId), 1);
+    await this.persist();
+    return this.list();
+  }
   /** A local daemon owns its SSH child processes. Leaving a forward behind after it exits would
    * leave an opaque privileged endpoint running with no Fluent UI able to name or close it. */
   async shutdown() {

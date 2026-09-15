@@ -831,6 +831,18 @@ async function dispatch(request: RpcRequest) {
       return coordination.handoff(request.params.project, request.params.fromSessionId, request.params.toSessionId, request.params.summary);
     }
     case 'coordination.handoff.accept': return coordination.acceptHandoff(request.params.project, request.params.handoffId);
+    case 'coordination.handoff.decline': return coordination.declineHandoff(request.params.project, request.params.handoffId);
+    case 'coordination.task.edit':
+      return coordination.editTask(request.params.project, request.params.taskId, {title: request.params.title, description: request.params.description, role: request.params.role});
+    case 'coordination.task.delete': return coordination.deleteTask(request.params.project, request.params.taskId);
+    case 'coordination.message.send': {
+      // Mail from the user is queued in the lane's inbox like mail from another lane — read when the
+      // lane next checks, never typed into its terminal behind its back.
+      coordinationLane(request.params.project, request.params.to);
+      const message = await coordination.send(request.params.project, 'user', request.params.to, request.params.body);
+      for (const socket of streamingSockets) pushEvent(socket, {event: 'coordination.message', project: request.params.project, message});
+      return message;
+    }
     case 'remote.list': return remotes.list();
     case 'remote.save': {
       await requireApproval(request.params.approvalId, 'remote.configure', `${request.params.host}:${request.params.port ?? 22}`, request.params.remoteSocket);
@@ -841,6 +853,10 @@ async function dispatch(request: RpcRequest) {
       return remotes.connect(request.params.profileId);
     }
     case 'remote.disconnect': return remotes.disconnect(request.params.profileId);
+    case 'remote.remove': {
+      await requireApproval(request.params.approvalId, 'remote.configure', request.params.profileId, 'remove remote profile');
+      return remotes.remove(request.params.profileId);
+    }
     case 'openDesign.get': return openDesign.get();
     case 'openDesign.save': return openDesign.save(request.params.url);
     case 'openDesign.status': return openDesign.status();
@@ -853,6 +869,10 @@ async function dispatch(request: RpcRequest) {
     case 'credentials.upsertAccount': {
       await requireApproval(request.params.approvalId, 'credential.change', `${request.params.provider}:${request.params.id}`, `credential ${request.params.mode}`);
       return broker.upsertAccount(request.params.provider, request.params.id, request.params.mode, request.params.label, request.params.apiKey, request.params.baseUrl, request.params.sameIdentityAs, request.params.model);
+    }
+    case 'credentials.removeAccount': {
+      await requireApproval(request.params.approvalId, 'credential.change', `${request.params.provider}:${request.params.accountId}`, 'remove account');
+      return broker.removeAccount(request.params.provider, request.params.accountId);
     }
     case 'credentials.setChain': {
       await requireApproval(request.params.approvalId, 'credential.change', request.params.provider, `chain ${request.params.accountIds.join(',')}`);
