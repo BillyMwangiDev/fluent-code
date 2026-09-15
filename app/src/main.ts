@@ -40,7 +40,7 @@ import {
   type ExplorerScope
 } from './coordination-explorer';
 import {currentProject} from './project-scope';
-import {leadLoad, sessionTree} from './session-tree';
+import {leadLoad, sessionMatches, sessionTotals, sessionTree, type SessionView} from './session-tree';
 
 const root = document.getElementById('app')!;
 
@@ -98,7 +98,9 @@ let explorerScope: ExplorerScope = (() => {
 })();
 let orchestrationProject: string | undefined;
 let explorerSelection: {project: string; subject: CoordinationSubject} | undefined;
-let showArchivedSessions = false;
+let sessionView: SessionView = 'all';
+/** Kept across re-renders so a status update does not wipe what the user typed. */
+let sessionQuery = '';
 
 function setExplorerScope(next: ExplorerScope) {
   explorerScope = next;
@@ -2795,33 +2797,37 @@ async function renderOnboarding(main: HTMLElement) {
 // --- Session list ------------------------------------------------------------
 
 async function renderSessions(main: HTMLElement) {
-  const [allSessions, chains] = await Promise.all([api.listSessions(true), api.listCredentials()]);
-  const archived = allSessions.filter(session => session.archivedAt);
-  const sessions = allSessions.filter(session => showArchivedSessions ? Boolean(session.archivedAt) : !session.archivedAt);
+  const [allSessions, chains, usage] = await Promise.all([api.listSessions(true), api.listCredentials(), api.usageSnapshot().catch(() => ({sessions: []}))]);
+  const usageBySession = new Map(usage.sessions.map(item => [item.sessionId, item]));
+  const sessions = allSessions.filter(session => sessionMatches(session, sessionView, ''));
 
   const newSessionButton = h('button', {class: 'btn primary'}, ['+ new session']);
   newSessionButton.addEventListener('click', () => navigate({name: 'new-session'}));
-  const archiveToggle = h('button', {class: 'btn'}, [showArchivedSessions ? 'show current sessions' : `show archived (${archived.length})`]);
-  archiveToggle.addEventListener('click', () => {
-    showArchivedSessions = !showArchivedSessions;
-    void render();
+  const viewButtons = (['all', 'active', 'archived'] as const).map(view => {
+    const count = allSessions.filter(session => sessionMatches(session, view, '')).length;
+    const button = h('button', {class: `btn${sessionView === view ? ' primary' : ''}`, type: 'button', 'aria-pressed': sessionView === view ? 'true' : 'false'}, [`${view} · ${count}`]);
+    button.addEventListener('click', () => { sessionView = view; void render(); });
+    return button;
   });
+  const search = h('input', {type: 'search', value: sessionQuery, placeholder: 'search sessions…', 'aria-label': 'Search sessions'}) as HTMLInputElement;
   main.append(
     h('div', {class: 'toolbar'}, [
-      h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), showArchivedSessions ? 'archived sessions' : 'sessions']), h('p', {class: 'section-sub'}, [showArchivedSessions ? 'Archived session records stay local until you restore or delete them.' : 'Archive finished sessions to clear this list without deleting their worktree or project files.'])]),
-      h('div', {class: 'actions'}, [archiveToggle, newSessionButton])
-    ])
+      h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), sessionView === 'archived' ? 'archived sessions' : 'sessions']), h('p', {class: 'section-sub'}, [sessionView === 'archived' ? 'Archived session records stay local until you restore or delete them.' : 'Archive finished sessions to clear this list without deleting their worktree or project files.'])]),
+      h('div', {class: 'actions'}, [newSessionButton])
+    ]),
+    h('div', {class: 'session-filters'}, [h('div', {class: 'segmented', role: 'group', 'aria-label': 'Session views'}, viewButtons), search])
   );
 
   if (sessions.length === 0) {
-    main.append(h('div', {class: 'empty-state'}, [showArchivedSessions ? 'No archived sessions.' : 'No sessions yet — start one with "+ new session".']));
+    main.append(h('div', {class: 'empty-state'}, [sessionView === 'archived' ? 'No archived sessions.' : sessionView === 'active' ? 'No sessions are running.' : 'No sessions yet — start one with "+ new session".']));
     return;
   }
 
   const table = h('table', {class: 'sessions'});
   table.append(
-    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checks', 'checkout', 'ready in', 'last active', 'actions'].map(label => h('th', {}, [label])))])
+    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'tokens', 'checks', 'checkout', 'ready in', 'last active', 'actions'].map(label => h('th', {}, [label])))])
   );
+  const rows: Array<{row: HTMLElement; session: SessionSummary; labels: string[]}> = [];
   const tbody = h('tbody');
   for (const {session, depth} of sessionTree(sessions)) {
     const name = session.task?.trim() || session.directory.split('/').filter(Boolean).pop() || session.directory;
@@ -2839,7 +2845,7 @@ async function renderSessions(main: HTMLElement) {
     restore.addEventListener('click', async event => {
       event.stopPropagation();
       await api.restoreSession(session.id);
-      showArchivedSessions = false;
+      sessionView = 'all';
       void render();
     });
     const remove = h('button', {class: 'btn danger', type: 'button'}, ['delete']);
@@ -2851,6 +2857,10 @@ async function renderSessions(main: HTMLElement) {
       void render();
     });
     actions.append(session.archivedAt ? restore : archive, remove);
+    const reported = usageBySession.get(session.id);
+    const tokens = reported && (reported.inputTokens !== undefined || reported.outputTokens !== undefined)
+      ? formatTokens((reported.inputTokens ?? 0) + (reported.outputTokens ?? 0))
+      : '—';
     const row = h('tr', {}, [
       h('td', {}, [h('div', {class: `session-name${depth ? ' session-lane' : ''}`}, [
         depth ? `↳ ${name}` : name,
@@ -2861,6 +2871,7 @@ async function renderSessions(main: HTMLElement) {
       h('td', {}, [session.model ? `${providerLabel[session.provider]} · ${session.model}` : providerLabel[session.provider]]),
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
+      h('td', {}, [tokens]),
       h('td', {}, [verificationPill(session.verification)]),
       h('td', {}, [session.worktreePath ? 'isolated' : 'shared']),
       h('td', {}, [laneReady(session)]),
@@ -2869,9 +2880,25 @@ async function renderSessions(main: HTMLElement) {
     ]);
     row.addEventListener('click', () => navigate({name: 'active-session', sessionId: session.id}));
     tbody.append(row);
+    rows.push({row, session, labels: [providerLabel[session.provider], accountLabel(session.accountId, chains)]});
   }
   table.append(tbody);
-  main.append(table);
+  const noMatches = h('div', {class: 'empty-state'}, ['No sessions match this search.']);
+  const footer = h('p', {class: 'section-sub session-footer', role: 'status'}, []);
+  // Search hides rows in place, so typing never rebuilds the page or loses the cursor.
+  const applySearch = () => {
+    sessionQuery = search.value;
+    const visible = rows.filter(({row, session, labels}) => {
+      row.hidden = !sessionMatches(session, sessionView, sessionQuery, labels);
+      return !row.hidden;
+    }).map(({session}) => session);
+    noMatches.hidden = visible.length > 0;
+    const totals = sessionTotals(visible, usageBySession);
+    footer.textContent = `${totals.count} session${totals.count === 1 ? '' : 's'} · ${totals.active} active · ${totals.tokens === undefined ? 'no token usage reported' : `${formatTokens(totals.tokens)} tokens reported`}`;
+  };
+  search.addEventListener('input', applySearch);
+  applySearch();
+  main.append(table, noMatches, footer);
 }
 
 // --- New session ------------------------------------------------------------
@@ -3294,14 +3321,14 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     archiveSession.disabled = isLive || Boolean(summary.archivedAt);
     archiveSession.addEventListener('click', async () => {
       await api.archiveSession(sessionId);
-      showArchivedSessions = true;
+      sessionView = 'archived';
       navigate({name: 'sessions'});
     });
     const restoreSession = h('button', {class: 'btn'}, ['restore session']);
     restoreSession.disabled = !summary.archivedAt;
     restoreSession.addEventListener('click', async () => {
       await api.restoreSession(sessionId);
-      showArchivedSessions = false;
+      sessionView = 'all';
       navigate({name: 'sessions'});
     });
     const deleteSession = h('button', {class: 'btn danger'}, ['delete session']);
