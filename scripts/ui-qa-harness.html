@@ -70,6 +70,7 @@
           'sessions.list': () => [
             session,
             {...session, id: 'lane-codex-02', provider: 'codex', task: 'Review platform-specific IPC', accountId: 'codex-api', status: 'running', verification: 'running', lead: undefined},
+            {...session, id: 'lane-stopped-05', provider: 'claude', task: 'Fix payment webhook', status: 'stopped', lead: undefined, directory: project + '/.fluent-worktrees/fluent-code/lane-stopped-05', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-stopped-05'},
             {...session, id: 'lane-child-04', provider: 'codex', task: 'Parse the config file', accountId: 'codex-api', status: 'running', lead: undefined, parentSessionId: 'lane-claude-01', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-child-04'},
             {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', lead: undefined, archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}
           ],
@@ -79,6 +80,7 @@
           'sessions.resize': () => ({resized: true}),
           'sessions.send': () => ({sent: true}),
           'sessions.stop': () => ({...session, status: 'stopped'}),
+          'sessions.resume': params => ({...session, id: params.sessionId, status: 'running', lead: undefined}),
           'sessions.archive': () => ({...session, status: 'stopped', archivedAt: now}),
           'sessions.restore': () => ({...session, status: 'stopped'}),
           'sessions.delete': () => ({deleted: true, sessionId: session.id}),

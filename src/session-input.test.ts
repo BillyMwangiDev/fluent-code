@@ -193,3 +193,97 @@ describe('session archive and deletion', () => {
     }
   });
 });
+
+describe('resuming a stopped session', () => {
+  async function fakeCli(root: string, name: string) {
+    const bin = join(root, 'bin');
+    await mkdir(bin, {recursive: true});
+    await writeFile(join(bin, name), ['#!/bin/sh', 'printf "args:%s\\n" "$*"', 'while true; do sleep 1; done'].join('\n'));
+    await chmod(join(bin, name), 0o755);
+    return bin;
+  }
+
+  it('continues the Claude conversation Fluent named at launch, with the same model and permission mode', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-resume-'));
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${await fakeCli(root, 'claude')}${delimiter}${previousPath}`;
+    const manager = new SessionManager(join(root, 'state'));
+    let started = false;
+    try {
+      const summary = await manager.create({provider: 'claude', directory: root, model: 'opus', permissionMode: 'plan'});
+      started = true;
+      await waitFor(() => manager.get(summary.id).output.includes('args:'));
+      assert.match(manager.get(summary.id).output, new RegExp(`--model opus --permission-mode plan [\\s\\S]*--session-id ${summary.id}`));
+      assert.equal(summary.permissionMode, 'plan');
+      await manager.stop(summary.id);
+      await waitFor(() => manager.get(summary.id).pid === undefined);
+
+      const resumed = await manager.resume(summary.id);
+
+      assert.equal(resumed.status, 'running');
+      await waitFor(() => manager.get(summary.id).output.includes(`--resume ${summary.id}`));
+      assert.match(manager.get(summary.id).output.split(`--resume ${summary.id}`)[0]!.split('args:').at(-1)!, /--model opus --permission-mode plan/);
+      assert.equal(manager.runStore.get(summary.id).state, 'running', 'the run reopens as a new attempt');
+      await assert.rejects(manager.resume(summary.id), /Stop the session before you resume it/);
+    } finally {
+      if (started) await manager.shutdown().catch(() => undefined);
+      process.env.PATH = previousPath;
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+
+  it('continues the Codex session found in Codex\'s own session files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-resume-'));
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${await fakeCli(root, 'codex')}${delimiter}${previousPath}`;
+    process.env.CODEX_HOME = join(root, 'codex-home');
+    const manager = new SessionManager(join(root, 'state'));
+    let started = false;
+    try {
+      const summary = await manager.create({provider: 'codex', directory: root});
+      started = true;
+      await waitFor(() => manager.get(summary.id).output.includes('args:'));
+      // What Codex records for the session it started in this directory.
+      const now = new Date();
+      const folder = join(root, 'codex-home', 'sessions', String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0'));
+      await mkdir(folder, {recursive: true});
+      const id = 'cccccccc-0000-4000-8000-000000000003';
+      await writeFile(join(folder, `rollout-${id}.jsonl`), `${JSON.stringify({type: 'session_meta', payload: {id, cwd: root, timestamp: now.toISOString()}})}\n`);
+      await manager.stop(summary.id);
+      await waitFor(() => manager.get(summary.id).pid === undefined);
+
+      await manager.resume(summary.id);
+
+      await waitFor(() => manager.get(summary.id).output.includes(`args:resume ${id}`));
+      assert.equal(manager.get(summary.id).nativeSessionId, id);
+    } finally {
+      if (started) await manager.shutdown().catch(() => undefined);
+      process.env.PATH = previousPath;
+      delete process.env.CODEX_HOME;
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+
+  it('refuses to guess a shared-checkout lane\'s conversation when it cannot tell which was its own', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-resume-'));
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${await fakeCli(root, 'codex')}${delimiter}${previousPath}`;
+    process.env.CODEX_HOME = join(root, 'empty-codex-home');
+    const manager = new SessionManager(join(root, 'state'));
+    let started = false;
+    try {
+      const summary = await manager.create({provider: 'codex', directory: root});
+      started = true;
+      await waitFor(() => manager.get(summary.id).output.includes('args:'));
+      await manager.stop(summary.id);
+      await waitFor(() => manager.get(summary.id).pid === undefined);
+
+      await assert.rejects(manager.resume(summary.id), /nothing to resume/);
+    } finally {
+      if (started) await manager.shutdown().catch(() => undefined);
+      process.env.PATH = previousPath;
+      delete process.env.CODEX_HOME;
+      await rm(root, {recursive: true, force: true});
+    }
+  });
+});

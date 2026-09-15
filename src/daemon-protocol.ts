@@ -28,6 +28,10 @@ export type SessionSummary = {
   command: string;
   /** Explicit model selection for adapters that can target more than one upstream model. */
   model?: string;
+  /** The CLI's own permission mode (Claude Code) or sandbox (Codex) chosen at launch. */
+  permissionMode?: string;
+  /** The provider's conversation id for this lane, so a stopped lane resumes its own conversation. */
+  nativeSessionId?: string;
   directory: string;
   task?: string;
   status: SessionStatus;
@@ -365,12 +369,13 @@ export type LaneOperation =
 export type RpcRequest =
   | {id: string; method: 'ping'}
   | {id: string; method: 'sessions.list'; params?: {includeArchived?: boolean}}
-  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes: number}; leadApprovalId?: string}}
+  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes: number}; leadApprovalId?: string; model?: string; permissionMode?: string; permissionApprovalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */
   | {id: string; method: 'sessions.inject'; params: {sessionId: string; text: string; submit?: boolean}}
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
+  | {id: string; method: 'sessions.resume'; params: {sessionId: string; approvalId?: string; permissionApprovalId?: string}}
   | {id: string; method: 'sessions.archive'; params: {sessionId: string}}
   | {id: string; method: 'sessions.restore'; params: {sessionId: string}}
   | {id: string; method: 'sessions.delete'; params: {sessionId: string; approvalId?: string}}

@@ -35,6 +35,7 @@ import {RecipeRunner} from './recipe-runner.js';
 import {isLaneProvider} from './lane-commands.js';
 import {assertTicketReady, isLiveLane, laneReadiness, renderLanes, renderWait, screenText, ticketBrief, validLeadBudget} from './lead-lanes.js';
 import {coordCommand} from './agent-briefing.js';
+import {isRiskyPermission, sessionOptionArgs} from './session-options.js';
 
 const socketPath = daemonSocketPath();
 const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
@@ -610,6 +611,12 @@ async function dispatch(request: RpcRequest) {
       // grant and its budget are approval-bound here, never only a frontend checkbox. Validated
       // before any approval is consumed.
       const lead = request.params.lead ? {maxLanes: validLeadBudget(request.params.lead.maxLanes)} : undefined;
+      // Launch options are validated before any consent record is spent. A mode that removes the
+      // CLI's own safety prompts needs its own approval, bound to the directory and the mode.
+      sessionOptionArgs(request.params.provider, {model: request.params.model, permissionMode: request.params.permissionMode});
+      if (isRiskyPermission(request.params.provider, request.params.permissionMode)) {
+        await requireApproval(request.params.permissionApprovalId, 'session.permissions', request.params.directory, `permission ${request.params.permissionMode}`);
+      }
       // Claude's additive hook relay writes `.claude/settings.json` in the selected project.
       // Creating a terminal is user-initiated, but that project configuration write still needs a
       // daemon-issued, action-bound consent record rather than a frontend-only affordance.
@@ -630,6 +637,16 @@ async function dispatch(request: RpcRequest) {
     case 'sessions.send': await manager.send(request.params.sessionId, request.params.input); return {sent: true};
     case 'sessions.inject': return manager.inject(request.params.sessionId, request.params.text, request.params.submit ?? true);
     case 'sessions.stop': return manager.stop(request.params.sessionId);
+    case 'sessions.resume': {
+      const session = manager.get(request.params.sessionId);
+      // Resuming rewrites the same hook settings and relaunches with the same permission mode, so it
+      // needs the same consent a new session would.
+      if (session.provider === 'claude') await requireApproval(request.params.approvalId, 'project.configure', session.directory, 'configure Claude hooks');
+      if (isRiskyPermission(session.provider, session.permissionMode)) {
+        await requireApproval(request.params.permissionApprovalId, 'session.permissions', session.directory, `permission ${session.permissionMode}`);
+      }
+      return manager.resume(session.id, await broker.resolveEnv(session.provider, session.accountId));
+    }
     case 'sessions.archive': return manager.archive(request.params.sessionId);
     case 'sessions.restore': return manager.restoreArchived(request.params.sessionId);
     case 'sessions.delete': {

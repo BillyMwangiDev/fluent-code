@@ -5,6 +5,8 @@ import {delimiter, dirname, join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {providerAdapter, providerLaunchArgs, resolveProviderExecutable} from './providers.js';
+import {sessionOptionArgs} from './session-options.js';
+import {findCodexSession} from './native-sessions.js';
 import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
 import {briefingArgs, leadDirection} from './agent-briefing.js';
@@ -177,9 +179,11 @@ export class SessionManager extends EventEmitter {
     return {...session.summary, output: session.output};
   }
 
-  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; parentSessionId?: string}) {
+  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; parentSessionId?: string; model?: string; permissionMode?: string}) {
     const adapter = providerAdapter(provider);
-    const executable = resolveProviderExecutable(adapter);
+    // Both checks fail before any session or run record exists.
+    resolveProviderExecutable(adapter);
+    const optionArgs = sessionOptionArgs(provider, {model: requestedModel, permissionMode});
     const now = new Date().toISOString();
     const id = randomUUID();
     await this.runStore.create({id, provider, accountId, adapter: {id: 'pty', version: '1', capabilities: {structuredEvents: 'unavailable', providerFirstEvent: 'unavailable'}}});
@@ -202,7 +206,7 @@ export class SessionManager extends EventEmitter {
       id,
       provider,
       command: adapter.executable,
-      model,
+      model: model ?? (requestedModel?.trim() || undefined),
       directory: sessionDirectory,
       task: task?.trim() || undefined,
       status: 'starting',
@@ -214,16 +218,86 @@ export class SessionManager extends EventEmitter {
       prepareMs: worktree?.prepareMs,
       warmedPaths: worktree?.warmedPaths,
       ...(lead ? {lead} : {}),
-      ...(parentSessionId ? {parentSessionId} : {})
+      ...(parentSessionId ? {parentSessionId} : {}),
+      ...(permissionMode?.trim() ? {permissionMode: permissionMode.trim()} : {}),
+      // Claude Code accepts a conversation id at launch; recording it is what makes resume exact.
+      ...(provider === 'claude' ? {nativeSessionId: id} : {})
     };
     const session: LiveSession = {summary, output: '', directory: sessionDirectory};
     this.sessions.set(summary.id, session);
     if (worktree) await this.runStore.setWorkspace(id, {path: worktree.path, projectDirectory: worktree.projectDirectory});
     await this.persist();
 
-    if (provider === 'claude') {
+    // A lead's instructions travel through the same per-CLI channels as the coordination briefing.
+    const direction = lead ? leadDirection(provider, lead.maxLanes, summary.task) : undefined;
+    await this.launch(session, env, [
+      ...adapter.args, ...providerLaunchArgs(provider, env), ...optionArgs, ...briefingArgs(provider, direction?.systemPrompt),
+      ...(provider === 'claude' ? ['--session-id', id] : []),
+      ...initialPromptArgs(provider, direction ? direction.prompt : summary.task)
+    ]);
+    return summary;
+  }
+
+  /**
+   * Starts a stopped lane's CLI again on the same session record, continuing the provider's own
+   * conversation with the model and permission mode it launched with. The lane keeps its id, so its
+   * tasks, messages, and lead relationships stay attached.
+   */
+  async resume(sessionId: string, env?: CredentialEnvironment) {
+    const session = this.requireStoppedSession(sessionId, 'resume');
+    const {summary} = session;
+    if (summary.archivedAt) throw new Error('Restore the session before resuming it');
+    const adapter = providerAdapter(summary.provider);
+    const conversation = await this.resumeArgs(summary);
+    const args = summary.provider === 'claude'
+      ? [
+          ...adapter.args,
+          ...sessionOptionArgs('claude', {model: summary.model, permissionMode: summary.permissionMode}),
+          ...briefingArgs('claude', summary.lead ? leadDirection('claude', summary.lead.maxLanes).systemPrompt : undefined),
+          ...conversation
+        ]
+      // `codex resume` restores the session's own settings; its options differ from a fresh launch.
+      : [...adapter.args, ...conversation];
+    await this.runStore.reopen(sessionId, 'session resumed', {adapter: 'pty'});
+    delete summary.exitCode;
+    delete summary.error;
+    this.setStatus(session, 'starting');
+    await this.launch(session, env, args);
+    await this.persist();
+    return summary;
+  }
+
+  /** Which conversation a resumed lane continues. When that cannot be told exactly it refuses, rather
+   * than attaching a lane to whichever conversation happens to be most recent in a shared checkout. */
+  private async resumeArgs(summary: SessionSummary) {
+    const adapter = providerAdapter(summary.provider);
+    if (summary.provider === 'claude') {
+      if (summary.nativeSessionId) return ['--resume', summary.nativeSessionId];
+      if (summary.worktreePath) return ['--continue'];
+      throw new Error('This session started before Fluent recorded Claude conversation ids and shared a checkout, so Fluent cannot tell which conversation was its own.');
+    }
+    if (summary.provider === 'codex') {
+      const id = summary.nativeSessionId ?? await findCodexSession(summary.directory, summary.createdAt);
+      if (id) {
+        summary.nativeSessionId = id;
+        return ['resume', id];
+      }
+      // An isolated worktree only ever held this lane, so Codex's most recent session there is its own.
+      if (summary.worktreePath) return ['resume', '--last'];
+      throw new Error('Codex has no session file for this lane’s directory, so there is nothing to resume.');
+    }
+    throw new Error(`${adapter.label} lanes cannot be resumed yet`);
+  }
+
+  /** Spawns a session's provider CLI in its terminal and wires it up. Shared by create and resume. */
+  private async launch(session: LiveSession, env: CredentialEnvironment | undefined, args: string[]) {
+    const {summary} = session;
+    const id = summary.id;
+    const adapter = providerAdapter(summary.provider);
+    const executable = resolveProviderExecutable(adapter);
+    if (summary.provider === 'claude') {
       // Best-effort: a session should still start even if the directory isn't writable.
-      await ensureClaudeHooks(sessionDirectory).catch(error => console.error(`fluentd could not configure Claude Code hooks: ${error.message}`));
+      await ensureClaudeHooks(session.directory).catch(error => console.error(`fluentd could not configure Claude Code hooks: ${error.message}`));
     }
 
     // node-pty creates the terminal; Fluent still launches the provider CLI unchanged apart from
@@ -235,21 +309,19 @@ export class SessionManager extends EventEmitter {
       // would otherwise start a lane nothing will stop.
       if (this.closing) throw new Error('fluentd is shutting down');
       const pty = await ptyRuntime();
-      // A lead's instructions travel through the same per-CLI channels as the coordination briefing.
-      const direction = lead ? leadDirection(provider, lead.maxLanes, summary.task) : undefined;
-      terminal = pty.spawn(executable, [...adapter.args, ...providerLaunchArgs(provider, env), ...briefingArgs(provider, direction?.systemPrompt), ...initialPromptArgs(provider, direction ? direction.prompt : summary.task)], {
-      cwd: sessionDirectory,
-      env: applyCredentialEnvironment(env, {
-        // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
-        // `env node` shebang resolves inside the detached daemon as well.
-        PATH: [dirname(executable), process.env.PATH].filter(Boolean).join(delimiter),
-        // Lets the lane's hook relay and `fluent-coord` name their lane exactly. The working
-        // directory alone cannot tell apart several lanes sharing one checkout.
-        FLUENT_SESSION_ID: id
-      }),
-      name: process.env.TERM ?? 'xterm-256color',
-      cols: 120,
-      rows: 40
+      terminal = pty.spawn(executable, args, {
+        cwd: session.directory,
+        env: applyCredentialEnvironment(env, {
+          // See providers.ts: preserve the Node bin that owns a discovered NVM CLI so its
+          // `env node` shebang resolves inside the detached daemon as well.
+          PATH: [dirname(executable), process.env.PATH].filter(Boolean).join(delimiter),
+          // Lets the lane's hook relay and `fluent-coord` name their lane exactly. The working
+          // directory alone cannot tell apart several lanes sharing one checkout.
+          FLUENT_SESSION_ID: id
+        }),
+        name: process.env.TERM ?? 'xterm-256color',
+        cols: 120,
+        rows: 40
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -260,6 +332,9 @@ export class SessionManager extends EventEmitter {
       throw new Error(session.summary.error);
     }
     session.terminal = terminal;
+    // A new terminal starts at the spawn size, whatever a view had resized the previous one to.
+    session.cols = undefined;
+    session.rows = undefined;
     session.summary.pid = terminal.pid;
     this.append(session, `$ ${adapter.executable}\n`);
     terminal.onData(chunk => this.append(session, chunk));
@@ -270,7 +345,6 @@ export class SessionManager extends EventEmitter {
     terminal.onExit(({exitCode}) => {
       void this.finalizeTerminalExit(session, exitCode);
     });
-    return summary;
   }
 
   /**
@@ -509,7 +583,7 @@ export class SessionManager extends EventEmitter {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   }
 
-  private requireStoppedSession(sessionId: string, action: 'archive' | 'restore' | 'delete') {
+  private requireStoppedSession(sessionId: string, action: 'archive' | 'restore' | 'delete' | 'resume') {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     if (session.terminal || session.summary.status === 'running' || session.summary.status === 'starting') {

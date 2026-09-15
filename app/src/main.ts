@@ -8,6 +8,8 @@ import '@fontsource/ibm-plex-mono/700.css';
 import {
   activeRemoteSocket,
   api,
+  permissionModeChoices,
+  riskyPermissionModes,
   onAdmissionWarning,
   onCredentialNotice,
   onCredentialSwitched,
@@ -2856,7 +2858,20 @@ async function renderSessions(main: HTMLElement) {
       await api.deleteSession(session.id);
       void render();
     });
-    actions.append(session.archivedAt ? restore : archive, remove);
+    const resume = h('button', {class: 'btn', type: 'button'}, ['resume']);
+    resume.hidden = isLive || Boolean(session.archivedAt) || (session.provider !== 'claude' && session.provider !== 'codex');
+    resume.addEventListener('click', async event => {
+      event.stopPropagation();
+      resume.disabled = true;
+      try {
+        await api.resumeSession(session);
+        navigate({name: 'active-session', sessionId: session.id});
+      } catch (error) {
+        showActionError(error);
+        resume.disabled = false;
+      }
+    });
+    actions.append(resume, session.archivedAt ? restore : archive, remove);
     const reported = usageBySession.get(session.id);
     const tokens = reported && (reported.inputTokens !== undefined || reported.outputTokens !== undefined)
       ? formatTokens((reported.inputTokens ?? 0) + (reported.outputTokens ?? 0))
@@ -2952,6 +2967,7 @@ async function renderNewSession(main: HTMLElement) {
       for (const sibling of providerCards.children) sibling.classList.remove('selected');
       card.classList.add('selected');
       renderAccounts();
+      renderLaunchOptions();
       void renderHeadroom();
     });
     providerCards.append(card);
@@ -2959,6 +2975,24 @@ async function renderNewSession(main: HTMLElement) {
   providerCards.append(h('div', {class: 'card disabled'}, [h('h3', {}, ['+ provider']), h('p', {class: 'subtitle'}, ['adapter extension point'])]));
   renderAccounts();
   main.append(accountsContainer);
+
+  // The CLI's own model and permission flags, offered only for the CLIs Fluent passes them to.
+  const modelInput = h('input', {type: 'text', placeholder: 'model — the CLI default when empty', 'aria-label': 'Model'}) as HTMLInputElement;
+  const permissionSelect = h('select', {'aria-label': 'Permission mode'}) as HTMLSelectElement;
+  const optionsNote = h('p', {class: 'section-sub'}, []);
+  const launchOptions = h('div', {class: 'field launch-options'}, [h('label', {class: 'field-label'}, ['model and permissions']), modelInput, permissionSelect, optionsNote]);
+  const renderLaunchOptions = () => {
+    const choices = permissionModeChoices[selectedProvider];
+    launchOptions.hidden = !choices;
+    permissionSelect.innerHTML = '';
+    permissionSelect.append(h('option', {value: ''}, ['permission mode — the CLI default']));
+    for (const mode of choices ?? []) {
+      permissionSelect.append(h('option', {value: mode}, [riskyPermissionModes[selectedProvider] === mode ? `${mode} — no safety prompts` : mode]));
+    }
+    optionsNote.textContent = selectedProvider === 'codex' ? 'Codex applies this as its sandbox.' : 'Claude Code applies this as its permission mode.';
+  };
+  renderLaunchOptions();
+  main.append(launchOptions);
 
   const dirInput = h('input', {type: 'text', placeholder: '/path/to/project', value: workspacePath}) as HTMLInputElement;
   const taskInput = h('textarea', {placeholder: 'what should this session start with? (optional)'});
@@ -2998,12 +3032,19 @@ async function renderNewSession(main: HTMLElement) {
   startButton.addEventListener('click', async () => {
     const directory = dirInput.value.trim();
     if (!directory) return dirInput.focus();
+    const permissionMode = launchOptions.hidden ? undefined : permissionSelect.value || undefined;
+    if (permissionMode && riskyPermissionModes[selectedProvider] === permissionMode && !(await askConfirm({
+      title: 'start without safety prompts',
+      body: `${providerLabel[selectedProvider]} will run with “${permissionMode}”, which removes its own prompts before it edits files or runs commands.`,
+      confirmLabel: 'start anyway',
+      danger: true
+    }))) return;
     startButton.disabled = true;
     startNotice.className = 'action-status';
     startNotice.textContent = 'starting session…';
     try {
       setWorkspacePath(directory);
-      const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked, lead: leadInput.checked ? {maxLanes: Number(leadBudget.value)} : undefined});
+      const summary = await api.createSession({provider: selectedProvider, directory, task: taskInput.value.trim() || undefined, accountId: selectedAccountId, isolate: isolateInput.checked, lead: leadInput.checked ? {maxLanes: Number(leadBudget.value)} : undefined, model: launchOptions.hidden ? undefined : modelInput.value.trim() || undefined, permissionMode});
       navigate({name: 'active-session', sessionId: summary.id});
     } catch (error) {
       const message = actionErrorText(error);
@@ -3338,6 +3379,19 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
       await api.deleteSession(sessionId);
       navigate({name: 'sessions'});
     });
+    const resumeSession = h('button', {class: 'btn primary'}, ['resume session']);
+    resumeSession.hidden = isLive || Boolean(summary.archivedAt) || (summary.provider !== 'claude' && summary.provider !== 'codex');
+    resumeSession.addEventListener('click', async () => {
+      resumeSession.disabled = true;
+      try {
+        await api.resumeSession(summary);
+        // A fresh render re-fits the terminal to the new process's grid.
+        void render();
+      } catch (error) {
+        showActionError(error);
+        resumeSession.disabled = false;
+      }
+    });
     const reviewChanges = h('button', {class: 'btn'}, ['review changes']);
     reviewChanges.addEventListener('click', async () => {
       review.innerHTML = '';
@@ -3410,6 +3464,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         h('div', {class: 'meta'}, [
           h('span', {class: 'pill status-default'}, [summary.model ? `${providerLabel[summary.provider]} · ${summary.model}` : providerLabel[summary.provider]]),
           h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
+          ...(summary.permissionMode ? [h('span', {class: 'pill'}, [`permission · ${summary.permissionMode}`])] : []),
           h('span', {class: `pill status-${summary.status}`}, [summary.status]),
           ...(currentLeadPill ? [currentLeadPill] : []),
           ...(summary.parentSessionId ? [(() => {
@@ -3425,7 +3480,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
           h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
         ])
       ]),
-      h('div', {class: 'actions'}, [mergeLane, runChecks, checkpoint, reviewChanges, removeWorktree, summary.archivedAt ? restoreSession : archiveSession, deleteSession, stopButton])
+      h('div', {class: 'actions'}, [mergeLane, runChecks, checkpoint, reviewChanges, removeWorktree, summary.archivedAt ? restoreSession : archiveSession, deleteSession, resumeSession, stopButton])
     );
   }
 

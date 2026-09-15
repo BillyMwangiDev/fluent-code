@@ -141,6 +141,23 @@ export class RunStore extends EventEmitter {
     return run;
   }
 
+  /**
+   * A resumed lane starts a new attempt of the same run. Every other state change follows the
+   * transition table; this is the one deliberate way back out of a finished state, and it is
+   * journaled like any other change so a restart replays it.
+   */
+  async reopen(runId: string, reason: string, source: RunEvent['source'] = {adapter: 'fluentd'}) {
+    const run = this.get(runId);
+    if (run.state === 'preparing') return run;
+    const event = await this.append(run, 'run.state_changed', {from: run.state, to: 'preparing', reason}, source);
+    run.state = 'preparing';
+    run.updatedAt = event.atWall;
+    this.applyTiming(run, 'run.preparing', {atMonoMs: event.atMonoMs, atWall: event.atWall, available: true});
+    this.scheduleSnapshot();
+    this.emit('event', event);
+    return run;
+  }
+
   async ready(runId: string, source: RunEvent['source'] = {adapter: 'fluentd'}) {
     const run = this.get(runId);
     if (run.state === 'preparing') await this.transition(runId, 'ready', 'workspace and adapter ready', source);

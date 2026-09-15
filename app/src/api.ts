@@ -8,7 +8,7 @@ export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidi
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 export type CredentialMode = 'subscription' | 'platform-credits' | 'api-key';
 export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';
-export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'session.lead' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
+export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'session.lead' | 'session.permissions' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
 export type ApprovalRecord = {id: string; action: ApprovalAction; target: string; commandHash?: string; baseSha?: string; issuedAt: string; expiresAt: string; consumedAt?: string};
 
 export type SessionSummary = {
@@ -16,6 +16,8 @@ export type SessionSummary = {
   provider: ProviderId;
   command: string;
   model?: string;
+  permissionMode?: string;
+  nativeSessionId?: string;
   directory: string;
   task?: string;
   status: SessionStatus;
@@ -308,15 +310,34 @@ export function selectRemoteSocket(socketPath?: string) {
   activeSocket = socketPath;
 }
 
+/** Mirrors src/session-options.ts: each CLI's own permission (Claude Code) or sandbox (Codex) choices. */
+export const permissionModeChoices: Partial<Record<ProviderId, readonly string[]>> = {
+  claude: ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'],
+  codex: ['read-only', 'workspace-write', 'danger-full-access']
+};
+/** The choice that removes the CLI's own safety prompts, which fluentd approves separately. */
+export const riskyPermissionModes: Partial<Record<ProviderId, string>> = {claude: 'bypassPermissions', codex: 'danger-full-access'};
+
 export const api = {
   ping: () => daemonRequest<{ok: boolean; pid: number; protocolVersion: number}>('ping'),
   listSessions: (includeArchived = false) => daemonRequest<SessionSummary[]>('sessions.list', includeArchived ? {includeArchived: true} : {}),
-  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}}) => {
+  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; model?: string; permissionMode?: string}) => {
     const approval = params.provider === 'claude'
       ? await issueApproval('project.configure', params.directory, 'configure Claude hooks')
       : undefined;
     const leadApproval = params.lead ? await issueApproval('session.lead', params.directory, `lead ${params.lead.maxLanes}`) : undefined;
-    return daemonRequest<SessionSummary>('sessions.create', {...params, approvalId: approval?.id, leadApprovalId: leadApproval?.id});
+    const permissionApproval = params.permissionMode && riskyPermissionModes[params.provider] === params.permissionMode
+      ? await issueApproval('session.permissions', params.directory, `permission ${params.permissionMode}`)
+      : undefined;
+    return daemonRequest<SessionSummary>('sessions.create', {...params, approvalId: approval?.id, leadApprovalId: leadApproval?.id, permissionApprovalId: permissionApproval?.id});
+  },
+  /** Starts a stopped session's CLI again on its own conversation, with the consent a new launch needs. */
+  resumeSession: async (session: SessionSummary) => {
+    const approval = session.provider === 'claude' ? await issueApproval('project.configure', session.directory, 'configure Claude hooks') : undefined;
+    const permissionApproval = session.permissionMode && riskyPermissionModes[session.provider] === session.permissionMode
+      ? await issueApproval('session.permissions', session.directory, `permission ${session.permissionMode}`)
+      : undefined;
+    return daemonRequest<SessionSummary>('sessions.resume', {sessionId: session.id, approvalId: approval?.id, permissionApprovalId: permissionApproval?.id});
   },
   getSession: (sessionId: string) => daemonRequest<SessionSnapshot>('sessions.get', {sessionId}),
   getRun: (runId: string) => daemonRequest<Run>('runs.get', {runId}),

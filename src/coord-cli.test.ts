@@ -315,3 +315,19 @@ describe('the user messaging a lane', () => {
     await assert.rejects(() => daemonRequest('coordination.message.send', {project, to: 'not-a-lane', body: 'hello'}));
   });
 });
+
+describe('launch options through fluentd', () => {
+  it('needs an approval before a lane starts without its CLI\'s own safety prompts', async () => {
+    await assert.rejects(() => daemonRequest('sessions.create', {provider: 'codex', directory: project, isolate: true, permissionMode: 'danger-full-access'}), /Approval is required for session\.permissions/);
+    const approval = await daemonRequest<{id: string}>('approvals.issue', {action: 'session.permissions', target: project, command: 'permission danger-full-access'});
+
+    const lane = await daemonRequest<SessionSummary>('sessions.create', {provider: 'codex', directory: project, isolate: true, permissionMode: 'danger-full-access', permissionApprovalId: approval.id});
+
+    assert.equal(lane.permissionMode, 'danger-full-access');
+    await daemonRequest('sessions.stop', {sessionId: lane.id});
+  });
+
+  it('refuses a permission mode the CLI does not have', async () => {
+    await assert.rejects(() => daemonRequest('sessions.create', {provider: 'codex', directory: project, isolate: true, permissionMode: 'acceptEdits'}), /no permission mode/);
+  });
+});

@@ -11,6 +11,7 @@ export type ApprovalAction =
   | 'integration.merge'
   | 'session.delete'
   | 'session.lead'
+  | 'session.permissions'
   | 'remote.configure'
   | 'remote.connect'
   | 'extension.install'
