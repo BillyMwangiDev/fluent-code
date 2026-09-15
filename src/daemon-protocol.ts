@@ -343,7 +343,7 @@ export type CoordinationState = {
   events: CoordinationEvent[];
 };
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; autoReconnect: boolean; status: 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'failed'; error?: string};
-export type OpenDesignProfile = {url: string};
+export type OpenDesignProfile = {url: string; enabled: boolean};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 export type DesignToolId = 'pen' | 'open-design';
 /** OpenDesign's native installer documents only these two host CLIs. */

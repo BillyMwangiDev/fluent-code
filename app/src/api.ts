@@ -255,7 +255,7 @@ export type ClaimConflict = {path: string; claimedPath: string; sessionId: strin
 export type RankedConflict = ClaimConflict & {hotspot: boolean};
 export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts: ClaimConflict[]};
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; autoReconnect: boolean; status: 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'failed'; error?: string};
-export type OpenDesignProfile = {url: string};
+export type OpenDesignProfile = {url: string; enabled: boolean};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 export type DesignTool = {id: 'pen' | 'open-design'; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
 
@@ -440,6 +440,8 @@ export const api = {
   openDesign: () => localDaemonRequest<OpenDesignProfile>('openDesign.get'),
   saveOpenDesign: (url: string) => localDaemonRequest<OpenDesignProfile>('openDesign.save', {url}),
   openDesignStatus: () => localDaemonRequest<OpenDesignStatus>('openDesign.status'),
+  /** Opens one exact user-enabled loopback origin in its own native guarded webview. */
+  openEmbeddedContent: (kind: 'preview' | 'open-design', url: string) => invoke<string>('open_embedded_content', {kind, origin: url}),
   listDesignTools: () => localDaemonRequest<DesignTool[]>('designTools.list'),
   installOpenDesignMcp: async (target: 'claude' | 'codex') => {
     const approval = await issueApproval('extension.install', `open-design:${target}`, 'install OpenDesign MCP', undefined, true);

@@ -6,7 +6,9 @@ Fluent connects to a user-run instance of [OpenDesign](https://open-design.ai/of
 
 - Fluent stores only a loopback OpenDesign **origin** (default `http://127.0.0.1:7456`) and probes
   it from `fluentd`. Paths, query strings, fragments, and URL credentials are deliberately not
-  retained, so a custom health-check path cannot currently be configured.
+  retained, so a custom health-check path cannot currently be configured. The default is not
+  embedded merely because it answers: saving an origin in the Design workspace is the user's
+  persisted opt-in to enable that exact origin.
 - When reachable, the Design workspace can show OpenDesign in its existing desktop surface and creates Fluent coordination tasks for build handoff. A task can carry a repo-relative source mapping, component and token notes, a loopback preview URL, intended implementation paths, and an explicit reviewer handoff. Intended paths only become claims when the user selects an active owner lane and requests that reservation.
 - OpenDesign remains its own local service. It owns its agents, model credentials, and design-file protocol; Fluent does not install it, start it, proxy its traffic, or copy its code.
 
@@ -15,8 +17,10 @@ Fluent connects to a user-run instance of [OpenDesign](https://open-design.ai/of
 The connector accepts only `localhost`, `127.0.0.1`, or `[::1]` HTTP(S) origins. For a remote
 machine, run OpenDesign beside the remote Fluent daemon and use an authenticated tunnel before
 extending this connector. This keeps a locally configured design service from becoming an arbitrary
-network request channel. The Tauri content-security policy permits Fluent assets plus loopback
-HTTP(S) connections and frames; it does not permit non-loopback design origins.
+network request channel. The static Tauri policy prohibits embedded frames. A user-enabled
+OpenDesign origin opens in a dedicated local webview whose native navigation guard permits only
+that exact origin for the active app run and blocks a redirect to a different port, host spelling,
+or non-loopback URL.
 
 ## Completion check
 

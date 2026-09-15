@@ -37,8 +37,12 @@ may reveal hostnames or topology; treat the state directory accordingly.
 ## Security posture and open work
 
 The daemon is intentionally a same-user local control plane. It can run provider commands, manage
-credentials, manipulate Fluent worktrees, and use configured provider extensions. The catalog
-screen confirms each user-initiated installation, but the RPCs still need daemon-side input
-validation and a trusted-source policy. The Tauri content-security policy is also not yet locked
-down because the Design workspace embeds a user-run loopback service. Both boundaries must be
-completed before treating third-party extensions or embedded remote content as production-safe.
+credentials, manipulate Fluent worktrees, and use configured provider extensions. Marketplace and
+MCP inputs are validated before a provider CLI sees them, and the catalog can enforce a
+trusted-source policy in addition to its explicit approval record.
+
+The desktop CSP prohibits embedded frames. Preview and OpenDesign instead open in dedicated local
+webviews whose native navigation guards admit only the exact, canonical origin that the user
+enabled for the running desktop session, including same-origin routes but never a redirect to a
+different origin. Loopback content remains untrusted, never receives the daemon socket, and must
+not be treated as a privileged extension surface.

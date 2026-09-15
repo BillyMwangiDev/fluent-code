@@ -2048,8 +2048,8 @@ async function renderDesignWorkspace(main: HTMLElement) {
   const sessions = await api.listSessions();
   const project = currentProject(workspacePath, sessions);
   const [openDesign, openDesignStatus] = await Promise.all([
-    api.openDesign().catch(() => ({url: 'http://127.0.0.1:7456'})),
-    api.openDesignStatus().catch(() => ({url: 'http://127.0.0.1:7456', reachable: false, status: undefined, error: 'fluentd could not check OpenDesign'}))
+    api.openDesign().catch(() => ({url: 'http://127.0.0.1:7456', enabled: false})),
+    api.openDesignStatus().catch(() => ({url: 'http://127.0.0.1:7456', enabled: false, reachable: false, status: undefined, error: 'fluentd could not check OpenDesign'}))
   ]);
   const designTools = await api.listDesignTools().catch(() => []);
   main.append(
@@ -2060,7 +2060,9 @@ async function renderDesignWorkspace(main: HTMLElement) {
   );
   const endpoint = h('input', {type: 'url', value: openDesign.url, placeholder: 'http://127.0.0.1:7456'});
   const endpointStatus = h('p', {class: openDesignStatus.reachable ? 'success' : 'section-sub'}, [
-    openDesignStatus.reachable ? `OpenDesign connected · HTTP ${openDesignStatus.status ?? 'ok'}` : `OpenDesign is not running at this URL${openDesignStatus.error ? ` · ${openDesignStatus.error}` : ''}`
+    openDesignStatus.reachable
+      ? `OpenDesign connected · HTTP ${openDesignStatus.status ?? 'ok'}${openDesign.enabled ? ' · embedding enabled' : ' · embedding disabled until you save this origin'}`
+      : `OpenDesign is not running at this URL${openDesignStatus.error ? ` · ${openDesignStatus.error}` : ''}`
   ]);
   const connect = h('button', {class: 'btn primary'}, ['connect OpenDesign']);
   connect.addEventListener('click', async () => {
@@ -2098,10 +2100,25 @@ async function renderDesignWorkspace(main: HTMLElement) {
     ...toolRows,
     h('p', {class: 'section-sub'}, ['MCP setup is explicit: Fluent never alters agent configuration until you confirm an install. pen.dev’s desktop app owns its local MCP toggle; OpenDesign provides the CLI installer.'])
   ]));
-  if (openDesignStatus.reachable) {
+  if (openDesignStatus.reachable && openDesign.enabled) {
+    const openOpenDesign = h('button', {class: 'btn primary', type: 'button'}, ['open OpenDesign']);
+    const openNotice = h('p', {class: 'section-sub'}, ['This saved local origin opens in a separate guarded window. It cannot navigate to another origin or receive Fluent’s desktop privileges.']);
+    openOpenDesign.addEventListener('click', async () => {
+      openOpenDesign.disabled = true;
+      try {
+        const origin = await api.openEmbeddedContent('open-design', openDesign.url);
+        openNotice.textContent = `OpenDesign is open at ${origin}.`;
+        openNotice.className = 'success';
+      } catch (error) {
+        openNotice.textContent = `OpenDesign could not open: ${actionErrorText(error)}`;
+        openNotice.className = 'error';
+      } finally {
+        openOpenDesign.disabled = false;
+      }
+    });
     main.append(h('div', {class: 'card'}, [
-      h('div', {class: 'toolbar'}, [h('div', {}, [h('h3', {}, ['OpenDesign']), h('p', {class: 'section-sub'}, ['Edit in place, then create a repository-bound implementation handoff below.'])])]),
-      h('iframe', {class: 'preview-frame', title: 'OpenDesign', src: openDesign.url})
+      h('div', {class: 'toolbar'}, [h('div', {}, [h('h3', {}, ['OpenDesign']), h('p', {class: 'section-sub'}, ['Edit in its guarded local window, then create a repository-bound implementation handoff here.'])]), openOpenDesign]),
+      openNotice
     ]));
   }
   if (!project) {
@@ -2213,28 +2230,25 @@ async function renderPreview(main: HTMLElement) {
   const stored = localStorage.getItem('fluent.preview-url');
   const urlInput = h('input', {type: 'url', value: stored ?? 'http://localhost:3000', placeholder: 'http://localhost:3000'});
   const open = h('button', {class: 'btn primary'}, ['open preview']);
-  const status = h('p', {class: 'section-sub'}, [stored ? `previewing ${stored}` : 'local URLs only — Fluent never proxies preview traffic']);
-  const frame = h('iframe', {class: 'preview-frame', title: 'local preview', src: stored ?? 'about:blank'}) as HTMLIFrameElement;
-  const empty = h('div', {class: 'preview-empty'}, [
-    h('strong', {}, ['local preview is ready when your app is']),
-    h('p', {}, ['Enter a localhost URL above to inspect it here. Fluent keeps preview traffic on your machine.'])
+  const status = h('p', {class: 'section-sub'}, [stored ? `last selected preview: ${stored}` : 'Choose one local origin to open in a guarded preview window. Fluent never proxies preview traffic.']);
+  const previewNotice = h('div', {class: 'preview-empty'}, [
+    h('strong', {}, ['local preview opens in a guarded window']),
+    h('p', {}, ['The window allows only the exact loopback origin you select. Its redirects and pop-ups cannot leave that origin.'])
   ]);
-  const stage = h('div', {class: 'preview-stage'}, [frame, empty]);
-  frame.hidden = !stored;
-  empty.hidden = Boolean(stored);
-  open.addEventListener('click', () => {
+  open.addEventListener('click', async () => {
     const value = urlInput.value.trim();
-    if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/.test(value)) {
-      status.textContent = 'for safety, preview accepts a local http(s) URL only.';
+    open.disabled = true;
+    try {
+      const origin = await api.openEmbeddedContent('preview', value);
+      localStorage.setItem('fluent.preview-url', origin);
+      status.textContent = `preview open at ${origin}`;
+      status.className = 'success';
+    } catch (error) {
+      status.textContent = `for safety, ${actionErrorText(error)}`;
       status.className = 'error';
-      return;
+    } finally {
+      open.disabled = false;
     }
-    localStorage.setItem('fluent.preview-url', value);
-    frame.src = value;
-    frame.hidden = false;
-    empty.hidden = true;
-    status.textContent = `previewing ${value}`;
-    status.className = 'section-sub';
   });
   const inspect = h('button', {class: 'btn'}, ['create visual-check task']);
   inspect.addEventListener('click', () => navigate({name: 'design'}));
@@ -2282,7 +2296,7 @@ async function renderPreview(main: HTMLElement) {
       inspect
     ]),
     h('div', {class: 'field preview-controls'}, [urlInput, open]),
-    stage,
+    previewNotice,
     recipeCard,
     recipeOutput
   );

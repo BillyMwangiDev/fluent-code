@@ -1,10 +1,15 @@
 import {dirname, join} from 'node:path';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
-export type OpenDesignProfile = {url: string};
+/**
+ * Embedding is distinct from reachability. A listener on the default loopback port is not
+ * permission to frame it in the desktop webview; the user explicitly enables an origin by saving
+ * it in the Design workspace.
+ */
+export type OpenDesignProfile = {url: string; enabled: boolean};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
 
-const defaultProfile: OpenDesignProfile = {url: 'http://127.0.0.1:7456'};
+const defaultProfile: OpenDesignProfile = {url: 'http://127.0.0.1:7456', enabled: false};
 
 /**
  * A deliberately narrow bridge to a locally-run OpenDesign daemon. It holds no OpenDesign
@@ -23,7 +28,8 @@ export class OpenDesignManager {
     try {
       const parsed = await readPrivateJson<Partial<OpenDesignProfile>>(this.stateFile);
       if (!parsed) return;
-      if (parsed.url) this.profile = {url: normalizeLocalUrl(parsed.url)};
+      // State written before explicit embed enablement deliberately restores disabled.
+      if (parsed.url) this.profile = {url: normalizeLocalUrl(parsed.url), enabled: parsed.enabled === true};
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -32,7 +38,7 @@ export class OpenDesignManager {
   get() { return {...this.profile}; }
 
   async save(url: string) {
-    this.profile = {url: normalizeLocalUrl(url)};
+    this.profile = {url: normalizeLocalUrl(url), enabled: true};
     await writePrivateJson(this.stateFile, this.profile);
     return this.get();
   }

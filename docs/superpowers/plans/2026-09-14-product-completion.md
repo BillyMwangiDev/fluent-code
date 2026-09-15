@@ -153,6 +153,19 @@ subsequent increment compatible with them.
 - Restore and validation tests cover metadata persistence, escaped paths, and non-loopback
   previews; daemon and frontend typechecks pass.
 
+### 2026-09-15 — embedded local-content boundary
+
+- OpenDesign now distinguishes a reachable loopback service from a user-enabled embedded origin.
+  State written before that grant restores with embedding disabled. Preview and OpenDesign origin
+  selection are canonicalized by the native desktop process.
+- The Tauri CSP now prohibits embedded frames. Preview and OpenDesign use dedicated local webviews
+  with a native navigation guard that allows only the exact per-surface loopback origin selected
+  for this app run. The window can follow same-origin routes but cannot turn a saved origin into a
+  credentialed, different-port, or remote navigation.
+- Verified with daemon/frontend typechecks, the full daemon suite (302 tests), the frontend suite
+  (15 tests), focused OpenDesign migration tests, and native origin-guard tests for
+  canonicalization and exact-origin matching.
+
 ## Plan critique
 
 The main risk is treating undocumented provider protocols as stable. The plan prevents that by

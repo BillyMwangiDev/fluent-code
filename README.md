@@ -54,10 +54,11 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
   a user may opt into bounded automatic tunnel recovery; direct disconnect always cancels it.
   Windows remote forwarding and remote credential broadcasts still need fuller UX.
 - The Design workspace can optionally embed a user-run local [OpenDesign](https://open-design.ai/official/)
-  service at `127.0.0.1:7456`. The connector is intentionally loopback-only and does not yet
-  perform file-level OpenDesign API handoff. Its repository-bound Fluent handoff tasks do persist
-  the source mapping, component and token notes, loopback preview, intended implementation paths,
-  and any explicitly requested reviewer handoff.
+  service at `127.0.0.1:7456`. The connector is loopback-only and opens the exact origin a user
+  saved in a dedicated guarded webview; redirects and other local ports remain blocked. It does
+  not yet perform file-level OpenDesign API handoff. Its repository-bound Fluent handoff tasks do
+  persist the source mapping, component and token notes, loopback preview, intended implementation
+  paths, and any explicitly requested reviewer handoff.
 - The Design workspace also discovers the `pen` and OpenDesign CLIs. It can run OpenDesign's
   documented MCP installer for Claude Code or Codex only after an in-app confirmation; pen.dev’s
   local MCP toggle remains owned by the pen.dev desktop app.
@@ -68,8 +69,8 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
 - The catalog screen distinguishes native provider plugins from portable MCP servers. Native
   marketplace plugins remain host-specific; a structured MCP declaration and Fluent's
   collaboration skill can be installed at user scope across Claude Code, Codex, and Gemini CLI
-  with one explicit approval. The daemon validates executable/argument/URL structure, but a
-  trusted-source policy is still needed for third-party extension sources.
+  with one explicit approval. The daemon validates executable/argument/URL structure and can
+  enforce a trusted-source policy for third-party extension sources.
 
 ## Desktop packaging
 
