@@ -1,9 +1,12 @@
-import headless from '@xterm/headless';
+import {createRequire} from 'node:module';
 import {shortId} from './agent-view.js';
 import type {CoordinationState, CoordinationTask, SessionSummary} from './daemon-protocol.js';
 
-// The package ships a CommonJS bundle only, so Node exposes it as a default export.
-const {Terminal} = headless;
+// @xterm/headless is a CommonJS bundle. Its default import is the whole module under Node's ESM
+// loader but `undefined` once pkg runs the packaged daemon as CommonJS; createRequire resolves it
+// the same way in both, as pty-runtime.ts already does for node-pty.
+const require = createRequire(import.meta.url);
+const {Terminal} = require('@xterm/headless') as typeof import('@xterm/headless');
 
 /**
  * The daemon side of lead sessions: what a lead sees about the lanes it started, and what those

@@ -82,6 +82,12 @@ try {
     throw new Error(`fluentd sidecar never accepted a ping: ${lastError instanceof Error ? lastError.message : String(lastError)}${stdout || stderr ? `\nstdout:\n${stdout}\nstderr:\n${stderr}` : ''}`);
   }
 } finally {
-  child?.kill();
-  await rm(probeDirectory, {recursive: true, force: true});
+  if (child && child.exitCode === null) {
+    // fluentd flushes its state on SIGTERM, so deleting the probe directory under that final write
+    // races it (ENOTEMPTY). Shutdown is bounded; wait for the exit, but never indefinitely.
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    child.kill();
+    await Promise.race([exited, wait(5_000)]);
+  }
+  await rm(probeDirectory, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
 }

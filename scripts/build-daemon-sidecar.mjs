@@ -73,16 +73,20 @@ await writeFile(configPath, JSON.stringify({
     // explicitly. Config globs are relative to this generated config file, not the project root.
     scripts: [
       `${relative(temporaryDirectory, resolve(root, 'node_modules', 'node-pty', 'lib'))}/**/*.js`,
+      // src/lead-lanes.ts loads @xterm/headless through createRequire so its CommonJS bundle resolves
+      // the same way under Node's ESM loader and under pkg; pkg's walker cannot follow that call.
+      `${relative(temporaryDirectory, resolve(root, 'node_modules', '@xterm', 'headless', 'lib-headless'))}/**/*.js`,
       // Not imported by the daemon, but run from its snapshot by Claude Code hooks, agent shells and
       // MCP clients (see src/script-runner.ts), so pkg must include them explicitly.
       ...['hook-relay.js', 'coord-cli.js', 'fluent-coord-mcp.js'].map(script => relative(temporaryDirectory, resolve(root, 'dist', script)))
     ],
     assets: [
       `${relative(temporaryDirectory, resolve(root, 'node_modules', 'node-pty', 'package.json'))}`,
+      `${relative(temporaryDirectory, resolve(root, 'node_modules', '@xterm', 'headless', 'package.json'))}`,
       `${relative(temporaryDirectory, ptyAssets)}/**/*`,
       `${relative(temporaryDirectory, keyringRoot)}/**/*`
     ],
-    publicPackages: ['node-pty', '@napi-rs/keyring', keyringPackage]
+    publicPackages: ['node-pty', '@napi-rs/keyring', keyringPackage, '@xterm/headless']
   }
 }, null, 2));
 
