@@ -39,6 +39,7 @@ import {
   type CoordinationSubject,
   type ExplorerScope
 } from './coordination-explorer';
+import {currentProject} from './project-scope';
 
 const root = document.getElementById('app')!;
 
@@ -1486,12 +1487,22 @@ async function renderOrchestration(main: HTMLElement) {
     await api.createTask(project, {title: taskInput.value.trim()});
     void render();
   });
+  // Coordination recorded from this screen names the lane the user picked. Defaulting silently to
+  // the first running lane attributed claims and reviews to an agent that never asked for them.
+  const lanePicker = (label: string, selected?: string) => {
+    const select = h('select', {'aria-label': label}) as HTMLSelectElement;
+    for (const lane of live) select.append(h('option', {value: lane.id}, [`${lane.provider} · ${lane.id.slice(0, 8)}`]));
+    if (selected) select.value = selected;
+    return select;
+  };
   const claimInput = h('input', {type: 'text', placeholder: 'claim a file path'});
+  const claimLane = lanePicker('Lane for this claim');
   const claimButton = h('button', {class: 'btn'}, ['claim file']);
+  claimButton.disabled = live.length === 0;
   const claimNotice = h('p', {class: 'section-sub'}, []);
   claimButton.addEventListener('click', async () => {
-    if (!claimInput.value.trim() || !live[0]) return claimInput.focus();
-    const result = await api.claimFile(project, claimInput.value.trim(), live[0].id);
+    if (!claimInput.value.trim() || !claimLane.value) return claimInput.focus();
+    const result = await api.claimFile(project, claimInput.value.trim(), claimLane.value);
     // An overlap names the *existing* claim it collides with, which is not necessarily the same
     // path — claiming `src/daemon.ts` conflicts with a lane already holding `src/`.
     claimNotice.textContent = result.granted
@@ -1504,15 +1515,23 @@ async function renderOrchestration(main: HTMLElement) {
   const decisionButton = h('button', {class: 'btn'}, ['record']);
   decisionButton.addEventListener('click', async () => {
     if (!decisionInput.value.trim()) return decisionInput.focus();
-    await api.addDecision(project, decisionInput.value.trim(), live[0]?.id);
+    await api.addDecision(project, decisionInput.value.trim());
     void render();
   });
   const handoffInput = h('input', {type: 'text', placeholder: 'handoff summary'});
+  const handoffFrom = lanePicker('Handoff from lane', live[0]?.id);
+  const handoffTo = lanePicker('Handoff to lane', live[1]?.id);
   const handoffButton = h('button', {class: 'btn'}, ['request review']);
+  const handoffNotice = h('p', {class: 'section-sub'}, []);
   handoffButton.disabled = live.length < 2;
   handoffButton.addEventListener('click', async () => {
-    if (!handoffInput.value.trim() || live.length < 2) return handoffInput.focus();
-    await api.createHandoff(project, live[0]!.id, live[1]!.id, handoffInput.value.trim());
+    if (!handoffInput.value.trim()) return handoffInput.focus();
+    if (!handoffFrom.value || handoffFrom.value === handoffTo.value) {
+      handoffNotice.textContent = 'Choose two different lanes for a review handoff.';
+      handoffNotice.className = 'error';
+      return handoffTo.focus();
+    }
+    await api.createHandoff(project, handoffFrom.value, handoffTo.value, handoffInput.value.trim());
     void render();
   });
   main.append(h('div', {class: 'metrics-grid'}, [
@@ -1881,7 +1900,7 @@ async function renderOrchestration(main: HTMLElement) {
     const next = task.status === 'todo' ? 'start' : task.status === 'active' ? 'mark done' : 'reopen';
     const nextStatus = task.status === 'todo' ? 'active' : task.status === 'active' ? 'done' : 'todo';
     const button = h('button', {class: 'btn'}, [next]);
-    button.addEventListener('click', async () => { await api.updateTask(project, task.id, nextStatus, live[0]?.id); void render(); });
+    button.addEventListener('click', async () => { await api.updateTask(project, task.id, nextStatus, task.sessionId); void render(); });
     return h('div', {class: 'option-row'}, [selectSubject(task.title, {kind: 'task', id: task.id}), h('span', {class: 'meta'}, [task.status]), button]);
   });
   const handoffRows = state.handoffs.map(handoff => {
@@ -1917,11 +1936,11 @@ async function renderOrchestration(main: HTMLElement) {
   if (explorerScope === 'overview' || explorerScope === 'files') {
     workbenchCards.push(
       h('div', {class: 'card'}, [h('h3', {}, ['file overlaps']), ...conflictRows]),
-      h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimButton, claimNotice])])
+      h('div', {class: 'card'}, [h('h3', {}, ['file claims']), ...claimRows, h('div', {class: 'field'}, [claimInput, claimLane, claimButton, claimNotice])])
     );
   }
   if (explorerScope === 'overview' || explorerScope === 'reviews') {
-    workbenchCards.push(h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffButton])]));
+    workbenchCards.push(h('div', {class: 'card'}, [h('h3', {}, ['handoffs & review']), ...handoffRows, h('div', {class: 'field'}, [handoffInput, handoffFrom, handoffTo, handoffButton, handoffNotice])]));
   }
   main.append(h('div', {class: 'cards-row'}, workbenchCards));
 
@@ -2026,7 +2045,7 @@ async function renderOrchestration(main: HTMLElement) {
 
 async function renderDesignWorkspace(main: HTMLElement) {
   const sessions = await api.listSessions();
-  const project = sessions[0]?.projectDirectory ?? sessions[0]?.directory;
+  const project = currentProject(workspacePath, sessions);
   const [openDesign, openDesignStatus] = await Promise.all([
     api.openDesign().catch(() => ({url: 'http://127.0.0.1:7456'})),
     api.openDesignStatus().catch(() => ({url: 'http://127.0.0.1:7456', reachable: false, status: undefined, error: 'fluentd could not check OpenDesign'}))
@@ -2179,7 +2198,7 @@ async function renderDesignWorkspace(main: HTMLElement) {
 
 async function renderPreview(main: HTMLElement) {
   const previewSessions = await api.listSessions();
-  const project = previewSessions.find(session => !session.archivedAt)?.projectDirectory ?? previewSessions.find(session => !session.archivedAt)?.directory;
+  const project = currentProject(workspacePath, previewSessions);
   let recipes: RecipeDefinition[] = [];
   let receipts: RecipeReceipt[] = [];
   let recipeError: string | undefined;

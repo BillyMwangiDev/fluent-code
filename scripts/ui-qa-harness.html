@@ -86,6 +86,8 @@
           'merge.plan': () => ({sessionId: session.id, base: 'main', baseHead: 'abc1234', laneHead: 'def5678', uncommittedFiles: 0, ahead: 1, conflicts: [], blockers: []}),
           'merge.integrate': () => ({sessionId: session.id, status: 'merged', plan: byMethod['merge.plan'](), detail: 'Merged into main.'}),
           'merge.pending': () => [],
+          'recipes.list': () => [],
+          'recipes.receipts': () => [],
           'runs.get': () => ({id: session.id, provider: session.provider, accountId: session.accountId, state: 'running', delivery: 'confirmed', timing: {}}),
           'providers.list': () => [
             {id: 'claude', label: 'Claude Code', installed: true, version: '2.1.270'},
