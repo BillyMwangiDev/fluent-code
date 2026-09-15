@@ -4,7 +4,7 @@ import {promisify} from 'node:util';
 import {chmod, unlink} from 'node:fs/promises';
 import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {daemonSocketPath, fluentProtocolVersion, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse} from './daemon-protocol.js';
+import {daemonSocketPath, fluentProtocolVersion, type ProviderId, type RpcEvent, type RpcRequest, type RpcResponse, type SessionSummary} from './daemon-protocol.js';
 import {SessionManager, applyCredentialEnvironment} from './session-manager.js';
 import {CredentialBroker} from './credential-broker.js';
 import {HardwareMonitor} from './hardware-monitor.js';
@@ -36,6 +36,7 @@ import {isLaneProvider} from './lane-commands.js';
 import {assertTicketReady, isLiveLane, laneReadiness, renderLanes, renderWait, screenText, ticketBrief, validLeadBudget} from './lead-lanes.js';
 import {coordCommand} from './agent-briefing.js';
 import {isRiskyPermission, sessionOptionArgs} from './session-options.js';
+import {attentionDetail, attentionForStatus, type AttentionReason} from './attention.js';
 
 const socketPath = daemonSocketPath();
 const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
@@ -68,6 +69,12 @@ const runEvents = new RunEventBus(manager.runStore);
 const streamingSockets = new Set<Socket>();
 const sessionSubscribers = new Map<string, Set<Socket>>();
 const runSubscribers = new Map<Socket, string>();
+/** The last status each lane was announced for, so one ending is one notification. */
+const announcedStatus = new Map<string, string>();
+
+function announce(sessionId: string, reason: AttentionReason, summary: SessionSummary, detail?: string) {
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.attention', sessionId, reason, summary, ...(detail ? {detail} : {})});
+}
 
 function reply(socket: Socket, response: RpcResponse) {
   socket.write(`${JSON.stringify(response)}\n`);
@@ -117,6 +124,12 @@ manager.on('output', (sessionId: string, chunk: string) => {
 });
 manager.on('status', (sessionId: string, summary) => {
   for (const socket of sessionSubscribers.get(sessionId) ?? []) pushEvent(socket, {event: 'sessions.status', sessionId, summary});
+  // A lane that ended on its own is worth telling the user about, once per ending. A resumed lane
+  // is running again, so its next ending is announced too.
+  const reason = attentionForStatus(summary, announcedStatus.get(sessionId));
+  if (reason) announce(sessionId, reason, summary);
+  if (summary.status === 'running' || summary.status === 'starting') announcedStatus.delete(sessionId);
+  else announcedStatus.set(sessionId, summary.status);
   // A lane that is no longer running cannot act on its claims, so it should not hold them. Without
   // this the lease below still frees them, but only after it lapses — this makes it immediate.
   if (summary.status === 'running') {
@@ -597,6 +610,11 @@ async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; 
       });
       return {handled: true};
     }
+  }
+  if (event === 'Notification') {
+    // Claude Code's own "needs your attention" signal, from its hook — never inferred from the screen.
+    announce(session.id, 'needs-input', session, attentionDetail(payload));
+    return {handled: true};
   }
   console.log(`fluentd: hook ${event} for session ${session.id} (${cwd})`);
   return {handled: true};

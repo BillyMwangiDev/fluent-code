@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFile, spawn, type ChildProcess} from 'node:child_process';
+import {connect} from 'node:net';
 import {chmod, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {delimiter, join} from 'node:path';
@@ -329,5 +330,34 @@ describe('launch options through fluentd', () => {
 
   it('refuses a permission mode the CLI does not have', async () => {
     await assert.rejects(() => daemonRequest('sessions.create', {provider: 'codex', directory: project, isolate: true, permissionMode: 'acceptEdits'}), /no permission mode/);
+  });
+});
+
+describe('telling the user a lane needs them', () => {
+  it('pushes a needs-input notice when Claude Code reports one through its own hook', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const socket = connect(process.env.FLUENT_SOCKET!);
+    let buffer = '';
+    socket.on('data', chunk => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) if (line.trim()) events.push(JSON.parse(line) as Record<string, unknown>);
+    });
+    await new Promise<void>(resolve => socket.once('connect', () => resolve()));
+    socket.write(`${JSON.stringify({id: 'attention-stream', method: 'stream.open'})}\n`);
+    try {
+      await waitFor(async () => events.some(event => event.id === 'attention-stream'), 'the event stream to open');
+
+      await daemonRequest('hooks.report', {cwd: laneA.directory, sessionId: laneA.id, event: 'Notification', payload: {message: 'Claude needs your permission to use Bash'}});
+
+      await waitFor(async () => events.some(event => event.event === 'sessions.attention'), 'the attention notice');
+      const notice = events.find(event => event.event === 'sessions.attention')!;
+      assert.equal(notice.sessionId, laneA.id);
+      assert.equal(notice.reason, 'needs-input');
+      assert.equal(notice.detail, 'Claude needs your permission to use Bash');
+    } finally {
+      socket.destroy();
+    }
   });
 });

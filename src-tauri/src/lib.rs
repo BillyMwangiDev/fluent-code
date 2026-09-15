@@ -188,6 +188,7 @@ pub fn run() {
         .manage(subscriptions)
         .manage(embedded_origins)
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("embedded-origin-guard")
                 .on_navigation(move |_webview, url| allowed_navigation(url, &navigation_origins))

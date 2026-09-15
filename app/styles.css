@@ -145,6 +145,7 @@ body {
   word-break: break-word;
 }
 .confirm-dialog .actions { justify-content: flex-end; }
+.action-notice.info { border-color: var(--line-strong); background: var(--bg-card); }
 .action-status { min-height: 1.5em; margin: 0; color: var(--fg-muted); }
 .session-name .error { max-width: 42ch; margin: 3px 0 0; font-size: 11px; line-height: 1.35; }
 

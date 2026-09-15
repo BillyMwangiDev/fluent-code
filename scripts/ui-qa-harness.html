@@ -162,6 +162,12 @@
           'designTools.list': () => [{id: 'pen', label: 'Pen', installed: true, version: '1.2.10', mcp: 'desktop-settings', detail: 'Desktop design source'}, {id: 'open-design', label: 'OpenDesign', installed: false, mcp: 'install-command', detail: 'Optional local bridge'}]
         };
         let callbackId = 0;
+        // Lets a visual check simulate an event fluentd pushes through the Tauri bridge.
+        const callbacks = new Map();
+        const listeners = [];
+        window.__emitTauriEvent = (event, payload) => {
+          for (const listener of listeners) if (listener.event === event) callbacks.get(listener.handler)?.({event, payload, id: 0});
+        };
         window.__TAURI_INTERNALS__ = {
           invoke: async (command, args = {}) => {
             if (command === 'daemon_request') return (byMethod[args.method] || (() => null))(args.params || {});
@@ -176,10 +182,18 @@
               return origin.origin;
             }
             if (command === 'plugin:dialog|open') return project;
+            if (command === 'plugin:event|listen') {
+              listeners.push({event: args.event, handler: args.handler});
+              return ++callbackId;
+            }
             if (command.startsWith('plugin:event|')) return ++callbackId;
             return null;
           },
-          transformCallback: () => ++callbackId,
+          transformCallback: callback => {
+            const id = ++callbackId;
+            callbacks.set(id, callback);
+            return id;
+          },
           unregisterCallback: () => {},
           convertFileSrc: value => value
         };

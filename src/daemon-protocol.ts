@@ -492,6 +492,8 @@ export type RpcResponse =
 export type RpcEvent =
   | {event: 'sessions.output'; sessionId: string; chunk: string}
   | {event: 'sessions.status'; sessionId: string; summary: SessionSummary}
+  /** A lane that finished, failed, or is waiting on the user — worth a notification, once. */
+  | {event: 'sessions.attention'; sessionId: string; reason: 'finished' | 'failed' | 'needs-input'; summary: SessionSummary; detail?: string}
   | {event: 'credential.switched'; provider: ProviderId; accountId: string; reason: 'fallback' | 'revert' | 'manual'}
   | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}
   /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes

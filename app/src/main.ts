@@ -1,6 +1,7 @@
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import {open as openDialog} from '@tauri-apps/plugin-dialog';
+import {isPermissionGranted, requestPermission, sendNotification} from '@tauri-apps/plugin-notification';
 import '@xterm/xterm/css/xterm.css';
 import '@fontsource/archivo/700.css';
 import '@fontsource/ibm-plex-mono/400.css';
@@ -13,6 +14,7 @@ import {
   onAdmissionWarning,
   onCredentialNotice,
   onCredentialSwitched,
+  onSessionAttention,
   onSessionVerification,
   selectRemoteSocket,
   subscribeSession,
@@ -224,6 +226,40 @@ window.addEventListener('unhandledrejection', event => {
   event.preventDefault();
   showActionError(event.reason);
 });
+
+/** A neutral, transient notice, in the same place as action errors. */
+function showNotice(text: string) {
+  actionNotices.innerHTML = '';
+  actionNotices.append(h('div', {class: 'action-notice info'}, [text]));
+  if (noticeTimer) window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => { actionNotices.innerHTML = ''; }, 8_000);
+}
+
+const attentionTitles = {finished: 'finished', failed: 'stopped with an error', 'needs-input': 'needs you'} as const;
+
+/**
+ * A lane that finished, failed, or is waiting on the user reaches them even while Fluent is in the
+ * background: a system notification then, an in-app notice otherwise. The page already showing that
+ * lane needs neither.
+ */
+void onSessionAttention(async attention => {
+  const name = attention.summary.task?.split('\n')[0]?.trim() || workspaceFolderName(attention.summary.directory);
+  const title = `${providerLabel[attention.summary.provider]} lane ${attentionTitles[attention.reason]}`;
+  const body = attention.detail ? `${name} — ${attention.detail}` : name;
+  if (document.hasFocus()) {
+    if (route.name === 'active-session' && route.sessionId === attention.sessionId) return;
+    showNotice(`${title}: ${body}`);
+    return;
+  }
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === 'granted';
+    if (granted) sendNotification({title, body});
+    else showNotice(`${title}: ${body}`);
+  } catch {
+    showNotice(`${title}: ${body}`);
+  }
+}).catch(() => undefined);
 
 /** The headline of the headroom advice — what the user needs before deciding, in one line. */
 function admissionLabel(verdict: {decision: 'clear' | 'tight' | 'over'; recommendedLanes: number}) {

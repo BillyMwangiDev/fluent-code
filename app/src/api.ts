@@ -578,3 +578,10 @@ export function onClaimsExpired(handler: (event: {claims: Array<{project: string
 export function onSessionVerification(handler: (event: {sessionId: string; result: VerificationResult}) => void) {
   return listen<{sessionId: string; result: VerificationResult}>('session-verification', event => handler(event.payload));
 }
+
+export type SessionAttention = {sessionId: string; reason: 'finished' | 'failed' | 'needs-input'; summary: SessionSummary; detail?: string};
+
+/** A lane that finished, failed, or is waiting on the user, pushed once by fluentd. */
+export async function onSessionAttention(handler: (event: SessionAttention) => void) {
+  return listen<SessionAttention>('session-attention', event => handler(event.payload));
+}

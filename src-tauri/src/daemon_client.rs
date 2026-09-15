@@ -150,6 +150,9 @@ fn forward_event(app: &AppHandle, event: &Value) {
         Some("evals.finished") => {
             let _ = app.emit("evals-finished", event);
         }
+        Some("sessions.attention") => {
+            let _ = app.emit("session-attention", event);
+        }
         _ => {}
     }
 }
