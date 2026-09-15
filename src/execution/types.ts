@@ -9,7 +9,13 @@ export type TimingMap = Record<string, TimingValue>;
 export type CapabilitySet = Record<string, boolean | 'unavailable'>;
 export type DeliveryState = 'idle' | 'intended' | 'confirmed' | 'unknown';
 export type WorkspaceLease = {path: string; projectDirectory?: string; leaseId?: string; generation?: number};
-export type CheckpointRef = {id: string; gitRef?: string; createdAt: string};
+/** A checkpoint records a reviewable position; it never snapshots or rewrites a working tree. */
+export type CheckpointRef = {
+  id: string;
+  gitRef?: string;
+  workingTree: 'clean' | 'dirty' | 'unknown';
+  createdAt: string;
+};
 
 export type Run = {
   schemaVersion: 1;

@@ -152,7 +152,7 @@ describe('an agent coordinating from its own working directory', () => {
     const added = await coord(laneA.directory, 'task', 'add', 'Wire the preview panel');
     const id = added.replace('added ', '');
 
-    assert.match(await coord(laneB.directory, 'status'), new RegExp(`^${id} todo - Wire the preview panel$`, 'm'));
+    assert.match(await coord(laneB.directory, 'status'), new RegExp(`^${id} todo - - Wire the preview panel$`, 'm'));
     assert.equal(await coord(laneB.directory, 'task', 'start', id), `started ${id}`);
     assert.match(await coord(laneA.directory, 'status'), new RegExp(`^${id} active ${laneB.id.slice(0, 8)} `, 'm'));
   });

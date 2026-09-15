@@ -80,6 +80,30 @@ describe('durable run store', () => {
     assert.equal(snapshot.events.filter((event: {runId: string}) => event.runId === run.id).length, 2);
   });
 
+  it('journals a checkpoint as a reference without pretending it captured working files', async () => {
+    const state = await workspace();
+    const store = new RunStore(state);
+    const run = await store.create({id: 'run-checkpoint', provider: 'codex'});
+    const checkpoint = await store.checkpoint(run.id, {gitRef: 'a'.repeat(40), workingTree: 'dirty'});
+
+    assert.equal(store.get(run.id).checkpoint?.id, checkpoint.id);
+    assert.equal(store.get(run.id).checkpoint?.workingTree, 'dirty');
+    assert.equal(store.eventsSince(run.id).events.at(-1)?.type, 'checkpoint.created');
+
+    const restored = new RunStore(state);
+    await restored.restore();
+    assert.deepEqual(restored.get(run.id).checkpoint, checkpoint, 'the journal restores a checkpoint written before the coalesced snapshot');
+  });
+
+  it('does not retain an arbitrary string as a git reference', async () => {
+    const store = new RunStore(await workspace());
+    const run = await store.create({provider: 'claude'});
+    const checkpoint = await store.checkpoint(run.id, {gitRef: 'not a ref; rm -rf /', workingTree: 'unknown'});
+
+    assert.equal(checkpoint.gitRef, undefined);
+    assert.equal(checkpoint.workingTree, 'unknown');
+  });
+
   it('keeps only a short tail of a finished run, in memory and in the journal, across a restart', async () => {
     const state = await workspace();
     const store = new RunStore(state);

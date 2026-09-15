@@ -30,7 +30,7 @@ import {
   type VerificationStatus
 } from './api';
 import type {AssignedIssue, OpenPullRequest, PullRequestStatus, RepoStatus} from './api';
-import type {CatalogPlugin, ExtensionTrust, MarketplaceEntry, McpServerEntry, McpTransport} from './api';
+import type {CatalogPlugin, ExtensionSourcePolicyState, ExtensionTrust, MarketplaceEntry, McpServerEntry, McpTransport, RecipeDefinition, RecipeReceipt} from './api';
 import {
   retainedCoordinationHistory,
   inspectCoordination,
@@ -96,6 +96,7 @@ let explorerScope: ExplorerScope = (() => {
 })();
 let orchestrationProject: string | undefined;
 let explorerSelection: {project: string; subject: CoordinationSubject} | undefined;
+let showArchivedSessions = false;
 
 function setExplorerScope(next: ExplorerScope) {
   explorerScope = next;
@@ -649,7 +650,7 @@ async function renderUsage(main: HTMLElement) {
     main.append(h('div', {class: 'card'}, [
       h('h3', {}, ['provider usage · each provider\'s own telemetry']),
       ...usage.sessions.map(item => h('div', {class: 'usage-row'}, [
-        h('strong', {}, [item.model ?? (item.provider === 'codex' ? 'Codex' : 'Claude Code')]),
+        h('strong', {}, [item.model ?? providerLabel[item.provider]]),
         // Coral is reserved for actions/alerts/thresholds (AGENTS.md), never an ordinary data
         // series — this is a routine per-session trend, so it stays in the muted trace palette.
         h('span', {class: 'trace'}, [`context ${item.contextPercent?.toFixed(0) ?? '—'}%`, sparklineChart(item.history.map(sample => sample.contextPercent ?? NaN), 'var(--fg-muted)')]),
@@ -698,10 +699,21 @@ function metricCard(label: string, value: string, detail: string | Node): HTMLEl
 // 'usage' screen above (which is live, per-session status-line telemetry): this is cross-session
 // historical cost, scanned from the providers' own transcript files, same as T3's approach.
 
-const providerLabel: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI'};
+const providerLabel: Record<ProviderId, string> = {
+  claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI',
+  qwen: 'Qwen', glm: 'GLM', nvidia: 'NVIDIA NIM'
+};
+const modelLinkDefaults: Record<'qwen' | 'glm' | 'nvidia', {model: string; endpoint: string; keyPlaceholder: string}> = {
+  qwen: {model: 'qwen3-coder', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', keyPlaceholder: 'sk-…'},
+  glm: {model: 'GLM-4.7', endpoint: 'https://api.z.ai/api/coding/paas/v4', keyPlaceholder: '…'},
+  nvidia: {model: 'nvidia/nemotron-3-super', endpoint: 'https://integrate.api.nvidia.com/v1', keyPlaceholder: 'nvapi-…'}
+};
 // Muted, data-viz-safe series colors matching `.provider-dot` in styles.css — Coral stays reserved
 // for actions/alerts/thresholds (AGENTS.md), never an ordinary provider series.
-const providerColor: Record<ProviderId, string> = {claude: '#b08968', codex: '#6b8fb0', gemini: '#8a9a6b'};
+const providerColor: Record<ProviderId, string> = {
+  claude: '#b08968', codex: '#6b8fb0', gemini: '#8a9a6b',
+  qwen: '#5d9990', glm: '#9a7bb3', nvidia: '#739e78'
+};
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
@@ -1070,14 +1082,18 @@ function mcpServerRow(server: McpServerEntry): HTMLElement {
   ]);
 }
 
-function marketplaceRow(marketplace: MarketplaceEntry): HTMLElement {
+function marketplaceRow(marketplace: MarketplaceEntry, onTrust?: () => void): HTMLElement {
+  const trustSource = h('button', {class: 'btn', type: 'button'}, ['trust source']);
+  trustSource.disabled = !onTrust;
+  if (onTrust) trustSource.addEventListener('click', onTrust);
   return h('div', {class: 'option-row'}, [
     h('div', {}, [
       h('div', {class: 'label'}, [`${providerLabel[marketplace.target]} · ${marketplace.name}`]),
       h('div', {class: 'meta'}, [marketplace.source]),
       h('div', {class: 'meta'}, [marketplace.trust.disclosures[0] ?? 'Review marketplace source before use.'])
     ]),
-    trustPill(marketplace.trust)
+    trustPill(marketplace.trust),
+    trustSource
   ]);
 }
 
@@ -1096,8 +1112,9 @@ async function renderCatalog(main: HTMLElement) {
   let plugins: CatalogPlugin[];
   let servers: McpServerEntry[];
   let marketplaces: MarketplaceEntry[];
+  let sourcePolicy: ExtensionSourcePolicyState;
   try {
-    [plugins, servers, marketplaces] = await Promise.all([api.catalogPlugins(), api.catalogMcpServers(), api.catalogMarketplaces()]);
+    [plugins, servers, marketplaces, sourcePolicy] = await Promise.all([api.catalogPlugins(), api.catalogMcpServers(), api.catalogMarketplaces(), api.catalogSourcePolicy()]);
   } catch (error) {
     container.innerHTML = '';
     container.append(h('div', {class: 'empty-state'}, [error instanceof Error ? error.message : String(error)]));
@@ -1172,11 +1189,64 @@ async function renderCatalog(main: HTMLElement) {
     pluginsCard.append(pluginList);
     wrap.append(pluginsCard);
 
+    const policyCard = h('div', {class: 'card'}, [
+      h('h3', {}, ['extension source policy']),
+      h('p', {class: 'section-sub'}, [sourcePolicy.mode === 'trusted-only'
+        ? 'Trusted-only is active: provider-bundled plugins still work, while every other marketplace source and every exact MCP declaration must be listed below in addition to its install approval.'
+        : 'Review-each is active: every extension action still requires approval, and trusted sources are retained for a future trusted-only policy.'])
+    ]);
+    const policyMode = h('select', {'aria-label': 'Extension source policy'}) as HTMLSelectElement;
+    policyMode.append(h('option', {value: 'review-each'}, ['review each extension']), h('option', {value: 'trusted-only'}, ['trusted sources only']));
+    policyMode.value = sourcePolicy.mode;
+    const savePolicy = h('button', {class: 'btn'}, ['save policy']);
+    savePolicy.addEventListener('click', async () => {
+      savePolicy.disabled = true;
+      try {
+        sourcePolicy = await api.setCatalogSourcePolicyMode(policyMode.value as ExtensionSourcePolicyState['mode']);
+        draw();
+      } catch (error) {
+        alert(`Could not save extension source policy: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        savePolicy.disabled = false;
+      }
+    });
+    const trustedList = h('div', {class: 'plugin-list'});
+    if (sourcePolicy.sources.length === 0) {
+      trustedList.append(h('p', {class: 'section-sub'}, ['No sources are trusted yet. Trust a configured marketplace below or select “remember this exact declaration” when adding an MCP server.']));
+    } else {
+      for (const source of sourcePolicy.sources) {
+        const remove = h('button', {class: 'btn danger', type: 'button'}, ['remove trust']);
+        remove.addEventListener('click', async () => {
+          if (!confirm(`Remove ${source.source} from the trusted extension allowlist? This does not uninstall anything.`)) return;
+          remove.disabled = true;
+          try {
+            sourcePolicy = await api.removeCatalogTrustedSource(source.id);
+            draw();
+          } catch (error) {
+            alert(`Could not remove trusted source: ${error instanceof Error ? error.message : String(error)}`);
+          } finally {
+            remove.disabled = false;
+          }
+        });
+        trustedList.append(h('div', {class: 'option-row'}, [h('div', {}, [h('div', {class: 'label'}, [source.kind]), h('div', {class: 'meta'}, [source.source])]), remove]));
+      }
+    }
+    policyCard.append(h('div', {class: 'actions'}, [policyMode, savePolicy]), trustedList);
+    wrap.append(policyCard);
+
     const marketplaceListCard = h('div', {class: 'card'}, [
       h('h3', {}, [`configured marketplaces (${marketplaces.length})`]),
       h('p', {class: 'section-sub'}, ['Source provenance is evidence from the provider configuration, not a permission manifest or safety guarantee.'])
     ]);
-    marketplaceListCard.append(...(marketplaces.length ? marketplaces.map(marketplaceRow) : [h('p', {class: 'section-sub'}, ['No provider marketplaces were reported.'])]));
+    marketplaceListCard.append(...(marketplaces.length ? marketplaces.map(marketplace => marketplaceRow(marketplace, async () => {
+      if (!confirm(`Trust ${marketplace.source} for future marketplace plugin installs? This does not install code or bypass the per-install approval.`)) return;
+      try {
+        sourcePolicy = await api.trustCatalogMarketplaceSource(marketplace.source);
+        draw();
+      } catch (error) {
+        alert(`Could not trust marketplace source: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    })) : [h('p', {class: 'section-sub'}, ['No provider marketplaces were reported.'])]));
     wrap.append(marketplaceListCard);
 
     // Add-marketplace card — a new marketplace source unlocks more plugins in the list above.
@@ -1186,22 +1256,25 @@ async function renderCatalog(main: HTMLElement) {
     ]);
     const marketplaceTargetSelect = h('select', {}, [h('option', {value: 'claude'}, ['Claude Code']), h('option', {value: 'codex'}, ['Codex'])]);
     const marketplaceSourceInput = h('input', {type: 'text', placeholder: 'owner/repo or path'});
+    const trustNewMarketplace = h('input', {type: 'checkbox'}) as HTMLInputElement;
+    const trustNewMarketplaceLabel = h('label', {class: 'section-sub'}, [trustNewMarketplace, ' remember this source in the trusted allowlist']);
     const marketplaceAddButton = h('button', {class: 'btn primary'}, ['add']);
     marketplaceAddButton.addEventListener('click', async () => {
       const source = marketplaceSourceInput.value.trim();
       if (!source) return;
       const target = marketplaceTargetSelect.value as ProviderId;
       if (!confirm(`Add marketplace “${source}” for ${providerLabel[target]}? Fluent will validate the source before the provider CLI is allowed to fetch it. Review any local or third-party code before installing plugins.`)) return;
-      const result = await api.addCatalogMarketplace(target, source);
+      const result = await api.addCatalogMarketplace(target, source, trustNewMarketplace.checked);
       if (result.ok) {
-        [plugins, marketplaces] = await Promise.all([api.catalogPlugins(), api.catalogMarketplaces()]);
+        [plugins, marketplaces, sourcePolicy] = await Promise.all([api.catalogPlugins(), api.catalogMarketplaces(), api.catalogSourcePolicy()]);
         marketplaceSourceInput.value = '';
+        trustNewMarketplace.checked = false;
         draw();
       } else {
         alert(`Add marketplace failed: ${result.output}`);
       }
     });
-    marketplaceCard.append(h('div', {class: 'marketplace-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]));
+    marketplaceCard.append(h('div', {class: 'marketplace-form'}, [marketplaceTargetSelect, marketplaceSourceInput, marketplaceAddButton]), trustNewMarketplaceLabel);
     wrap.append(marketplaceCard);
     return wrap;
   }
@@ -1218,6 +1291,8 @@ async function renderCatalog(main: HTMLElement) {
     const mcpNameInput = h('input', {type: 'text', placeholder: 'server name'});
     const mcpCommandInput = h('input', {type: 'text', placeholder: 'executable, or https:// URL'});
     const mcpArgsInput = h('input', {type: 'text', placeholder: 'arguments JSON array (optional)'});
+    const trustMcpSource = h('input', {type: 'checkbox'}) as HTMLInputElement;
+    const trustMcpSourceLabel = h('label', {class: 'section-sub'}, [trustMcpSource, ' remember this exact declaration in the trusted allowlist']);
     const mcpAddButton = h('button', {class: 'btn primary'}, ['add']);
     mcpAddButton.addEventListener('click', async () => {
       const name = mcpNameInput.value.trim();
@@ -1242,10 +1317,11 @@ async function renderCatalog(main: HTMLElement) {
         ? `This launches the local process “${endpoint}” with ${args.length} structured argument${args.length === 1 ? '' : 's'} when used by an agent.`
         : 'This connects to a remote HTTPS endpoint when used by an agent; it does not launch a local process.';
       if (!confirm(`Add MCP server “${name}” for ${targets.map(target => providerLabel[target]).join(', ')}? ${boundary} Review the server source before use.`)) return;
-      const results = await api.addCatalogMcpServer(targets, config);
+      const results = await api.addCatalogMcpServer(targets, config, trustMcpSource.checked);
       const failures = results.filter(result => !result.ok);
       if (failures.length === 0) {
-        servers = await api.catalogMcpServers();
+        [servers, sourcePolicy] = await Promise.all([api.catalogMcpServers(), api.catalogSourcePolicy()]);
+        trustMcpSource.checked = false;
         draw();
       } else {
         alert(`MCP setup failed for ${failures.map(result => `${providerLabel[result.target]}: ${result.output}`).join('\n')}`);
@@ -1253,7 +1329,8 @@ async function renderCatalog(main: HTMLElement) {
     });
     mcpCard.append(
       h('p', {class: 'section-sub'}, ['Portable MCP servers can be registered at user scope for every installed agent. Native marketplace plugins remain provider-specific.']),
-      h('div', {class: 'mcp-form'}, [mcpTargetSelect, mcpTransportSelect, mcpNameInput, mcpCommandInput, mcpArgsInput, mcpAddButton])
+      h('div', {class: 'mcp-form'}, [mcpTargetSelect, mcpTransportSelect, mcpNameInput, mcpCommandInput, mcpArgsInput, mcpAddButton]),
+      trustMcpSourceLabel
     );
     return mcpCard;
   }
@@ -1422,7 +1499,7 @@ async function renderOrchestration(main: HTMLElement) {
   // This deliberately avoids pasting every prior conversation into every new provider session.
   const providerSelect = (selected: ProviderId = 'codex') => {
     const select = h('select', {'aria-label': 'Preferred provider'}) as HTMLSelectElement;
-    for (const provider of ['claude', 'codex', 'gemini'] as ProviderId[]) {
+    for (const provider of ['claude', 'codex', 'gemini', 'qwen', 'glm', 'nvidia'] as ProviderId[]) {
       select.append(h('option', {value: provider}, [provider]));
     }
     select.value = selected;
@@ -1436,6 +1513,21 @@ async function renderOrchestration(main: HTMLElement) {
     '',
     `Assigned ticket: ${task.title}`,
     task.description ? `Ticket details:\n${task.description}` : 'Ticket details: inspect the relevant code and make the smallest complete change.',
+    ...(task.dependsOn?.length ? [
+      `Prerequisites: ${task.dependsOn.map(id => {
+        const dependency = state.tasks.find(candidate => candidate.id === id);
+        return dependency ? `${dependency.title} (${dependency.status})` : `${id.slice(0, 8)} (missing)`;
+      }).join(', ')}`
+    ] : []),
+    ...(task.designHandoff ? [
+      '',
+      'Design-to-build handoff:',
+      task.designHandoff.sourceRef ? `Source mapping: ${task.designHandoff.sourceRef}` : '',
+      task.designHandoff.componentSpec ? `Component specification: ${task.designHandoff.componentSpec}` : '',
+      task.designHandoff.tokenSpec ? `Token specification: ${task.designHandoff.tokenSpec}` : '',
+      task.designHandoff.previewUrl ? `Local preview: ${task.designHandoff.previewUrl}` : '',
+      task.designHandoff.implementationPaths?.length ? `Intended implementation paths (claim before editing): ${task.designHandoff.implementationPaths.join(', ')}` : ''
+    ].filter(Boolean) : []),
     '',
     'Keep your context focused on this ticket. Coordinate file claims and handoffs through Fluent when needed; do not take unrelated work. Before reporting completion, run the relevant checks and state changed files, verification, and any handoff needed.'
   ].join('\n');
@@ -1467,6 +1559,10 @@ async function renderOrchestration(main: HTMLElement) {
   const ticketRole = h('input', {type: 'text', placeholder: 'role, e.g. frontend'}) as HTMLInputElement;
   const ticketProvider = providerSelect('codex');
   const ticketDescription = h('textarea', {placeholder: 'Ticket-local brief, constraints, and acceptance checks', rows: '4'}) as HTMLTextAreaElement;
+  const ticketDependencies = h('select', {multiple: 'multiple', 'aria-label': 'Ticket prerequisites'}) as HTMLSelectElement;
+  for (const task of state.tasks) {
+    ticketDependencies.append(h('option', {value: task.id}, [`${task.status} · ${task.id.slice(0, 8)} · ${task.title}`]));
+  }
   const createTicket = h('button', {class: 'btn primary', type: 'button'}, ['create ticket']);
   createTicket.addEventListener('click', async () => {
     if (!ticketTitle.value.trim()) return ticketTitle.focus();
@@ -1477,7 +1573,8 @@ async function renderOrchestration(main: HTMLElement) {
         description: ticketDescription.value,
         role: ticketRole.value,
         provider: ticketProvider.value as ProviderId,
-        source: 'manual'
+        source: 'manual',
+        dependsOn: [...ticketDependencies.selectedOptions].map(option => option.value)
       });
       void render();
     } catch (error: unknown) {
@@ -1553,12 +1650,15 @@ async function renderOrchestration(main: HTMLElement) {
     const cards = tickets.length === 0
       ? [h('p', {class: 'section-sub kanban-empty'}, ['No tickets'])]
       : tickets.map(task => {
+          const dependencies = (task.dependsOn ?? []).map(id => state.tasks.find(candidate => candidate.id === id));
+          const blockers = dependencies.filter(dependency => !dependency || dependency.status !== 'done');
+          const blocked = blockers.length > 0;
           const lanePicker = h('select', {'aria-label': `Assign ${task.title} to a running lane`}) as HTMLSelectElement;
           lanePicker.append(h('option', {value: ''}, ['choose running lane']));
           for (const lane of activeLanes) lanePicker.append(h('option', {value: lane.id}, [`${lane.provider} · ${lane.id.slice(0, 8)} · ${lane.task || 'untitled lane'}`]));
           if (task.sessionId && activeLanes.some(lane => lane.id === task.sessionId)) lanePicker.value = task.sessionId;
           const assignExisting = h('button', {class: 'btn', type: 'button'}, ['assign & brief']);
-          assignExisting.disabled = activeLanes.length === 0;
+          assignExisting.disabled = activeLanes.length === 0 || blocked;
           assignExisting.addEventListener('click', async () => {
             const sessionId = lanePicker.value;
             if (!sessionId) return lanePicker.focus();
@@ -1578,6 +1678,7 @@ async function renderOrchestration(main: HTMLElement) {
             }
           });
           const launch = h('button', {class: 'btn primary', type: 'button'}, ['launch clean lane']);
+          launch.disabled = blocked;
           launch.addEventListener('click', async () => {
             const provider = task.provider ?? 'codex';
             launch.disabled = true;
@@ -1594,15 +1695,48 @@ async function renderOrchestration(main: HTMLElement) {
           });
           const nextStatus = task.status === 'todo' ? 'active' : task.status === 'active' ? 'done' : 'todo';
           const advance = h('button', {class: 'btn', type: 'button'}, [task.status === 'todo' ? 'start' : task.status === 'active' ? 'mark done' : 'reopen']);
+          advance.disabled = task.status === 'todo' && blocked;
           advance.addEventListener('click', async () => { await api.updateTask(project, task.id, nextStatus, task.sessionId); void render(); });
           const review = h('button', {class: 'btn', type: 'button'}, ['review lane']);
           review.disabled = !task.sessionId;
           review.addEventListener('click', () => task.sessionId && navigate({name: 'active-session', sessionId: task.sessionId}));
+          const dependencyPicker = h('select', {multiple: 'multiple', 'aria-label': `Set prerequisites for ${task.title}`}) as HTMLSelectElement;
+          for (const candidate of state.tasks) {
+            if (candidate.id === task.id) continue;
+            dependencyPicker.append(h('option', {value: candidate.id}, [`${candidate.status} · ${candidate.id.slice(0, 8)} · ${candidate.title}`]));
+          }
+          for (const option of dependencyPicker.options) option.selected = Boolean(task.dependsOn?.includes(option.value));
+          const saveDependencies = h('button', {class: 'btn', type: 'button'}, ['save prerequisites']);
+          saveDependencies.disabled = task.status !== 'todo';
+          saveDependencies.addEventListener('click', async () => {
+            saveDependencies.disabled = true;
+            try {
+              await api.setTaskDependencies(project, task.id, [...dependencyPicker.selectedOptions].map(option => option.value));
+              void render();
+            } catch (error: unknown) {
+              boardNotice.textContent = error instanceof Error ? error.message : 'Could not save task prerequisites';
+              boardNotice.className = 'error orchestration-notice';
+            } finally {
+              saveDependencies.disabled = task.status !== 'todo';
+            }
+          });
+          const prerequisiteSummary = blocked
+            ? `blocked by ${blockers.map(dependency => dependency ? `${dependency.title} (${dependency.status})` : 'a missing ticket').join(' · ')}`
+            : `prerequisites complete · ${dependencies.filter((dependency): dependency is NonNullable<typeof dependency> => Boolean(dependency)).map(dependency => dependency.title).join(' · ')}`;
           return h('article', {class: 'kanban-ticket'}, [
             h('div', {class: 'kanban-ticket-head'}, [h('strong', {}, [task.title]), h('span', {class: 'pill'}, [task.source ?? 'manual'])]),
             task.description ? h('p', {class: 'section-sub'}, [task.description]) : h('p', {class: 'section-sub'}, ['No ticket-local brief yet.']),
+            ...(task.dependsOn?.length ? [h('p', {class: blocked ? 'error' : 'section-sub'}, [prerequisiteSummary])] : []),
+            ...(task.designHandoff ? [h('p', {class: 'section-sub'}, [
+              [
+                task.designHandoff.sourceRef ? `source ${task.designHandoff.sourceRef}` : '',
+                task.designHandoff.previewUrl ? `preview ${task.designHandoff.previewUrl}` : '',
+                task.designHandoff.implementationPaths?.length ? `${task.designHandoff.implementationPaths.length} intended path${task.designHandoff.implementationPaths.length === 1 ? '' : 's'}` : ''
+              ].filter(Boolean).join(' · ')
+            ])] : []),
             h('p', {class: 'kanban-meta'}, [`${task.role || 'generalist'} · ${task.provider || 'provider undecided'}${task.sessionId ? ` · lane ${task.sessionId.slice(0, 8)}` : ''}`]),
             h('div', {class: 'kanban-assignment'}, [lanePicker, assignExisting]),
+            h('div', {class: 'kanban-assignment'}, [dependencyPicker, saveDependencies]),
             h('div', {class: 'kanban-actions'}, [launch, review, advance])
           ]);
         });
@@ -1618,7 +1752,7 @@ async function renderOrchestration(main: HTMLElement) {
     boardNotice,
     h('div', {class: 'orchestration-composer-grid'}, [
       h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['master brief']), masterBrief, h('div', {class: 'actions'}, [saveBrief])]),
-      h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['new ticket']), ticketTitle, h('div', {class: 'orchestration-form-row'}, [ticketRole, ticketProvider]), ticketDescription, h('div', {class: 'actions'}, [createTicket])]),
+      h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['new ticket']), ticketTitle, h('div', {class: 'orchestration-form-row'}, [ticketRole, ticketProvider]), ticketDescription, h('label', {class: 'section-sub'}, ['prerequisites (optional)', ticketDependencies]), h('div', {class: 'actions'}, [createTicket])]),
       h('div', {class: 'orchestration-panel'}, [h('h3', {}, ['spec → Kanban planner']), h('p', {class: 'section-sub'}, ['Starts an isolated planner with this file path and the saved brief. It creates a visible planner ticket first.']), h('div', {class: 'directory-field'}, [specPath, browseSpec]), h('div', {class: 'orchestration-form-row'}, [plannerProvider, launchPlanner])])
     ]),
     h('div', {class: 'kanban-board'}, ticketColumns)
@@ -1926,22 +2060,84 @@ async function renderDesignWorkspace(main: HTMLElement) {
     return;
   }
   const state = await api.coordination(project);
-  const title = h('input', {type: 'text', placeholder: 'design task, e.g. credential fallback states'});
+  const designLanes = sessions.filter(session => (session.projectDirectory ?? session.directory) === project && session.status === 'running');
+  const title = h('input', {type: 'text', placeholder: 'design task, e.g. credential fallback states'}) as HTMLInputElement;
+  const sourceRef = h('input', {type: 'text', value: 'design/pen/fluent-code.pen', placeholder: 'repo-relative source, e.g. design/pen/fluent-code.pen'}) as HTMLInputElement;
+  const componentSpec = h('textarea', {placeholder: 'component specification', rows: '2'}) as HTMLTextAreaElement;
+  const tokenSpec = h('textarea', {placeholder: 'token and interaction notes', rows: '2'}) as HTMLTextAreaElement;
+  const previewUrl = h('input', {type: 'url', placeholder: 'local preview, e.g. http://127.0.0.1:4173'}) as HTMLInputElement;
+  const paths = h('textarea', {placeholder: 'intended implementation paths, one per line', rows: '3'}) as HTMLTextAreaElement;
+  const owner = h('select', {'aria-label': 'Design handoff owner'}) as HTMLSelectElement;
+  owner.append(h('option', {value: ''}, ['assign later — no lane']));
+  for (const lane of designLanes) owner.append(h('option', {value: lane.id}, [`${lane.provider} · ${lane.id.slice(0, 8)}`]));
+  const reviewer = h('select', {'aria-label': 'Design handoff reviewer'}) as HTMLSelectElement;
+  reviewer.append(h('option', {value: ''}, ['no reviewer handoff yet']));
+  for (const lane of designLanes) reviewer.append(h('option', {value: lane.id}, [`${lane.provider} · ${lane.id.slice(0, 8)}`]));
+  const reservePaths = h('input', {type: 'checkbox'}) as HTMLInputElement;
+  const designNotice = h('p', {class: 'section-sub'}, ['Intended paths are not claims. Reserve them only for the selected active lane.']);
   const add = h('button', {class: 'btn primary'}, ['create design task']);
   add.addEventListener('click', async () => {
     if (!title.value.trim()) return title.focus();
-    await api.createTask(project, {title: `design: ${title.value.trim()}`, role: 'design', source: 'manual'});
-    void render();
+    if (reservePaths.checked && !owner.value) {
+      designNotice.textContent = 'Choose an active owner before reserving files.';
+      designNotice.className = 'error';
+      return owner.focus();
+    }
+    if (reviewer.value && (!owner.value || reviewer.value === owner.value)) {
+      designNotice.textContent = 'A reviewer handoff needs a different active owner and reviewer.';
+      designNotice.className = 'error';
+      return reviewer.focus();
+    }
+    add.disabled = true;
+    try {
+      const implementationPaths = paths.value.split(/[,\n]/).map(path => path.trim()).filter(Boolean);
+      await api.createTask(project, {
+        title: `design: ${title.value.trim()}`,
+        role: 'design',
+        source: 'manual',
+        sessionId: owner.value || undefined,
+        designHandoff: {
+          sourceRef: sourceRef.value,
+          componentSpec: componentSpec.value,
+          tokenSpec: tokenSpec.value,
+          previewUrl: previewUrl.value,
+          implementationPaths
+        }
+      });
+      const claims: string[] = [];
+      if (reservePaths.checked && owner.value) {
+        for (const path of implementationPaths) {
+          const result = await api.claimFile(project, path, owner.value);
+          claims.push(result.granted ? `${path} reserved` : `${path} overlaps an existing claim`);
+        }
+      }
+      if (reviewer.value && owner.value) await api.createHandoff(project, owner.value, reviewer.value, `Design review: ${title.value.trim()} (${sourceRef.value.trim() || 'source not recorded'})`);
+      designNotice.textContent = [
+        'Design task created.',
+        claims.length ? claims.join(' · ') : '',
+        reviewer.value ? 'Review handoff proposed.' : ''
+      ].filter(Boolean).join(' ');
+      designNotice.className = 'success';
+      void render();
+    } catch (error: unknown) {
+      designNotice.textContent = error instanceof Error ? error.message : 'Could not create design task';
+      designNotice.className = 'error';
+    } finally {
+      add.disabled = false;
+    }
   });
   main.append(h('div', {class: 'cards-row'}, [
     h('div', {class: 'card'}, [
       h('h3', {}, ['design tasks']),
-      ...state.tasks.filter(task => task.title.startsWith('design:')).map(task => h('p', {}, [`● ${task.title.slice(8)}  ·  ${task.status}`])),
-      h('div', {class: 'field'}, [title, add])
+      ...state.tasks.filter(task => task.title.startsWith('design:')).map(task => h('div', {class: 'option-row'}, [
+        h('span', {class: 'label'}, [`● ${task.title.slice(8)}`]),
+        h('span', {class: 'meta'}, [`${task.status}${task.designHandoff?.sourceRef ? ` · ${task.designHandoff.sourceRef}` : ''}${task.designHandoff?.implementationPaths?.length ? ` · ${task.designHandoff.implementationPaths.length} paths` : ''}`])
+      ])),
+      h('div', {class: 'field'}, [title, sourceRef, componentSpec, tokenSpec, previewUrl, paths, owner, reviewer, h('label', {class: 'section-sub'}, [reservePaths, ' reserve intended paths for owner']), add, designNotice])
     ]),
     h('div', {class: 'card'}, [
       h('h3', {}, ['handoff contract']),
-      h('p', {class: 'section-sub'}, ['Every task can carry token decisions, claimed implementation files, a preview URL, and an explicit reviewer handoff.']),
+      h('p', {class: 'section-sub'}, ['Each design task records its source, component and token notes, loopback preview, and intended implementation paths. Claims stay advisory and lane-owned.']),
       h('p', {class: 'section-sub'}, [`${state.claims.length} claimed files · ${state.handoffs.filter(handoff => handoff.status === 'open').length} reviews open`])
     ]),
     h('div', {class: 'card'}, [
@@ -1953,6 +2149,18 @@ async function renderDesignWorkspace(main: HTMLElement) {
 }
 
 async function renderPreview(main: HTMLElement) {
+  const previewSessions = await api.listSessions();
+  const project = previewSessions.find(session => !session.archivedAt)?.projectDirectory ?? previewSessions.find(session => !session.archivedAt)?.directory;
+  let recipes: RecipeDefinition[] = [];
+  let receipts: RecipeReceipt[] = [];
+  let recipeError: string | undefined;
+  if (project) {
+    try {
+      [recipes, receipts] = await Promise.all([api.listRecipes(project), api.recipeReceipts(project)]);
+    } catch (error) {
+      recipeError = error instanceof Error ? error.message : String(error);
+    }
+  }
   const stored = localStorage.getItem('fluent.preview-url');
   const urlInput = h('input', {type: 'url', value: stored ?? 'http://localhost:3000', placeholder: 'http://localhost:3000'});
   const open = h('button', {class: 'btn primary'}, ['open preview']);
@@ -1981,13 +2189,53 @@ async function renderPreview(main: HTMLElement) {
   });
   const inspect = h('button', {class: 'btn'}, ['create visual-check task']);
   inspect.addEventListener('click', () => navigate({name: 'design'}));
+  const recipeCard = h('div', {class: 'card'}, [
+    h('h3', {}, ['reviewed project recipes']),
+    h('p', {class: 'section-sub'}, [project
+      ? 'Recipes are read from fluent.recipe.json. Running one always requires a one-time approval and records a redacted receipt.'
+      : 'Start a project session before Fluent can read its fluent.recipe.json.'])
+  ]);
+  const recipeOutput = h('div', {});
+  if (recipeError) {
+    recipeCard.append(h('p', {class: 'error'}, [recipeError]));
+  } else if (!project || recipes.length === 0) {
+    recipeCard.append(h('p', {class: 'section-sub'}, [project ? 'No fluent.recipe.json recipes were found.' : 'No project is active.']));
+  } else {
+    for (const recipe of recipes) {
+      const execute = h('button', {class: 'btn', type: 'button'}, ['run recipe']);
+      execute.addEventListener('click', async () => {
+        if (!confirm(`Run recipe “${recipe.name}”?\n\n${recipe.command}\n\nFluent will run this exact command from ${project}.`)) return;
+        execute.disabled = true;
+        recipeOutput.innerHTML = '';
+        try {
+          const receipt = await api.executeRecipe(project, recipe);
+          receipts = [receipt, ...receipts].slice(0, 8);
+          recipeOutput.append(h('div', {class: 'card'}, [
+            h('h3', {}, [`recipe ${receipt.status}`]),
+            h('p', {class: receipt.status === 'passed' ? 'success' : 'error'}, [`${receipt.name} · ${(receipt.durationMs / 1000).toFixed(1)}s · exit ${receipt.exitCode ?? 'unknown'}`]),
+            h('pre', {class: 'diff'}, [receipt.output || 'Recipe produced no output.'])
+          ]));
+        } catch (error) {
+          recipeOutput.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
+        } finally {
+          execute.disabled = false;
+        }
+      });
+      recipeCard.append(h('div', {class: 'option-row'}, [h('div', {}, [h('div', {class: 'label'}, [recipe.name]), h('div', {class: 'meta'}, [recipe.description ?? recipe.command]), h('div', {class: 'section-sub'}, [`timeout ${(recipe.timeoutMs / 1000).toFixed(0)}s`])]), execute]));
+    }
+  }
+  if (receipts.length > 0) {
+    recipeCard.append(h('p', {class: 'section-sub'}, [`Latest receipt: ${receipts[0]!.name} · ${receipts[0]!.status} · ${new Date(receipts[0]!.startedAt).toLocaleString()}`]));
+  }
   main.append(
     h('div', {class: 'toolbar'}, [
       h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), 'preview & visual check']), status]),
       inspect
     ]),
     h('div', {class: 'field preview-controls'}, [urlInput, open]),
-    stage
+    stage,
+    recipeCard,
+    recipeOutput
   );
 }
 
@@ -1996,11 +2244,20 @@ async function renderRemote(main: HTMLElement) {
   const selectedSocket = activeRemoteSocket();
   const name = h('input', {type: 'text', placeholder: 'server name'});
   const host = h('input', {type: 'text', placeholder: 'user@host'});
+  const port = h('input', {type: 'number', value: '22', min: '1', max: '65535', step: '1', placeholder: 'SSH port'}) as HTMLInputElement;
+  const remoteSocket = h('input', {type: 'text', value: '/tmp/fluent-code.sock', placeholder: 'remote Fluent socket path'}) as HTMLInputElement;
+  const autoReconnect = h('input', {type: 'checkbox'}) as HTMLInputElement;
+  const setupStatus = h('p', {class: 'section-sub'}, ['Use the remote daemon’s actual Unix-socket path. Fluent verifies its protocol before it can become the active target.']);
   const add = h('button', {class: 'btn primary'}, ['add SSH server']);
   add.addEventListener('click', async () => {
     if (!name.value.trim() || !host.value.trim()) return host.focus();
-    await api.saveRemote({name: name.value.trim(), host: host.value.trim()});
-    void render();
+    try {
+      await api.saveRemote({name: name.value.trim(), host: host.value.trim(), port: Number(port.value), remoteSocket: remoteSocket.value.trim(), autoReconnect: autoReconnect.checked});
+      void render();
+    } catch (error) {
+      setupStatus.textContent = error instanceof Error ? error.message : String(error);
+      setupStatus.className = 'error';
+    }
   });
   main.append(
     h('div', {class: 'toolbar'}, [
@@ -2011,8 +2268,8 @@ async function renderRemote(main: HTMLElement) {
     ]),
     h('div', {class: 'card remote-connect-card'}, [
       h('h3', {}, ['add a remote target']),
-      h('p', {class: 'section-sub'}, ['Name a server, then use your existing SSH identity to establish an owner-controlled tunnel.']),
-      h('div', {class: 'field'}, [name, host, add])
+      h('p', {class: 'section-sub'}, ['Name a server, then use your existing SSH identity to establish an owner-controlled tunnel. Automatic reconnect is opt-in and bounded.']),
+      h('div', {class: 'field'}, [name, host, port, remoteSocket, h('label', {class: 'section-sub'}, [autoReconnect, ' reconnect automatically after a tunnel failure']), add, setupStatus])
     ])
   );
   if (profiles.length === 0) {
@@ -2037,7 +2294,7 @@ async function renderRemote(main: HTMLElement) {
     useHere.addEventListener('click', () => { selectRemoteSocket(profile.localSocket); void render(); });
     main.append(h('div', {class: 'option-row'}, [
       h('span', {class: 'label'}, [profile.name]),
-      h('span', {class: 'meta'}, [profile.host + ' · ' + profile.status + (profile.error ? ' · ' + profile.error : '')]),
+      h('span', {class: 'meta'}, [`${profile.host}:${profile.port} · ${profile.remoteSocket} · ${profile.autoReconnect ? 'auto-reconnect' : 'manual reconnect'} · ${profile.status}${profile.error ? ` · ${profile.error}` : ''}`]),
       useHere,
       action
     ]));
@@ -2167,7 +2424,10 @@ async function renderSplash(main: HTMLElement) {
   const providers: Array<{id: ProviderId; label: string}> = [
     {id: 'claude', label: 'anthropic claude'},
     {id: 'codex', label: 'openai codex'},
-    {id: 'gemini', label: 'google gemini'}
+    {id: 'gemini', label: 'google gemini'},
+    {id: 'qwen', label: 'qwen'},
+    {id: 'glm', label: 'z.ai glm'},
+    {id: 'nvidia', label: 'nvidia nim'}
   ];
 
   container.innerHTML = '';
@@ -2182,8 +2442,8 @@ async function renderSplash(main: HTMLElement) {
     h('p', {class: 'prompt'}, ['press ', h('kbd', {}, ['enter']), ' to continue'])
   );
 
-  const hasClaudeAccount = Boolean(chains.find(c => c.provider === 'claude')?.accounts.length);
-  const advance = () => navigate(hasClaudeAccount ? {name: 'sessions'} : {name: 'onboarding'});
+  const hasConnectedAccount = chains.some(chain => chain.accounts.length > 0);
+  const advance = () => navigate(hasConnectedAccount ? {name: 'sessions'} : {name: 'onboarding'});
   container.addEventListener('click', advance);
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Enter') {
@@ -2312,6 +2572,49 @@ async function renderOnboarding(main: HTMLElement) {
     navigate({name: 'active-session', sessionId: summary.id});
   });
 
+  const modelLinkCard = (provider: 'qwen' | 'glm' | 'nvidia', subtitle: string) => {
+    const defaults = modelLinkDefaults[provider];
+    const labelInput = h('input', {type: 'text', placeholder: 'account label (e.g. work)'});
+    const keyInput = h('input', {type: 'password', placeholder: defaults.keyPlaceholder});
+    const modelInput = h('input', {type: 'text', value: defaults.model, placeholder: 'model id'});
+    const endpointInput = h('input', {type: 'url', value: defaults.endpoint, placeholder: 'OpenAI-compatible endpoint'});
+    const status = h('p', {class: 'section-sub'}, []);
+    const save = h('button', {class: 'btn'}, ['save API key']);
+    save.addEventListener('click', async () => {
+      const apiKey = keyInput.value.trim();
+      if (!apiKey) return keyInput.focus();
+      const model = modelInput.value.trim();
+      if (!model) return modelInput.focus();
+      const baseUrl = endpointInput.value.trim();
+      if (!baseUrl) return endpointInput.focus();
+      await api.upsertAccount({
+        provider,
+        id: crypto.randomUUID(),
+        mode: 'api-key',
+        label: labelInput.value.trim() || `${providerLabel[provider]} API key`,
+        apiKey,
+        model,
+        baseUrl
+      });
+      status.textContent = 'saved securely — select this account when starting a session';
+      keyInput.value = '';
+    });
+    return h('div', {class: 'card'}, [
+      h('h3', {}, [providerLabel[provider]]),
+      h('p', {class: 'subtitle'}, [subtitle]),
+      h('div', {class: 'field'}, [
+        h('label', {class: 'field-label'}, ['API key · model · endpoint']),
+        labelInput,
+        keyInput,
+        modelInput,
+        endpointInput,
+        save,
+        status,
+        h('p', {class: 'section-sub'}, ['Uses the locally installed OpenCode agent; the endpoint and model stay explicit per account.'])
+      ])
+    ]);
+  };
+
   cards.append(
     h('div', {class: 'card'}, [
       h('h3', {}, ['Claude Code']),
@@ -2346,7 +2649,10 @@ async function renderOnboarding(main: HTMLElement) {
         routerButton,
         routerStatus
       ])
-    ])
+    ]),
+    modelLinkCard('qwen', 'Alibaba Cloud Model Studio · OpenAI-compatible API'),
+    modelLinkCard('glm', 'Z.AI Coding Plan · OpenAI-compatible API'),
+    modelLinkCard('nvidia', 'NVIDIA NIM · hosted or self-hosted OpenAI-compatible API')
   );
 
   const skip = h('button', {class: 'btn'}, ['skip for now']);
@@ -2357,35 +2663,72 @@ async function renderOnboarding(main: HTMLElement) {
 // --- Session list ------------------------------------------------------------
 
 async function renderSessions(main: HTMLElement) {
-  const [sessions, chains] = await Promise.all([api.listSessions(), api.listCredentials()]);
+  const [allSessions, chains] = await Promise.all([api.listSessions(true), api.listCredentials()]);
+  const archived = allSessions.filter(session => session.archivedAt);
+  const sessions = allSessions.filter(session => showArchivedSessions ? Boolean(session.archivedAt) : !session.archivedAt);
 
   const newSessionButton = h('button', {class: 'btn primary'}, ['+ new session']);
   newSessionButton.addEventListener('click', () => navigate({name: 'new-session'}));
+  const archiveToggle = h('button', {class: 'btn'}, [showArchivedSessions ? 'show current sessions' : `show archived (${archived.length})`]);
+  archiveToggle.addEventListener('click', () => {
+    showArchivedSessions = !showArchivedSessions;
+    void render();
+  });
   main.append(
-    h('div', {class: 'toolbar'}, [h('h1', {class: 'section-title'}, [markEl(), 'sessions']), newSessionButton])
+    h('div', {class: 'toolbar'}, [
+      h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), showArchivedSessions ? 'archived sessions' : 'sessions']), h('p', {class: 'section-sub'}, [showArchivedSessions ? 'Archived session records stay local until you restore or delete them.' : 'Archive finished sessions to clear this list without deleting their worktree or project files.'])]),
+      h('div', {class: 'actions'}, [archiveToggle, newSessionButton])
+    ])
   );
 
   if (sessions.length === 0) {
-    main.append(h('div', {class: 'empty-state'}, ['No sessions yet — start one with "+ new session".']));
+    main.append(h('div', {class: 'empty-state'}, [showArchivedSessions ? 'No archived sessions.' : 'No sessions yet — start one with "+ new session".']));
     return;
   }
 
   const table = h('table', {class: 'sessions'});
   table.append(
-    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checks', 'checkout', 'ready in', 'last active'].map(label => h('th', {}, [label])))])
+    h('thead', {}, [h('tr', {}, ['session', 'provider', 'account', 'status', 'checks', 'checkout', 'ready in', 'last active', 'actions'].map(label => h('th', {}, [label])))])
   );
   const tbody = h('tbody');
   for (const session of sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))) {
     const name = session.task?.trim() || session.directory.split('/').filter(Boolean).pop() || session.directory;
+    const isLive = session.status === 'running' || session.status === 'starting';
+    const actions = h('div', {class: 'session-actions'});
+    const archive = h('button', {class: 'btn', type: 'button'}, ['archive']);
+    archive.disabled = isLive || Boolean(session.archivedAt);
+    archive.addEventListener('click', async event => {
+      event.stopPropagation();
+      await api.archiveSession(session.id);
+      void render();
+    });
+    const restore = h('button', {class: 'btn', type: 'button'}, ['restore']);
+    restore.disabled = !session.archivedAt;
+    restore.addEventListener('click', async event => {
+      event.stopPropagation();
+      await api.restoreSession(session.id);
+      showArchivedSessions = false;
+      void render();
+    });
+    const remove = h('button', {class: 'btn danger', type: 'button'}, ['delete']);
+    remove.disabled = !session.archivedAt;
+    remove.addEventListener('click', async event => {
+      event.stopPropagation();
+      if (!confirm(`Delete the local record for “${name}”? Its project files and any isolated worktree will remain on disk.`)) return;
+      await api.deleteSession(session.id);
+      void render();
+    });
+    actions.append(session.archivedAt ? restore : archive, remove);
     const row = h('tr', {}, [
       h('td', {}, [h('div', {class: 'session-name'}, [name, ...(session.error ? [h('p', {class: 'error'}, [session.error])] : [])])]),
-      h('td', {}, [session.provider]),
+      h('td', {}, [session.model ? `${providerLabel[session.provider]} · ${session.model}` : providerLabel[session.provider]]),
       h('td', {}, [accountLabel(session.accountId, chains)]),
       h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
       h('td', {}, [verificationPill(session.verification)]),
       h('td', {}, [session.worktreePath ? 'isolated' : 'shared']),
       h('td', {}, [laneReady(session)]),
-      h('td', {}, [relativeTime(session.updatedAt)])
+      h('td', {}, [relativeTime(session.updatedAt)]),
+      h('td', {}, [actions])
     ]);
     row.addEventListener('click', () => navigate({name: 'active-session', sessionId: session.id}));
     tbody.append(row);
@@ -2425,7 +2768,7 @@ async function renderNewSession(main: HTMLElement) {
     for (const account of chain.accounts) {
       const row = h('div', {class: `option-row${account.id === selectedAccountId ? ' selected' : ''}`}, [
         h('span', {class: 'label'}, [account.label]),
-        h('span', {class: 'meta'}, [`${account.mode}${account.hasSecret ? ' · secure' : ''}`])
+        h('span', {class: 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', account.hasSecret ? 'secure' : ''].filter(Boolean).join(' · ')])
       ]);
       row.addEventListener('click', () => {
         selectedAccountId = account.id;
@@ -2767,6 +3110,28 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
       await api.removeWorktree(sessionId);
       void render();
     });
+    const isLive = summary.status === 'running' || summary.status === 'starting';
+    const archiveSession = h('button', {class: 'btn'}, ['archive session']);
+    archiveSession.disabled = isLive || Boolean(summary.archivedAt);
+    archiveSession.addEventListener('click', async () => {
+      await api.archiveSession(sessionId);
+      showArchivedSessions = true;
+      navigate({name: 'sessions'});
+    });
+    const restoreSession = h('button', {class: 'btn'}, ['restore session']);
+    restoreSession.disabled = !summary.archivedAt;
+    restoreSession.addEventListener('click', async () => {
+      await api.restoreSession(sessionId);
+      showArchivedSessions = false;
+      navigate({name: 'sessions'});
+    });
+    const deleteSession = h('button', {class: 'btn danger'}, ['delete session']);
+    deleteSession.disabled = !summary.archivedAt;
+    deleteSession.addEventListener('click', async () => {
+      if (!confirm(`Delete the local record for “${sessionName}”? Its project files and any isolated worktree will remain on disk.`)) return;
+      await api.deleteSession(sessionId);
+      navigate({name: 'sessions'});
+    });
     const reviewChanges = h('button', {class: 'btn'}, ['review changes']);
     reviewChanges.addEventListener('click', async () => {
       review.innerHTML = '';
@@ -2808,22 +3173,46 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
         runChecks.disabled = false;
       }
     });
+    const checkpoint = h('button', {class: 'btn'}, ['record checkpoint']);
+    checkpoint.disabled = !currentRun;
+    checkpoint.addEventListener('click', async () => {
+      checkpoint.disabled = true;
+      review.innerHTML = '';
+      try {
+        const saved = await api.checkpointRun(sessionId);
+        if (currentRun && saved) currentRun = {...currentRun, checkpoint: saved};
+        renderHeader(summary);
+        review.append(h('div', {class: 'card'}, [
+          h('div', {class: 'toolbar'}, [h('h3', {}, ['checkpoint recorded']), h('button', {class: 'btn'}, ['close'])]),
+          h('p', {class: 'section-sub'}, [saved?.gitRef
+            ? `${saved.gitRef.slice(0, 12)} · working tree ${saved.workingTree}`
+            : `repository reference unavailable · working tree ${saved?.workingTree ?? 'unknown'}`]),
+          h('p', {class: 'section-sub'}, ['This is a durable review marker only. Fluent did not commit, stash, reset, or automatically resume the provider session.'])
+        ]));
+        (review.querySelector('button') as HTMLButtonElement | null)?.addEventListener('click', () => { review.innerHTML = ''; });
+      } catch (error) {
+        review.append(h('p', {class: 'error'}, [error instanceof Error ? error.message : String(error)]));
+      } finally {
+        checkpoint.disabled = !currentRun;
+      }
+    });
     header.append(
       h('div', {class: 'session-ident'}, [
-        h('span', {class: 'eyebrow'}, ['live session']),
+        h('span', {class: 'eyebrow'}, [summary.archivedAt ? 'archived session' : 'session']),
         h('h1', {class: 'session-title'}, [sessionName]),
         ...(summary.error ? [h('p', {class: 'error'}, [summary.error])] : []),
         h('div', {class: 'meta'}, [
-          h('span', {class: 'pill status-default'}, [summary.provider]),
+          h('span', {class: 'pill status-default'}, [summary.model ? `${providerLabel[summary.provider]} · ${summary.model}` : providerLabel[summary.provider]]),
           h('span', {class: 'pill'}, [accountLabel(summary.accountId, chains)]),
           h('span', {class: `pill status-${summary.status}`}, [summary.status]),
           ...(currentRun ? [h('span', {class: `pill status-${currentRun.state}`}, [`run · ${currentRun.state}${currentRun.delivery === 'unknown' ? ' · delivery review' : ''}`])] : []),
+          ...(currentRun?.checkpoint ? [h('span', {class: 'pill'}, [`checkpoint · ${currentRun.checkpoint.gitRef?.slice(0, 8) ?? 'no git ref'} · ${currentRun.checkpoint.workingTree}`])] : []),
           ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),
           verificationPill(summary.verification),
           h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
         ])
       ]),
-      h('div', {class: 'actions'}, [mergeLane, runChecks, reviewChanges, removeWorktree, stopButton])
+      h('div', {class: 'actions'}, [mergeLane, runChecks, checkpoint, reviewChanges, removeWorktree, summary.archivedAt ? restoreSession : archiveSession, deleteSession, stopButton])
     );
   }
 
@@ -2956,7 +3345,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
 // --- Credentials ------------------------------------------------------------
 
 async function renderCredentials(main: HTMLElement) {
-  const providerLabels: Record<ProviderId, string> = {claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini CLI'};
+  const providerLabels = providerLabel;
   main.append(
     h('h1', {class: 'section-title'}, [markEl(), `${providerLabels[credentialProvider]} credentials`]),
     h('p', {class: 'section-sub'}, ['fluent uses these in order — the highest connected credential runs your sessions'])
@@ -2998,7 +3387,7 @@ async function renderCredentials(main: HTMLElement) {
         : '';
       const row = h('div', {class: `option-row${isActive ? ' selected' : ''}`}, [
         h('span', {class: 'label'}, [`${index + 1}. ${account.label}`]),
-        h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, connection, isActive ? 'active now' : ''].filter(Boolean).join(' · ')])
+        h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', connection, isActive ? 'active now' : ''].filter(Boolean).join(' · ')])
       ]);
       // Only append a third flex child when there is actually a control to show — an always-present
       // empty div throws off `.option-row`'s space-between distribution on the first row (index 0),
@@ -3032,7 +3421,7 @@ async function renderCredentials(main: HTMLElement) {
         const connection = auth ? (auth.loggedIn ? 'connected' : 'not connected') : '';
         list.append(h('div', {class: 'option-row'}, [
           h('span', {class: 'label'}, [account.label]),
-          h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, connection, 'manual only'].filter(Boolean).join(' · ')])
+          h('span', {class: auth && !auth.loggedIn ? 'error' : 'meta'}, [[account.mode, account.model ? `model ${account.model}` : '', connection, 'manual only'].filter(Boolean).join(' · ')])
         ]));
         if (auth && !auth.loggedIn && auth.loginCommand) {
           list.append(h('p', {class: 'section-sub'}, [`connect it with:  ${auth.loginCommand}`]));
@@ -3079,7 +3468,13 @@ async function renderCredentials(main: HTMLElement) {
   for (const mode of modes) modeInput.append(h('option', {value: mode}, [mode === 'platform-credits' ? 'platform API credits' : mode]));
   const labelInput = h('input', {type: 'text', placeholder: 'label'});
   const keyInput = h('input', {type: 'password', placeholder: credentialProvider === 'claude' ? 'sk-ant-...' : 'sk-...'});
-  const baseUrlInput = h('input', {type: 'text', placeholder: 'base URL (optional — e.g. OpenRouter preset)'});
+  const linkedProvider = credentialProvider === 'qwen' || credentialProvider === 'glm' || credentialProvider === 'nvidia'
+    ? credentialProvider
+    : undefined;
+  const modelLinked = linkedProvider !== undefined;
+  const linkDefaults = linkedProvider ? modelLinkDefaults[linkedProvider] : undefined;
+  const baseUrlInput = h('input', {type: 'url', value: linkDefaults?.endpoint ?? '', placeholder: modelLinked ? 'OpenAI-compatible endpoint' : 'base URL (optional — e.g. OpenRouter preset)'});
+  const modelInput = h('input', {type: 'text', value: linkDefaults?.model ?? '', placeholder: 'model id'});
   const identityInput = h('select') as HTMLSelectElement;
   identityInput.append(h('option', {value: 'automatic'}, ['identity · automatic']));
   identityInput.append(h('option', {value: 'new'}, ['identity · separate login']));
@@ -3094,10 +3489,13 @@ async function renderCredentials(main: HTMLElement) {
   const syncAccountForm = () => {
     const apiKeyMode = modeInput.value === 'api-key';
     keyInput.hidden = !apiKeyMode;
-    baseUrlInput.hidden = !apiKeyMode || credentialProvider !== 'claude';
+    baseUrlInput.hidden = !apiKeyMode || (credentialProvider !== 'claude' && !modelLinked);
+    modelInput.hidden = !apiKeyMode || !modelLinked;
     addButton.textContent = apiKeyMode ? 'save API key' : 'add CLI profile';
     status.textContent = apiKeyMode
-      ? 'Keys are stored in the operating-system credential store.'
+      ? modelLinked
+        ? 'Keys are stored in the operating-system credential store. This account launches OpenCode with its own model and endpoint.'
+        : 'Keys are stored in the operating-system credential store.'
       : 'This creates an isolated CLI profile. Fluent shows the exact provider login command after saving.';
   };
   modeInput.addEventListener('change', syncAccountForm);
@@ -3114,7 +3512,8 @@ async function renderCredentials(main: HTMLElement) {
         mode,
         label: labelInput.value.trim() || (mode === 'api-key' ? 'API key' : mode === 'subscription' ? 'subscription' : 'platform API credits'),
         apiKey: mode === 'api-key' ? apiKey : undefined,
-        baseUrl: mode === 'api-key' && credentialProvider === 'claude' ? baseUrlInput.value.trim() || undefined : undefined,
+        baseUrl: mode === 'api-key' && (credentialProvider === 'claude' || modelLinked) ? baseUrlInput.value.trim() || undefined : undefined,
+        model: mode === 'api-key' && modelLinked ? modelInput.value.trim() || undefined : undefined,
         sameIdentityAs: identityChoice.startsWith('link:') ? identityChoice.slice('link:'.length) : undefined,
         forceNewIdentity: identityChoice === 'new'
       });
@@ -3124,7 +3523,7 @@ async function renderCredentials(main: HTMLElement) {
       status.className = 'error';
     }
   });
-  main.append(h('div', {class: 'field'}, [modeInput, labelInput, identityInput, keyInput, baseUrlInput, addButton, status]));
+  main.append(h('div', {class: 'field'}, [modeInput, labelInput, identityInput, keyInput, modelInput, baseUrlInput, addButton, status]));
 }
 
 void render();

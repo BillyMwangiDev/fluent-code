@@ -1,6 +1,6 @@
 # Fluent Code
 
-Desktop orchestration for Claude Code, Codex, Gemini CLI, and OpenRouter-backed coding agents — `fluentd`
+Desktop orchestration for Claude Code, Codex, Gemini CLI, and linked Qwen, GLM, and NVIDIA models — `fluentd`
 owns real PTY sessions and a credential broker; `fluent` is a Tauri app that renders and
 coordinates them. See [`docs/superpowers/specs/2026-09-13-fluent-code-design.md`](docs/superpowers/specs/2026-09-13-fluent-code-design.md)
 for the full design; this file covers the desktop implementation that exists today and calls out
@@ -33,8 +33,11 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
 **credentials** manages the precedence chain and fallback policy for when one hits a usage limit.
 
 **Current limitations**, called out here rather than left silent:
-- Claude Code, Codex, and Gemini CLI launch as their real installed CLIs. OpenRouter is a Claude
-  Code compatibility preset, not a separate agent executable. Gemini's Google login and Vertex
+- Claude Code, Codex, and Gemini CLI launch as their real installed CLIs. Qwen, GLM, and NVIDIA
+  NIM accounts launch through a locally installed [OpenCode](https://opencode.ai/) adapter with an
+  account-specific OpenAI-compatible endpoint and model. Fluent passes the selected API key only
+  to that child process; it never writes the key into OpenCode config. OpenRouter is a Claude Code
+  compatibility preset, not a separate agent executable. Gemini's Google login and Vertex
   credentials remain owned by Gemini CLI; Fluent supports the explicit `GEMINI_API_KEY` account
   path without copying browser or ADC credentials.
 - `.fluent/credentials.json` stores only account metadata, precedence, and fallback state.
@@ -47,11 +50,14 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
   missing values mean unavailable data, not zero. Transcript-derived totals can include sessions
   started outside Fluent and are estimates, not billing records.
 - SSH remote profiles forward a remote `fluentd` Unix socket and can become the active desktop
-  target. Windows remote forwarding, remote setup, credential broadcasts, and reconnect recovery
-  still need fuller UX.
+  target. Profile inputs are validated, the forward must answer a versioned Fluent handshake, and
+  a user may opt into bounded automatic tunnel recovery; direct disconnect always cancels it.
+  Windows remote forwarding and remote credential broadcasts still need fuller UX.
 - The Design workspace can optionally embed a user-run local [OpenDesign](https://open-design.ai/official/)
   service at `127.0.0.1:7456`. The connector is intentionally loopback-only and does not yet
-  perform file-level OpenDesign API handoff; it creates repository-bound Fluent handoff tasks.
+  perform file-level OpenDesign API handoff. Its repository-bound Fluent handoff tasks do persist
+  the source mapping, component and token notes, loopback preview, intended implementation paths,
+  and any explicitly requested reviewer handoff.
 - The Design workspace also discovers the `pen` and OpenDesign CLIs. It can run OpenDesign's
   documented MCP installer for Claude Code or Codex only after an in-app confirmation; pen.dev’s
   local MCP toggle remains owned by the pen.dev desktop app.

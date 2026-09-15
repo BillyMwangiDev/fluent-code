@@ -7,7 +7,7 @@ Fluent connects to a user-run instance of [OpenDesign](https://open-design.ai/of
 - Fluent stores only a loopback OpenDesign **origin** (default `http://127.0.0.1:7456`) and probes
   it from `fluentd`. Paths, query strings, fragments, and URL credentials are deliberately not
   retained, so a custom health-check path cannot currently be configured.
-- When reachable, the Design workspace can show OpenDesign in its existing desktop surface and creates Fluent coordination tasks for build handoff.
+- When reachable, the Design workspace can show OpenDesign in its existing desktop surface and creates Fluent coordination tasks for build handoff. A task can carry a repo-relative source mapping, component and token notes, a loopback preview URL, intended implementation paths, and an explicit reviewer handoff. Intended paths only become claims when the user selects an active owner lane and requests that reservation.
 - OpenDesign remains its own local service. It owns its agents, model credentials, and design-file protocol; Fluent does not install it, start it, proxy its traffic, or copy its code.
 
 ## Boundary
@@ -15,13 +15,12 @@ Fluent connects to a user-run instance of [OpenDesign](https://open-design.ai/of
 The connector accepts only `localhost`, `127.0.0.1`, or `[::1]` HTTP(S) origins. For a remote
 machine, run OpenDesign beside the remote Fluent daemon and use an authenticated tunnel before
 extending this connector. This keeps a locally configured design service from becoming an arbitrary
-network request channel. The Tauri content-security policy is still permissive while the embedded
-design surface is being completed; do not widen the connector beyond loopback until that policy is
-tightened and tested.
+network request channel. The Tauri content-security policy permits Fluent assets plus loopback
+HTTP(S) connections and frames; it does not permit non-loopback design origins.
 
 ## Completion check
 
-The first connector is complete when a developer can configure a local OpenDesign URL, see its health state, open it in Fluent's Design workspace, and create a repository-bound handoff task. Deeper file-level handoff should use OpenDesign's stable public API once it is documented upstream.
+The first connector is complete when a developer can configure a local OpenDesign URL, see its health state, open it in Fluent's Design workspace, and create a repository-bound structured handoff task. Deeper file-level handoff should use OpenDesign's stable public API once it is documented upstream.
 
 ## CLI and MCP discovery
 

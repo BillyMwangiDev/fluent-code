@@ -18,6 +18,9 @@ describe('a lane\'s starting task', () => {
     assert.deepEqual(initialPromptArgs('claude', 'fix the flaky test'), ['fix the flaky test']);
     assert.deepEqual(initialPromptArgs('codex', '  fix the flaky test \n'), ['fix the flaky test']);
     assert.deepEqual(initialPromptArgs('gemini', 'fix it'), ['--prompt-interactive', 'fix it']);
+    assert.deepEqual(initialPromptArgs('qwen', 'fix it'), ['--prompt', 'fix it']);
+    assert.deepEqual(initialPromptArgs('glm', 'fix it'), ['--prompt', 'fix it']);
+    assert.deepEqual(initialPromptArgs('nvidia', 'fix it'), ['--prompt', 'fix it']);
   });
 
   it('adds nothing when there is no task', () => {
@@ -99,27 +102,24 @@ describe('injecting context', () => {
       const dispatches = manager.runStore.eventsSince(summary.id).events.filter(event => event.type === 'prompt.dispatch_intended');
       assert.equal(dispatches.length, 1, 'only the Enter that submitted the injected brief is a dispatch');
     } finally {
-      if (sessionId) {
-        await manager.stop(sessionId);
-        await waitFor(() => manager.get(sessionId!).pid === undefined).catch(() => undefined);
-      }
+      if (sessionId) await manager.shutdown();
       process.env.PATH = previousPath;
       delete process.env.FLUENT_TEST_CAPTURE;
-      // Durable writes are coalesced, so a snapshot can still land while this directory is removed.
-      await rm(root, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+      await rm(root, {recursive: true, force: true});
     }
   });
 
   it('ends its lanes when the daemon shuts down instead of leaving them running', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fluent-shutdown-'));
     const bin = join(root, 'bin');
+    const state = join(root, 'state');
     await mkdir(bin);
     // Ignores the hangup a closing terminal sends, the way Claude Code outlives its PTY.
     await writeFile(join(bin, 'codex'), ['#!/bin/sh', 'trap "" HUP', 'printf "ready\\n"', 'while true; do sleep 1; done'].join('\n'));
     await chmod(join(bin, 'codex'), 0o755);
     const previousPath = process.env.PATH;
     process.env.PATH = `${bin}${delimiter}${previousPath}`;
-    const manager = new SessionManager(join(root, 'state'));
+    const manager = new SessionManager(state);
     try {
       const summary = await manager.create({provider: 'codex', directory: root});
       await waitFor(() => manager.get(summary.id).output.includes('ready'));
@@ -131,16 +131,65 @@ describe('injecting context', () => {
         try { process.kill(pid, 0); return false; } catch { return true; }
       });
       assert.equal(manager.get(summary.id).status, 'stopped');
-      await assert.rejects(manager.create({provider: 'codex', directory: root}), /shutting down/, 'no lane can start once shutdown has begun');
+      const restored = new SessionManager(state);
+      await restored.restore();
+      assert.ok(
+        restored.runStore.eventsSince(summary.id).events.some(event => event.type === 'text.delta'),
+        'shutdown flushes the final terminal observation before the daemon can exit'
+      );
     } finally {
       process.env.PATH = previousPath;
-      // Durable writes are coalesced, so a snapshot can still land while this directory is removed.
-      await rm(root, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
+      await rm(root, {recursive: true, force: true});
     }
   });
 
   it('refuses a lane that is not running', async () => {
     const manager = new SessionManager(await mkdtemp(join(tmpdir(), 'fluent-inject-state-')));
     await assert.rejects(manager.inject('missing', 'context'), /not accepting input/);
+  });
+});
+
+describe('session archive and deletion', () => {
+  it('keeps an archived record durable, then deletes only that local record after a second deliberate step', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fluent-session-lifecycle-'));
+    const bin = join(root, 'bin');
+    const state = join(root, 'state');
+    await mkdir(bin);
+    await writeFile(join(bin, 'codex'), ['#!/bin/sh', 'printf "ready\\n"', 'while true; do sleep 1; done'].join('\n'));
+    await chmod(join(bin, 'codex'), 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${previousPath}`;
+    const manager = new SessionManager(state);
+    let sessionId: string | undefined;
+    try {
+      const summary = await manager.create({provider: 'codex', directory: root});
+      sessionId = summary.id;
+      await waitFor(() => manager.get(summary.id).output.includes('ready'));
+      await assert.rejects(manager.archive(summary.id), /Stop the session before you archive it/);
+      await manager.stop(summary.id);
+      await waitFor(() => manager.get(summary.id).pid === undefined);
+      await assert.rejects(manager.delete(summary.id), /Archive the session before deleting/);
+
+      const archived = await manager.archive(summary.id);
+      assert.ok(archived.archivedAt);
+      assert.equal(manager.list().length, 0, 'the default session view omits archived records');
+      assert.equal(manager.list(true)[0]?.id, summary.id, 'the archive view retains the record');
+
+      const afterRestart = new SessionManager(state);
+      await afterRestart.restore();
+      assert.equal(afterRestart.list().length, 0);
+      assert.equal(afterRestart.list(true)[0]?.archivedAt, archived.archivedAt, 'archive state survives a daemon restart');
+
+      await manager.restoreArchived(summary.id);
+      assert.equal(manager.list()[0]?.id, summary.id, 'restore returns the stopped session to the normal list');
+      await manager.archive(summary.id);
+      assert.deepEqual(await manager.delete(summary.id), {deleted: true, sessionId: summary.id});
+      assert.throws(() => manager.get(summary.id), /Session not found/);
+      assert.ok(manager.runStore.has(summary.id), 'deleting a session does not erase retained usage history');
+    } finally {
+      if (sessionId) await manager.shutdown().catch(() => undefined);
+      process.env.PATH = previousPath;
+      await rm(root, {recursive: true, force: true});
+    }
   });
 });

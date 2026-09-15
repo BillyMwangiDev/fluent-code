@@ -22,6 +22,7 @@ function state(): CoordinationState {
     messages: [{id: 'message-a', from: 'lane-b', to: 'lane-a', body: 'tests are ready', createdAt: '2026-09-14T06:00:00.000Z'}],
     events: [
       {id: 'event-task', at: '2026-09-14T03:00:00.000Z', kind: 'task.created', sessionIds: ['lane-a'], taskId: 'task-a'},
+      {id: 'event-dependencies', at: '2026-09-14T03:30:00.000Z', kind: 'task.dependencies_changed', sessionIds: [], taskId: 'task-a', dependsOn: ['task-b']},
       {id: 'event-decision', at: '2026-09-14T04:00:00.000Z', kind: 'decision.recorded', sessionIds: ['lane-a'], decisionId: 'decision-a'},
       {id: 'event-handoff-request', at: '2026-09-14T05:00:00.000Z', kind: 'handoff.requested', sessionIds: ['lane-a', 'lane-b'], handoffId: 'handoff-a'},
       {id: 'event-handoff-accept', at: '2026-09-14T05:30:00.000Z', kind: 'handoff.accepted', sessionIds: ['lane-a', 'lane-b'], handoffId: 'handoff-a'},
@@ -57,6 +58,14 @@ describe('coordination explorer helpers', () => {
     assert.deepEqual(inspection.claims.map(claim => claim.path), ['app/src/main.ts']);
     assert.deepEqual(inspection.messages.map(message => message.id), ['message-a'], 'lane backlinks include sent and received messages');
     assert.equal(inspection.lanes[0]?.verification, 'passed', 'verification is current lane state');
+  });
+
+  it('retains a prerequisite edit as a task-linked activity', () => {
+    const activity = retainedCoordinationHistory(state(), 10).find(item => item.key === 'event:event-dependencies');
+
+    assert.deepEqual(activity?.subject, {kind: 'task', id: 'task-a'});
+    assert.equal(activity?.label, 'task prerequisites updated');
+    assert.match(activity?.detail ?? '', /1 prerequisite/);
   });
 
   it('resolves path containment conflicts and missing lanes without inventing a replacement', () => {

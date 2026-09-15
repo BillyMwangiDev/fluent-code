@@ -33,7 +33,7 @@ export function resolveId<T extends {id: string}>(items: readonly T[], prefix: s
 
 export function viewCursor(view: Omit<AgentView, 'cursor'>) {
   const material = JSON.stringify([
-    view.tasks.map(task => [task.id, task.status, task.sessionId, task.title]),
+    view.tasks.map(task => [task.id, task.status, task.sessionId, task.dependsOn, task.title]),
     view.claims.map(claim => [claim.path, claim.sessionId, claim.origin]),
     view.conflicts.map(conflict => [conflict.path, conflict.claimedPath, conflict.sessionId]),
     view.handoffs.map(handoff => [handoff.id, handoff.status]),
@@ -61,9 +61,10 @@ export function renderAgentView(view: AgentView) {
 
   lines.push(`tasks ${view.tasks.length}`);
   if (view.tasks.length > 0) {
-    lines.push('id status lane title');
+    lines.push('id status lane needs title');
     for (const task of view.tasks) {
-      lines.push(`${shortId(task.id)} ${task.status} ${task.sessionId ? shortId(task.sessionId) : '-'} ${task.title}`);
+      const dependencies = task.dependsOn?.map(shortId).join(',') || '-';
+      lines.push(`${shortId(task.id)} ${task.status} ${task.sessionId ? shortId(task.sessionId) : '-'} ${dependencies} ${task.title}`);
     }
   }
 
