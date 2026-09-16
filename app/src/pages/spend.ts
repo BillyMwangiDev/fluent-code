@@ -6,12 +6,14 @@
 // 'usage' screen above (which is live, per-session status-line telemetry): this is cross-session
 // historical cost, scanned from the providers' own transcript files, same as T3's approach.
 import {api} from '../api';
+import {store} from '../store';
 import {navigate, refresh} from '../router';
 import {prefs} from '../prefs';
-import {h, markEl, button, askConfirm, showActionError, showNotice, actionErrorText, relativeTime, formatTokens, formatUsd, formatPercent, bytes, duration, providerLabel, providerColor, modelLinkDefaults, accountLabel, verificationPill, laneReady, quotaLabel, directoryField, pickDirectory, workspaceFolderName, segmented, isLive} from '../ui';
+import {h, markEl, button, askConfirm, showActionError, showNotice, actionErrorText, relativeTime, formatTokens, formatUsd, formatPercent, bytes, duration, providerLabel, providerColor, modelLinkDefaults, accountLabel, verificationPill, laneReady, quotaLabel, directoryField, pickDirectory, workspaceFolderName, segmented, isLive, sessionName} from '../ui';
 import {metricCard, sparklineChart, lineChart} from '../charts';
+import {windowLabel, windowLevel, laneCostText, windowsByProvider} from '../limits';
 
-import type {PriceOverride, ProviderId, SpendModelBucket} from '../api';
+import type {CredentialChainState, PriceOverride, ProviderId, SpendModelBucket} from '../api';
 
 function dayLabel(day: string): string {
   return new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, {month: 'short', day: 'numeric', timeZone: 'UTC'});
@@ -33,13 +35,18 @@ export async function renderSpend(main: HTMLElement) {
     // instant; without this, the screen just looks broken for a few seconds on every visit.
     container.append(h('div', {class: 'empty-state'}, ['scanning provider transcripts…']));
     let summary;
+    let chains: CredentialChainState[] = [];
     try {
-      summary = await api.spendSummary(rangeDays);
+      [summary, chains] = await Promise.all([api.spendSummary(rangeDays), api.listCredentials().catch(() => [])]);
     } catch (error) {
       container.innerHTML = '';
       container.append(h('div', {class: 'empty-state'}, [error instanceof Error ? error.message : String(error)]));
       return;
     }
+    // store.sessions/store.usage back the by-lane table below — fluentd already polls them for
+    // the rail and workspace, so this avoids a second sessions.list/usage.snapshot round trip.
+    if (!store.loaded) await store.refresh();
+    if (store.usage.size === 0) await store.refreshUsage();
     container.innerHTML = '';
 
     const rangeButtons = h('div', {class: 'segmented'});
@@ -64,6 +71,33 @@ export async function renderSpend(main: HTMLElement) {
     if (summary.ratesError) {
       container.append(h('div', {class: 'banner advisory'}, [h('strong', {}, ['pricing table stale — ']), h('span', {}, [summary.ratesError])]));
     }
+
+    // Limits — one row per provider that has reported a usage window, merged with the active
+    // account's label so it reads like the workspace strip's chips, just larger.
+    const limitsCard = h('div', {class: 'card'}, [h('h3', {}, ['limits'])]);
+    const windows = windowsByProvider([...store.usage.values()]);
+    if (windows.size === 0) {
+      limitsCard.append(h('p', {class: 'section-sub'}, ["no limit windows reported yet — they appear after a lane's first turn"]));
+    } else {
+      for (const providerId of [...windows.keys()].sort()) {
+        const provider = providerId as ProviderId;
+        const window = windows.get(providerId)!;
+        const account = accountLabel(chains.find(chain => chain.provider === provider)?.activeAccountId, chains);
+        const primaryText = windowLabel(window.primary);
+        const secondaryText = windowLabel(window.secondary);
+        const level = windowLevel(window.primary) ?? windowLevel(window.secondary);
+        limitsCard.append(
+          h('div', {class: 'provider-row'}, [
+            h('div', {class: 'row-top'}, [
+              h('span', {class: 'row-label'}, [h('span', {class: `provider-dot ${provider}`}), h('span', {class: 'name'}, [`${providerLabel[provider]} · ${account}`])]),
+              (primaryText ?? secondaryText) ? h('span', {class: `row-value${level && level !== 'ok' ? ' warn' : ''}`}, [primaryText ?? secondaryText!]) : null
+            ]),
+            primaryText && secondaryText ? h('span', {class: 'row-sub'}, [secondaryText]) : null
+          ])
+        );
+      }
+    }
+    container.append(limitsCard);
 
     // Per-provider aggregation across the whole range, for the left-column breakdown rows.
     const byProvider = new Map<ProviderId, {costUsd: number; tokens: number}>();
@@ -123,6 +157,55 @@ export async function renderSpend(main: HTMLElement) {
         ])
       ])
     );
+
+    // By lane — joins the live session list and its usage telemetry, last 30 days, not archived.
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    const laneRows = store.sessions
+      .filter(session => !session.archivedAt && Date.now() - new Date(session.createdAt).getTime() <= thirtyDaysMs)
+      .map(session => ({session, usage: store.usage.get(session.id)}))
+      .sort((a, b) => (b.usage?.costUsd ?? -1) - (a.usage?.costUsd ?? -1));
+    const laneCard = h('div', {class: 'card'}, [h('h3', {}, ['by lane'])]);
+    if (laneRows.length === 0) {
+      laneCard.append(h('p', {class: 'section-sub'}, ['no lane usage yet']));
+    } else {
+      const laneTable = h('table', {class: 'spend'});
+      laneTable.append(h('thead', {}, [h('tr', {}, ['lane', 'provider · model', 'cost', 'tokens', 'cache', 'status', 'started'].map(label => h('th', {}, [label])))]));
+      const tbody = h('tbody');
+      for (const {session, usage} of laneRows) {
+        const tokens = usage && (usage.inputTokens !== undefined || usage.outputTokens !== undefined) ? formatTokens((usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)) : '—';
+        const cache = usage?.cacheHitRatio === undefined ? '—' : `${(usage.cacheHitRatio * 100).toFixed(0)}%`;
+        tbody.append(
+          h('tr', {}, [
+            h('td', {}, [sessionName(session)]),
+            h('td', {}, [session.model ? `${providerLabel[session.provider]} · ${session.model}` : providerLabel[session.provider]]),
+            h('td', {class: 'num'}, [laneCostText(usage) ?? '—']),
+            h('td', {class: 'num'}, [tokens]),
+            h('td', {class: 'num'}, [cache]),
+            h('td', {}, [h('span', {class: `pill status-${session.status}`}, [session.status])]),
+            h('td', {}, [relativeTime(session.createdAt)])
+          ])
+        );
+      }
+      laneTable.append(tbody);
+      laneCard.append(laneTable);
+    }
+    container.append(laneCard);
+
+    // Fallbacks — every credential.switched event fluentd logged for this range, so the broker's
+    // value (kept a lane running past a limit) is visible, not just its cost.
+    const events = summary.credentialEvents ?? [];
+    const fallbacksCard = h('div', {class: 'card'}, [
+      h('h3', {}, [events.length ? `${events.length} fallback${events.length === 1 ? '' : 's'} kept lanes running in the last ${summary.rangeDays}d` : 'fallbacks'])
+    ]);
+    if (events.length === 0) {
+      fallbacksCard.append(h('p', {class: 'section-sub'}, ['no credential switches in this range']));
+    } else {
+      for (const event of [...events].sort((a, b) => b.at.localeCompare(a.at))) {
+        const resetSuffix = event.resetAt ? ` (resets ${new Date(event.resetAt).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'})})` : '';
+        fallbacksCard.append(h('p', {class: 'section-sub'}, [`${providerLabel[event.provider]} · ${accountLabel(event.fromAccountId, chains)} → ${accountLabel(event.toAccountId, chains)} · ${event.reason} · ${relativeTime(event.at)}${resetSuffix}`]));
+      }
+    }
+    container.append(fallbacksCard);
 
     // Breakdown — Model (all days combined) or Day, matching T3's toggle.
     const breakdownToggle = h('div', {class: 'segmented'});

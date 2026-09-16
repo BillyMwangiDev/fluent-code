@@ -128,7 +128,9 @@ export type HardwareSnapshot = {current: HardwareSample; history: HardwareSample
 export type SoftwareSnapshot = {capturedAt: string; hostname: string; kernel: string; nodeVersion: string; daemonPid: number; git?: string; providers: ProviderHealth[]};
 export type QuotaWindow = {usedPercent?: number; windowMinutes?: number; resetsAt?: string};
 export type ProviderQuota = {primary?: QuotaWindow; secondary?: QuotaWindow; observedAt: string};
-export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
+/** Where costUsd came from: the provider's own figure, fluentd's price table, or nowhere. Mirrors
+ * the CostSource type below (declared with spend-tracker's other mirrored types). */
+export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; costSource?: CostSource; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
 export type ResourceSnapshot = {sequence: number; sampledAtUnixMs: number; scannedProcessCount: number; retainedProcessCount: number; inaccessibleProcessCount: number; processes: Array<{pid: number; ppid: number; name: string; command: string; status: string; cpuPercent: number; residentBytes: number; virtualBytes: number; ioReadBytes: number; ioWriteBytes: number}>};
 
 // Mirrors src/spend-tracker.ts — forked from T3 Code's usage system (MIT licensed).
@@ -137,6 +139,8 @@ export type CostSource = 'providerReported' | 'modelPriced' | 'unpriced';
 export type PriceOverride = {inputCostPerMillionTokens: number; outputCostPerMillionTokens: number; cacheReadCostPerMillionTokens?: number; cacheWriteCostPerMillionTokens?: number};
 export type SpendModelBucket = {provider: ProviderId; model: string; totals: TokenTotals; costUsd: number; costSource: CostSource; cacheSavingsUsd: number};
 export type SpendDayBucket = {day: string; costUsd: number; totals: TokenTotals; models: SpendModelBucket[]};
+/** One credential-broker switch, appended to `credential-events.jsonl` in the daemon's state dir. */
+export type CredentialEvent = {at: string; provider: ProviderId; fromAccountId?: string; toAccountId: string; reason: 'fallback' | 'revert' | 'manual'; resetAt?: string};
 export type SpendSummary = {
   rangeDays: number;
   totalCostUsd: number;
@@ -144,6 +148,7 @@ export type SpendSummary = {
   totals: TokenTotals;
   days: SpendDayBucket[];
   priceOverrides: Record<string, PriceOverride>;
+  credentialEvents?: CredentialEvent[];
   ratesUpdatedAt?: string;
   ratesError?: string;
 };
