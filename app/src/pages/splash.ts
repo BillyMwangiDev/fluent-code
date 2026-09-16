@@ -68,7 +68,12 @@ export async function renderSplash(main: HTMLElement) {
   // Someone who already chose a workspace has used Fluent before; the workspace is home, and
   // credentials stay one click away in the rail. Onboarding is for a first run with nothing to run.
   const canStart = Boolean(prefs.workspacePath) || chains.some(chain => chain.accounts.length > 0) || installed.some(provider => provider.installed);
-  const advance = () => navigate(canStart ? {name: 'orchestration'} : {name: 'onboarding'});
+  let advanced = false;
+  const advance = () => {
+    if (advanced) return;
+    advanced = true;
+    navigate(canStart ? {name: 'orchestration'} : {name: 'onboarding'});
+  };
   container.addEventListener('click', advance);
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Enter') {
@@ -77,4 +82,7 @@ export async function renderSplash(main: HTMLElement) {
     }
   };
   document.addEventListener('keydown', onKey);
+  // A returning user (a workspace already chosen) has seen this screen before — let it flash the
+  // provider badges, then move on by itself. A first run has nothing saved yet and always waits.
+  if (prefs.workspacePath && canStart) setTimeout(advance, 400);
 }

@@ -40,6 +40,7 @@ export async function renderUsage(main: HTMLElement) {
   if (usage.sessions.length) {
     main.append(h('div', {class: 'card'}, [
       h('h3', {}, ['provider usage · each provider\'s own telemetry']),
+      h('div', {class: 'table-head muted'}, ['model · context · tokens · cache · cost · windows · updated']),
       ...usage.sessions.map(item => h('div', {class: 'usage-row'}, [
         h('strong', {}, [item.model ?? providerLabel[item.provider]]),
         // Coral is reserved for actions/alerts/thresholds (AGENTS.md), never an ordinary data

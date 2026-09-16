@@ -17,8 +17,13 @@ function replaceMain(main: HTMLElement): HTMLElement {
 export async function renderCredentials(main: HTMLElement) {
   const providerLabels = providerLabel;
   main.append(
-    h('h1', {class: 'section-title'}, [markEl(), `${providerLabels[credentialProvider]} credentials`]),
-    h('p', {class: 'section-sub'}, ['fluent uses these in order — the highest connected credential runs your sessions'])
+    h('div', {class: 'toolbar'}, [
+      h('div', {}, [
+        h('h1', {class: 'section-title'}, [markEl(), `${providerLabels[credentialProvider]} credentials`]),
+        h('p', {class: 'section-sub'}, ['fluent uses these in order — the highest connected credential runs your sessions'])
+      ]),
+      h('div', {class: 'actions'}, [button('connect another provider…', () => navigate({name: 'onboarding'}), {class: 'btn ghost'})])
+    ])
   );
 
   const providers = h('div', {class: 'segmented'});

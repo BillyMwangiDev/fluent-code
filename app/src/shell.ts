@@ -3,6 +3,7 @@
 import {activeRemoteSocket} from './api';
 import {openLaunchSheet} from './launch';
 import {prefs} from './prefs';
+import {currentProject} from './project-scope';
 import {navigate, onRouteChange, route, type Route, type RouteName} from './router';
 import {store} from './store';
 import {button, h, icon, isLive, isMod, kbd, markEl, openMenu, openSheet, pickDirectory, providerShort, sessionName, workspaceFolderName, type IconName} from './ui';
@@ -39,7 +40,7 @@ export function renderTopbar(): HTMLElement {
   const target = activeRemoteSocket()
     ? h('span', {class: 'target-pill'}, ['● remote target'])
     : h('span', {class: 'target-pill local'}, ['● local'])
-  const project = prefs.workspacePath;
+  const project = currentProject(prefs.workspacePath, store.sessions);
   const palette = button([icon('search'), 'search or run…', kbd('mod K')], () => openPalette(), {class: 'btn ghost topbar-palette', 'aria-label': 'open command palette'});
   const launch = button([icon('plus'), 'agents'], () => startLanes(), {class: 'btn primary small', title: 'start agents (⌘N)'});
   return h('header', {class: 'topbar'}, [
@@ -67,10 +68,11 @@ export function renderRail(): HTMLElement {
   const brand = h('div', {class: 'rail-brand'}, [brandMark, wordmark, toggle]);
 
   // --- Workspace switcher --------------------------------------------------------------------
-  const name = prefs.workspacePath ? workspaceFolderName(prefs.workspacePath) : 'choose a workspace';
+  const railProject = currentProject(prefs.workspacePath, store.sessions);
+  const name = railProject ? workspaceFolderName(railProject) : 'choose a workspace';
   const switcher = button([
     icon('folder'),
-    h('span', {class: 'rail-switch-text'}, [h('span', {class: 'rail-switch-name'}, [name]), h('span', {class: 'rail-switch-path'}, [prefs.workspacePath || 'pick a folder to begin'])]),
+    h('span', {class: 'rail-switch-text'}, [h('span', {class: 'rail-switch-name'}, [name]), h('span', {class: 'rail-switch-path'}, [railProject || 'pick a folder to begin'])]),
     h('span', {class: 'rail-switch-chevron'}, [icon('chevron')])
   ], async () => {
     const projects = [...new Set(store.sessions.filter(session => isLive(session) && !session.archivedAt).map(session => session.projectDirectory ?? session.directory))]

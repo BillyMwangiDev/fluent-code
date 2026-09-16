@@ -893,3 +893,17 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* --- T2 fixes (2026-09-17 limits-and-budget audit): usage table headers, dense-grid tile floor
+   and scroll, rail overflow fade. Appended only — nothing above this line is touched; later source
+   order lets these add missing properties or win over less-specific rules above without editing
+   them. See docs/superpowers/plans/2026-09-17-limits-and-budget.md T2. --- */
+.table-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 0 6px; }
+/* .lane-stage, not .lane-grid: that ancestor is shared with the compact focus-mode strip list
+   (.lane-strip), which must keep its own row height, not a 200px floor. */
+.lane-stage { overflow-y: auto; }
+.lane-stage .lane { min-height: 200px; }
+.rail-scroll {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+}

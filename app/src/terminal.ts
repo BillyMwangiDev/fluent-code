@@ -74,6 +74,10 @@ export async function attachLaneTerminal(sessionId: string, container: HTMLEleme
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
   terminal.open(container);
+  // Re-read the palette once the terminal's own DOM exists, in case opening it raced the
+  // stylesheet — cheap, and it makes the constructor's `theme` option provably redundant rather
+  // than load-bearing.
+  terminal.options.theme = terminalTheme();
   let replaying = true;
   const pending: string[] = [];
   terminal.onData(data => {
@@ -110,10 +114,17 @@ export async function attachLaneTerminal(sessionId: string, container: HTMLEleme
     void api.resize(sessionId, terminal.cols, terminal.rows).catch(() => undefined);
   };
   const resizeObserver = new ResizeObserver(() => fit());
+  // Appearance mode can change while this lane's pane stays mounted — the OS-preference listener
+  // in main.ts flips `data-theme` for a 'system' user with no navigation in between, and a theme
+  // bundle switch on the themes page does the same for `data-bundle`. xterm.js only reads `theme`
+  // once, so without this the pane keeps rendering the palette it was opened with.
+  const themeObserver = new MutationObserver(() => { terminal.options.theme = terminalTheme(); });
+  themeObserver.observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme', 'data-bundle']});
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     resizeObserver.disconnect();
+    themeObserver.disconnect();
     void subscription.unsubscribe();
     terminal.dispose();
   };
