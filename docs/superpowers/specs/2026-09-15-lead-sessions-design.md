@@ -31,6 +31,24 @@ A lead session is therefore **delegation the user grants**, not autonomy Fluent 
 This is a product boundary, not a security boundary: a process that speaks fluentd's raw socket
 protocol can already call any RPC. The owner-only socket remains the security boundary (`cloud.md`).
 
+## Per-provider pools (added 2026-09-16)
+
+The user's mental model is a subagent ecosystem: they brief one **main agent** (Claude Code or
+Codex), and it hands its own prompts to subagents that can come from any model — "five from Codex
+and five from GLM". A lead's grant therefore carries an optional `pool`, a map of provider to the
+number of lanes of that provider it may run at once. The pool's total is the budget. With a pool,
+`lane start` refuses a provider outside it ("Your pool has no gemini lanes — it is 5 codex, 5
+glm") and a provider whose share is fully running ("All 5 of your codex lanes are running (5/5)");
+`lane list` shows each share (`lanes 3/10 · codex 2/5 · glm 1/5`). The briefing names the pool and
+frames the session as the orchestrator: the user talks to it, its lanes hear only from it, and it
+reads and answers what they report. The budget cap is 20 lanes.
+
+In the desktop app the launch form's default mode is "main agent + subagents": pick the main agent,
+write its brief, set the pool with one stepper per installed and connected provider. The workspace
+opens focused on the main agent's terminal, its subagents line up after it, the composer talks to
+the main agent by default, and the rail groups running lanes by project so several main agents on
+several projects stay one click apart.
+
 ## Agent surface
 
 A lead uses `fluent-coord lane …`, and the `fluent_coord` MCP tool gains the same operations as

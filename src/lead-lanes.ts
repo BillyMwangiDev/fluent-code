@@ -1,6 +1,7 @@
 import {createRequire} from 'node:module';
 import {shortId} from './agent-view.js';
-import type {CoordinationState, CoordinationTask, SessionSummary} from './daemon-protocol.js';
+import type {CoordinationState, CoordinationTask, LeadGrant, LeadPool, ProviderId, SessionSummary} from './daemon-protocol.js';
+import {providerIds} from './daemon-protocol.js';
 
 // @xterm/headless is a CommonJS bundle. Its default import is the whole module under Node's ESM
 // loader but `undefined` once pkg runs the packaged daemon as CommonJS; createRequire resolves it
@@ -13,13 +14,56 @@ const {Terminal} = require('@xterm/headless') as typeof import('@xterm/headless'
  * lanes are told. See docs/superpowers/specs/2026-09-15-lead-sessions-design.md.
  */
 
-export const maxLeadLanes = 10;
+export const maxLeadLanes = 20;
 
 export function validLeadBudget(value: unknown): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > maxLeadLanes) {
     throw new Error(`A lead's lane budget must be a whole number between 1 and ${maxLeadLanes}`);
   }
   return value;
+}
+
+/** A pool names the providers a lead may start and how many of each at once. Zero entries are
+ * dropped; the total becomes the lead's budget. */
+export function validLeadPool(value: unknown): LeadPool | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('A lead\'s pool is a map of provider to lane count');
+  const pool: LeadPool = {};
+  let total = 0;
+  for (const [provider, count] of Object.entries(value as Record<string, unknown>)) {
+    if (!(providerIds as readonly string[]).includes(provider)) throw new Error(`Unknown provider ${provider} in the lead's pool`);
+    if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > maxLeadLanes) throw new Error(`A pool count must be a whole number between 0 and ${maxLeadLanes}`);
+    if (count === 0) continue;
+    pool[provider as ProviderId] = count;
+    total += count;
+  }
+  if (total === 0) throw new Error('A lead\'s pool needs at least one lane');
+  if (total > maxLeadLanes) throw new Error(`A lead's pool may total at most ${maxLeadLanes} lanes`);
+  return pool;
+}
+
+/** The grant as fluentd records it: a pool's total is its budget; without a pool the budget is
+ * the number given. */
+export function validLeadGrant(value: {maxLanes?: unknown; pool?: unknown}): LeadGrant {
+  const pool = validLeadPool(value.pool);
+  if (pool) return {maxLanes: Object.values(pool).reduce((sum, count) => sum + (count ?? 0), 0), pool};
+  return {maxLanes: validLeadBudget(value.maxLanes)};
+}
+
+export function describePool(pool: LeadPool): string {
+  return (Object.entries(pool) as Array<[ProviderId, number]>).filter(([, count]) => count > 0).map(([provider, count]) => `${count} ${provider}`).join(', ');
+}
+
+/** Why a lead may not start `provider` now, or nothing when it may. */
+export function poolRefusal(lead: LeadGrant, provider: ProviderId, running: readonly SessionSummary[]): string | undefined {
+  const live = running.filter(isLiveLane);
+  if (live.length >= lead.maxLanes) return `Lane budget reached: ${live.length}/${lead.maxLanes} running. Stop one of your lanes, or wait for one to finish, before starting another.`;
+  if (!lead.pool) return undefined;
+  const share = lead.pool[provider];
+  if (!share) return `Your pool has no ${provider} lanes — it is ${describePool(lead.pool)}. Start one of those instead.`;
+  const used = live.filter(lane => lane.provider === provider).length;
+  if (used >= share) return `All ${share} of your ${provider} lanes are running (${used}/${share}). Stop one, or wait for one to finish, before starting another.`;
+  return undefined;
 }
 
 export const isLiveLane = (lane: SessionSummary) => lane.status === 'running' || lane.status === 'starting';
@@ -49,7 +93,10 @@ function idleFor(since: string, now: number) {
 
 /** A lead's lanes as compact rows (spec §11): the budget first, free text last on every row. */
 export function renderLanes(lead: SessionSummary, lanes: readonly SessionSummary[], board: CoordinationState, now = Date.now()) {
-  const lines = [`lanes ${lanes.filter(isLiveLane).length}/${lead.lead?.maxLanes ?? 0}`];
+  const live = lanes.filter(isLiveLane);
+  const pool = lead.lead?.pool;
+  const shares = pool ? (Object.entries(pool) as Array<[ProviderId, number]>).map(([provider, share]) => `${provider} ${live.filter(lane => lane.provider === provider).length}/${share}`) : [];
+  const lines = [[`lanes ${live.length}/${lead.lead?.maxLanes ?? 0}`, ...shares].join(' · ')];
   if (lanes.length === 0) return lines.join('\n');
   lines.push('id provider status ready idle task');
   for (const lane of lanes) {

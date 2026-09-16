@@ -21,7 +21,7 @@ export async function renderNewSession(main: HTMLElement) {
       onLaunch: async request => {
         const outcome = await runLaunch(request, readiness);
         if (outcome.failures.length) showActionError(new Error(`${outcome.failures.length} lane${outcome.failures.length === 1 ? '' : 's'} did not start — ${outcome.failures[0]}`));
-        if (outcome.created.length === 1 && request.mode === 'delegate') navigate({name: 'active-session', sessionId: outcome.created[0]!.id});
+        if (outcome.created.length === 1 && request.mode === 'orchestrate') navigate({name: 'active-session', sessionId: outcome.created[0]!.id});
         else navigate({name: 'orchestration', focus: outcome.created.length === 1 ? outcome.created[0]!.id : undefined});
       }
     });

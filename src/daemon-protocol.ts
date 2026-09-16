@@ -22,6 +22,10 @@ export type ProviderId = 'claude' | 'codex' | 'gemini' | 'qwen' | 'glm' | 'nvidi
 export const providerIds = ['claude', 'codex', 'gemini', 'qwen', 'glm', 'nvidia'] as const satisfies readonly ProviderId[];
 export type SessionStatus = 'starting' | 'running' | 'exited' | 'stopped' | 'failed';
 
+/** How many lanes of each provider a lead may run at once; providers absent from it are off limits. */
+export type LeadPool = Partial<Record<ProviderId, number>>;
+export type LeadGrant = {maxLanes: number; pool?: LeadPool};
+
 export type SessionSummary = {
   id: string;
   provider: ProviderId;
@@ -68,8 +72,10 @@ export type SessionSummary = {
    * inspectable, but stay out of default session/lane lists. */
   archivedAt?: string;
   /** Set only when the user started this session as a lead: it may start and direct up to
-   * `maxLanes` lanes of its own at once (docs/superpowers/specs/2026-09-15-lead-sessions-design.md). */
-  lead?: {maxLanes: number};
+   * `maxLanes` lanes of its own at once (docs/superpowers/specs/2026-09-15-lead-sessions-design.md).
+   * With a `pool`, that budget is split by provider — the user chose, say, five Codex and five GLM
+   * subagents, and the lead may not start a provider outside it or beyond its share. */
+  lead?: LeadGrant;
   /** The lead session that started this lane, when a lead did. */
   parentSessionId?: string;
 };
@@ -375,7 +381,7 @@ export type LaneOperation =
 export type RpcRequest =
   | {id: string; method: 'ping'}
   | {id: string; method: 'sessions.list'; params?: {includeArchived?: boolean}}
-  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes: number}; leadApprovalId?: string; model?: string; permissionMode?: string; permissionApprovalId?: string}}
+  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes?: number; pool?: LeadPool}; leadApprovalId?: string; model?: string; permissionMode?: string; permissionApprovalId?: string}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */

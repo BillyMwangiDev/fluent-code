@@ -35,9 +35,20 @@ const tileFontSize = 12;
 /** Which sessions the workspace shows for a project: the live ones, plus lanes that ended while
  * the workspace was open so their final screen stays readable until dismissed. */
 function projectLanes(sessions: readonly SessionSummary[], project: string, retained: ReadonlySet<string>): SessionSummary[] {
-  return sessions
+  const lanes = sessions
     .filter(session => (session.projectDirectory ?? session.directory) === project && !session.archivedAt && (isLive(session) || retained.has(session.id)))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // A main agent comes first with its subagents directly after it, so the workspace reads as the
+  // orchestration it is: who directs, and who is being directed.
+  const ordered: SessionSummary[] = [];
+  const placed = new Set<string>();
+  for (const lead of lanes.filter(lane => lane.lead)) {
+    ordered.push(lead);
+    placed.add(lead.id);
+    for (const child of lanes.filter(lane => lane.parentSessionId === lead.id)) { ordered.push(child); placed.add(child.id); }
+  }
+  for (const lane of lanes) if (!placed.has(lane.id)) ordered.push(lane);
+  return ordered;
 }
 
 export async function renderWorkspace(main: HTMLElement, options: {focus?: string} = {}) {
@@ -53,6 +64,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   const tiles = new Map<string, Tile>();
   let order: string[] = [];
   let focused: string | undefined = options.focus;
+  let firstSync = true;
   let layout: LaneLayout = options.focus ? 'focus' : prefs.laneLayout;
   let sidebarOpen = prefs.sidebarOpen;
   let panel: CoordinationPanel | undefined;
@@ -87,7 +99,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     await Promise.all(live.map(lane => api.stop(lane.id).catch(showActionError)));
     void store.refresh();
   }, {class: 'btn ghost'});
-  const addLanes = button([icon('plus'), 'lanes'], () => openLaunch(), {class: 'btn primary', title: 'start lanes (⌘N)'});
+  const addLanes = button([icon('plus'), 'agents'], () => openLaunch(), {class: 'btn primary', title: 'start agents (⌘N)'});
   const strip = h('header', {class: 'ws-strip'}, [
     projectButton,
     stats,
@@ -189,8 +201,8 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     tile.attention.innerHTML = '';
     tile.el.classList.toggle('needs-you', attention?.reason === 'needs-input');
     if (attention) tile.attention.append(h('span', {class: `pill attention-${attention.reason}`}, [{finished: 'finished', failed: 'failed', 'needs-input': 'needs you'}[attention.reason]]));
-    if (summary.lead) tile.attention.append(h('span', {class: 'pill lead-pill'}, [`lead · ${store.sessions.filter(session => session.parentSessionId === summary.id && isLive(session)).length}/${summary.lead.maxLanes}`]));
-    if (summary.parentSessionId) tile.attention.append(h('span', {class: 'pill', title: `started by lead ${summary.parentSessionId.slice(0, 8)}`}, ['↳ lead']));
+    if (summary.lead) tile.attention.append(h('span', {class: 'pill lead-pill', title: summary.lead.pool ? `subagent pool: ${Object.entries(summary.lead.pool).map(([id, count]) => `${count} ${id}`).join(', ')}` : 'main agent'}, [`main · ${store.sessions.filter(session => session.parentSessionId === summary.id && isLive(session)).length}/${summary.lead.maxLanes} subagents`]));
+    if (summary.parentSessionId) tile.attention.append(h('span', {class: 'pill', title: `started by the main agent ${summary.parentSessionId.slice(0, 8)}`}, ['↳ subagent']));
     tile.foot.hidden = live;
     if (!live) {
       tile.foot.innerHTML = '';
@@ -253,6 +265,10 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     for (const session of diff.kept) updateTile(tiles.get(session.id)!, session);
     for (const session of diff.added) tiles.set(session.id, createTile(session));
     order = next.map(session => session.id);
+    // On arrival the orchestrator's terminal is the natural place to be: it is where the user
+    // talks, and its subagents line up beside it.
+    if (firstSync && !focused) focused = next.find(session => session.lead && isLive(session))?.id;
+    firstSync = false;
     focused = nextFocus(order, focused, diff.removed);
     applyLayout();
     composer.sync();
@@ -322,6 +338,8 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     const running = lanes.filter(isLive).length;
     const needsYou = lanes.filter(lane => store.attention.get(lane.id)?.reason === 'needs-input').length;
     const parts: Array<[string, string]> = [[String(running), 'running']];
+    const mains = lanes.filter(lane => lane.lead && isLive(lane));
+    if (mains.length) parts.push([String(mains.length), mains.length === 1 ? `main agent · ${mains.reduce((sum, lead) => sum + store.sessions.filter(session => session.parentSessionId === lead.id && isLive(session)).length, 0)}/${mains[0]!.lead!.maxLanes} subagents` : 'main agents']);
     if (needsYou) parts.push([String(needsYou), needsYou === 1 ? 'needs you' : 'need you']);
     if (counts) {
       if (counts.tasks) parts.push([`${counts.active}/${counts.tasks}`, 'tasks active']);
@@ -403,7 +421,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
       emptyState.append(
         h('div', {class: 'ws-empty-inner'}, [
           h('h1', {}, [project ? `start agents on ${workspaceFolderName(project)}` : 'start agents']),
-          h('p', {class: 'muted'}, [project ? project : 'Pick a folder, write one brief, choose how many lanes per provider.']),
+          h('p', {class: 'muted'}, [project ? project : 'Pick a folder, brief a main agent, and give it a pool of subagents from any model — or send one brief to several lanes.']),
           form.el
         ])
       );
@@ -418,6 +436,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   function buildComposer() {
     type Mode = 'focused' | 'picked' | 'all';
     let mode: Mode = 'all';
+    let modeChosen = false;
     const input = h('textarea', {class: 'composer-input', rows: '1', placeholder: 'send to lanes — Enter sends, Shift+Enter adds a line, click a terminal to type into it directly', 'aria-label': 'Message to lanes'}) as HTMLTextAreaElement;
     const submit = h('input', {type: 'checkbox', checked: ''}) as HTMLInputElement;
     const send = h('button', {type: 'button', class: 'btn primary composer-send'}, [icon('send'), 'send']);
@@ -429,7 +448,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
       all: h('button', {type: 'button', class: 'seg'}, ['all'])
     };
     for (const [key, element] of Object.entries(targetButtons) as Array<[Mode, HTMLButtonElement]>) {
-      element.addEventListener('click', () => { mode = key; sync(); });
+      element.addEventListener('click', () => { mode = key; modeChosen = true; sync(); });
       targetsGroup.append(element);
     }
     const targets = (): string[] => {
@@ -447,6 +466,9 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
       targetButtons.picked.textContent = `checked · ${picked.length}`;
       targetButtons.all.textContent = `all · ${live.length}`;
       if (mode === 'focused' && targetButtons.focused.disabled) mode = 'all';
+      // Talking to the orchestrator is the default when one is focused; a broadcast to its
+      // subagents is a deliberate choice, since they are meant to hear from the main agent.
+      if (!modeChosen && focusedTile?.summary.lead && isLive(focusedTile.summary)) mode = 'focused';
       for (const [key, element] of Object.entries(targetButtons) as Array<[Mode, HTMLButtonElement]>) {
         element.classList.toggle('active', key === mode);
         element.setAttribute('aria-pressed', key === mode ? 'true' : 'false');

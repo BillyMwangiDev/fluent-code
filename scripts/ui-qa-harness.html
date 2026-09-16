@@ -82,7 +82,7 @@
             accountId: provider === 'claude' ? 'claude-subscription' : provider === 'codex' ? 'codex-api' : 'qwen-work',
             model: provider === 'claude' ? (index % 2 ? 'opus' : 'sonnet') : provider === 'codex' ? 'gpt-6-astra' : undefined,
             status: index === 3 && laneCount > 4 ? 'exited' : 'running', exitCode: index === 3 && laneCount > 4 ? 0 : undefined,
-            lead: index === 0 ? {maxLanes: 3} : undefined, parentSessionId: index === 1 ? 'lane-01-claude' : undefined,
+            lead: index === 0 ? {maxLanes: 10, pool: {codex: 5, glm: 5}} : undefined, parentSessionId: index === 1 || index === 2 ? 'lane-01-claude' : undefined,
             verification: ['passed', 'running', undefined, 'failed'][index % 4],
             createdAt: new Date(Date.now() - (laneCount - index) * 60000).toISOString(),
             worktreePath: project + '/.fluent-worktrees/fluent-code/lane-' + (index + 1)
@@ -114,7 +114,7 @@
             return {...found, output: (screens[found.provider] ?? screens.claude)(Math.max(index, 0))};
           },
           'sessions.inject': () => ({injected: true, submitted: true, bracketedPaste: true}),
-          'sessions.create': params => ({...session, provider: params.provider || session.provider, directory: params.directory || session.directory, task: params.task || session.task, accountId: params.accountId || session.accountId}),
+          'sessions.create': params => ({...session, id: 'lane-new-' + Math.random().toString(16).slice(2, 8), provider: params.provider || session.provider, directory: params.directory || session.directory, task: params.task || session.task, accountId: params.accountId || session.accountId, lead: params.lead, parentSessionId: undefined}),
           'sessions.resize': () => ({resized: true}),
           'sessions.send': () => ({sent: true}),
           'sessions.stop': () => ({...session, status: 'stopped'}),

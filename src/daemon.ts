@@ -33,7 +33,7 @@ import {ExtensionSourcePolicy, type ExtensionSourcePolicyMode} from './security/
 import {RunEventBus} from './execution/event-bus.js';
 import {RecipeRunner} from './recipe-runner.js';
 import {isLaneProvider} from './lane-commands.js';
-import {assertTicketReady, isLiveLane, laneReadiness, renderLanes, renderWait, screenText, ticketBrief, validLeadBudget} from './lead-lanes.js';
+import {assertTicketReady, isLiveLane, laneReadiness, poolRefusal, renderLanes, renderWait, screenText, ticketBrief, validLeadGrant} from './lead-lanes.js';
 import {coordCommand} from './agent-briefing.js';
 import {isRiskyPermission, sessionOptionArgs} from './session-options.js';
 import {attentionDetail, attentionForStatus, type AttentionReason} from './attention.js';
@@ -514,9 +514,8 @@ async function laneCommand(params: Extract<RpcRequest, {method: 'agent.lane'}>['
       if (!isLaneProvider(params.provider)) throw new Error(`Unknown provider ${String(params.provider)}`);
       const provider = params.provider;
       const running = ownLanes().filter(isLiveLane).length;
-      if (running >= lead.maxLanes) {
-        throw new Error(`Lane budget reached: ${running}/${lead.maxLanes} running. Stop one of your lanes, or wait for one to finish, before starting another.`);
-      }
+      const refusal = poolRefusal(lead, provider, ownLanes());
+      if (refusal) throw new Error(refusal);
       const board = coordination.get(project);
       const task = params.taskId ? resolveId(board.tasks, params.taskId) : undefined;
       if (task) assertTicketReady(board, task);
@@ -633,7 +632,7 @@ async function dispatch(request: RpcRequest) {
       // Letting a session start and direct other agents spends quota on the user's behalf, so the
       // grant and its budget are approval-bound here, never only a frontend checkbox. Validated
       // before any approval is consumed.
-      const lead = request.params.lead ? {maxLanes: validLeadBudget(request.params.lead.maxLanes)} : undefined;
+      const lead = request.params.lead ? validLeadGrant(request.params.lead) : undefined;
       // Launch options are validated before any consent record is spent. A mode that removes the
       // CLI's own safety prompts needs its own approval, bound to the directory and the mode.
       sessionOptionArgs(request.params.provider, {model: request.params.model, permissionMode: request.params.permissionMode});

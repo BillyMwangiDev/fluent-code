@@ -11,6 +11,10 @@ export type FallbackPolicy = 'always-ask' | 'always-switch' | 'never-switch';
 export type ApprovalAction = 'credential.change' | 'worktree.remove' | 'worktree.reset' | 'worktree.rebase' | 'integration.merge' | 'session.delete' | 'session.lead' | 'session.permissions' | 'remote.configure' | 'remote.connect' | 'extension.install' | 'extension.policy' | 'recipe.execute' | 'project.configure';
 export type ApprovalRecord = {id: string; action: ApprovalAction; target: string; commandHash?: string; baseSha?: string; issuedAt: string; expiresAt: string; consumedAt?: string};
 
+/** Mirrors src/daemon-protocol.ts: how many subagent lanes of each provider a lead may run at once. */
+export type LeadPool = Partial<Record<ProviderId, number>>;
+export type LeadGrant = {maxLanes: number; pool?: LeadPool};
+
 export type SessionSummary = {
   id: string;
   provider: ProviderId;
@@ -34,7 +38,7 @@ export type SessionSummary = {
   includedPaths?: string[];
   verification?: VerificationStatus;
   archivedAt?: string;
-  lead?: {maxLanes: number};
+  lead?: LeadGrant;
   parentSessionId?: string;
 };
 
@@ -323,7 +327,7 @@ export const riskyPermissionModes: Partial<Record<ProviderId, string>> = {claude
 export const api = {
   ping: () => daemonRequest<{ok: boolean; pid: number; protocolVersion: number}>('ping'),
   listSessions: (includeArchived = false) => daemonRequest<SessionSummary[]>('sessions.list', includeArchived ? {includeArchived: true} : {}),
-  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; model?: string; permissionMode?: string}) => {
+  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number; pool?: LeadPool}; model?: string; permissionMode?: string}) => {
     const approval = params.provider === 'claude'
       ? await issueApproval('project.configure', params.directory, 'configure Claude hooks')
       : undefined;

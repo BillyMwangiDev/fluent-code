@@ -361,3 +361,25 @@ describe('telling the user a lane needs them', () => {
     }
   });
 });
+
+describe('a lead with a per-provider pool', () => {
+  let lead: SessionSummary;
+  before(async () => {
+    const approval = await daemonRequest<{id: string}>('approvals.issue', {action: 'session.lead', target: project, command: 'lead 2'});
+    const hooks = await daemonRequest<{id: string}>('approvals.issue', {action: 'project.configure', target: project, command: 'configure Claude hooks'});
+    lead = await daemonRequest<SessionSummary>('sessions.create', {provider: 'claude', directory: project, isolate: true, task: 'orchestrate the parser work', lead: {pool: {codex: 1, claude: 1}}, leadApprovalId: approval.id, approvalId: hooks.id});
+    await waitFor(async () => (await daemonRequest<SessionSummary>('sessions.get', {sessionId: lead.id})).status === 'running', 'the pooled lead to be running');
+  });
+
+  it('records the pool and its total as the budget', () => {
+    assert.deepEqual(lead.lead, {maxLanes: 2, pool: {codex: 1, claude: 1}});
+  });
+
+  it('lists the share of each provider, and refuses providers outside the pool or beyond their share', async () => {
+    assert.equal(await coord(lead.directory, 'lane', 'list'), 'lanes 0/2 · codex 0/1 · claude 0/1');
+    await assert.rejects(() => coord(lead.directory, 'lane', 'start', 'gemini', 'write', 'docs'), /Your pool has no gemini lanes — it is 1 codex, 1 claude/);
+    assert.match(await coord(lead.directory, 'lane', 'start', 'codex', 'write', 'the', 'parser'), /^started [0-9a-f]{8} codex isolated lanes 1\/2$/m);
+    await assert.rejects(() => coord(lead.directory, 'lane', 'start', 'codex', 'another', 'parser'), /All 1 of your codex lanes are running \(1\/1\)/);
+    assert.match(await coord(lead.directory, 'lane', 'list'), /^lanes 1\/2 · codex 1\/1 · claude 0\/1$/m);
+  });
+});

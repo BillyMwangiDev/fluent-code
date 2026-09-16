@@ -55,7 +55,8 @@ export function coordinationPanel(options: PanelOptions): CoordinationPanel {
 
   const laneLabel = (sessionId: string) => {
     const lane = store.get(sessionId);
-    return lane ? `${providerShort[lane.provider]} · ${sessionId.slice(0, 6)}` : sessionId.slice(0, 6);
+    if (!lane) return sessionId.slice(0, 6);
+    return `${lane.lead ? 'main · ' : ''}${providerShort[lane.provider]} · ${sessionId.slice(0, 6)}`;
   };
   const laneLink = (sessionId: string) => {
     const link = h('button', {type: 'button', class: 'object-link lane-link'}, [laneLabel(sessionId)]);

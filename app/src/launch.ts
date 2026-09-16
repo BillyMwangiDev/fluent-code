@@ -9,15 +9,15 @@ import {store} from './store';
 import {navigate} from './router';
 import {actionErrorText, askConfirm, button, directoryField, h, icon, openSheet, providerLabel, providerShort, segmented, showActionError, showNotice} from './ui';
 
-export type LaunchMode = 'parallel' | 'delegate';
+export type LaunchMode = 'orchestrate' | 'parallel';
 
 export type LaunchRequest = {
   mode: LaunchMode;
   directory: string;
   task: string;
+  /** Parallel: lanes to start per provider. Orchestrate: the subagent pool the main agent may draw on. */
   counts: LaunchCounts;
   leadProvider: ProviderId;
-  leadBudget: number;
   isolate: boolean;
   accountId?: Partial<Record<ProviderId, string>>;
   model: Partial<Record<'claude' | 'codex', string>>;
@@ -46,16 +46,17 @@ export async function runLaunch(request: LaunchRequest, readiness: readonly Prov
   const optionsFor = (provider: ProviderId) => provider === 'claude' || provider === 'codex'
     ? {model: request.model[provider]?.trim() || undefined, permissionMode: request.permissionMode[provider] || undefined}
     : {};
-  if (request.mode === 'delegate') {
+  if (request.mode === 'orchestrate') {
     onProgress?.({index: 0, total: 1, provider: request.leadProvider});
     try {
+      const pool = poolFrom(request.counts, readiness);
       const lead = await api.createSession({
         provider: request.leadProvider,
         directory: request.directory,
         task: request.task.trim() || undefined,
         isolate: request.isolate,
         accountId: request.accountId?.[request.leadProvider],
-        lead: {maxLanes: request.leadBudget},
+        lead: {maxLanes: poolTotal(pool), pool},
         ...optionsFor(request.leadProvider)
       });
       created.push(lead);
@@ -87,11 +88,24 @@ export async function runLaunch(request: LaunchRequest, readiness: readonly Prov
   return {created, failures};
 }
 
+/** The subagent pool a main agent gets: every ready provider the user gave a count. */
+export function poolFrom(counts: LaunchCounts, readiness: readonly ProviderReadiness[]): Partial<Record<ProviderId, number>> {
+  const pool: Partial<Record<ProviderId, number>> = {};
+  for (const provider of readiness) {
+    const count = clampCount(counts[provider.id]);
+    if (provider.ready && count > 0) pool[provider.id] = count;
+  }
+  return pool;
+}
+export function poolTotal(pool: Partial<Record<ProviderId, number>>): number {
+  return Object.values(pool).reduce((sum, count) => sum + (count ?? 0), 0);
+}
+
 /** Asks once before any lane starts without its CLI's own safety prompts. */
 async function confirmRiskyModes(request: LaunchRequest): Promise<boolean> {
   const risky = (['claude', 'codex'] as const).filter(provider => {
     const mode = request.permissionMode[provider];
-    const used = request.mode === 'delegate' ? request.leadProvider === provider : clampCount(request.counts[provider]) > 0;
+    const used = request.mode === 'orchestrate' ? request.leadProvider === provider : clampCount(request.counts[provider]) > 0;
     return used && mode && riskyPermissionModes[provider] === mode;
   });
   if (risky.length === 0) return true;
@@ -119,19 +133,22 @@ type FormOptions = {
 export function launchForm(options: FormOptions): {el: HTMLElement; focus: () => void} {
   const {readiness} = options;
   const readyProviders = readiness.filter(provider => provider.ready);
-  let mode: LaunchMode = options.initialMode ?? 'parallel';
+  let mode: LaunchMode = options.initialMode ?? prefs.launchMode;
   const counts: LaunchCounts = defaultCounts(readiness, prefs.launchCounts);
-  let leadProvider: ProviderId = readyProviders.find(provider => provider.id === 'claude')?.id ?? readyProviders[0]?.id ?? 'claude';
-  let leadBudget = 3;
+  // The main agent needs a CLI Fluent can brief: Claude Code through its system-prompt flag, the
+  // others ahead of their first prompt. Any ready provider qualifies; Claude is the usual pick.
+  const remembered = readyProviders.find(provider => provider.id === prefs.leadProvider)?.id;
+  let leadProvider: ProviderId = remembered ?? readyProviders.find(provider => provider.id === 'claude')?.id ?? readyProviders[0]?.id ?? 'claude';
   const accountId: Partial<Record<ProviderId, string>> = {};
 
-  const task = h('textarea', {class: 'launch-task', rows: options.variant === 'sheet' ? '4' : '5', placeholder: 'What should they work on? One brief, sent to every lane as its first prompt. Leave empty to start bare terminals.', 'aria-label': 'Brief for every lane'}) as HTMLTextAreaElement;
+  const task = h('textarea', {class: 'launch-task', rows: options.variant === 'sheet' ? '4' : '5', 'aria-label': 'Brief'}) as HTMLTextAreaElement;
 
   const modeControl = segmented<LaunchMode>([
-    {id: 'parallel', label: 'parallel lanes'},
-    {id: 'delegate', label: 'one lead delegates'}
+    {id: 'orchestrate', label: 'main agent + subagents'},
+    {id: 'parallel', label: 'same brief to every lane'}
   ], mode, next => { mode = next; syncMode(); });
   const modeHint = h('p', {class: 'muted launch-hint'});
+  const poolLabel = h('div', {class: 'field-label pool-label'});
 
   // --- Parallel: a stepper per provider --------------------------------------------------------
   const stepperRows = readiness.map(provider => {
@@ -176,19 +193,10 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
   });
   const steppers = h('div', {class: 'stepper-list'}, stepperRows);
 
-  // --- Delegate: one lead with a lane budget -------------------------------------------------------
-  const leadPicker = segmented(readyProviders.map(provider => ({id: provider.id, label: providerShort[provider.id]})), leadProvider, next => { leadProvider = next; syncSummary(); }, {'aria-label': 'Lead provider'});
-  const budget = h('input', {type: 'number', class: 'stepper-value', min: '1', max: '10', value: '3', 'aria-label': 'Lane budget'}) as HTMLInputElement;
-  const setBudget = (next: number) => { leadBudget = Math.max(1, Math.min(10, Math.round(next) || 1)); budget.value = String(leadBudget); syncSummary(); };
-  budget.addEventListener('input', () => setBudget(Number(budget.value)));
+  // --- Orchestrate: the main agent, then the pool it may draw on (the steppers below) -------------
+  const leadPicker = segmented(readyProviders.map(provider => ({id: provider.id, label: providerShort[provider.id]})), leadProvider, next => { leadProvider = next; prefs.leadProvider = next; syncSummary(); }, {'aria-label': 'Main agent'});
   const delegate = h('div', {class: 'delegate-block'}, [
-    h('div', {class: 'field-row'}, [h('span', {class: 'field-label'}, ['lead runs on']), leadPicker]),
-    h('div', {class: 'field-row'}, [h('span', {class: 'field-label'}, ['may run up to']), h('span', {class: 'stepper'}, [
-      button(icon('minus'), () => setBudget(leadBudget - 1), {class: 'btn ghost icon-button', 'aria-label': 'smaller lane budget'}),
-      budget,
-      button(icon('plus'), () => setBudget(leadBudget + 1), {class: 'btn ghost icon-button', 'aria-label': 'larger lane budget'})
-    ]), h('span', {class: 'muted'}, ['lanes of its own at once'])]),
-    h('p', {class: 'muted launch-hint'}, ['The lead reads your brief, plans, and starts lanes with `fluent-coord lane start`. Each lane it starts is a full agent on your account and appears here under the lead.'])
+    h('div', {class: 'field-row'}, [h('span', {class: 'field-label'}, ['main agent']), leadPicker, h('span', {class: 'muted'}, ['— you talk to it; it plans and directs the rest'])])
   ]);
 
   // --- Shared options -----------------------------------------------------------------------------
@@ -228,7 +236,6 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
       task: task.value,
       counts: {...counts},
       leadProvider,
-      leadBudget,
       isolate: isolate.checked,
       accountId,
       model: {claude: modelInputs.claude?.value, codex: modelInputs.codex?.value},
@@ -237,10 +244,13 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
   }
 
   function syncSummary() {
-    if (mode === 'delegate') {
-      summary.textContent = `1 lead on ${providerShort[leadProvider]} · up to ${leadBudget} lanes`;
-      start.textContent = 'start lead';
-      start.disabled = readyProviders.length === 0;
+    if (mode === 'orchestrate') {
+      const pool = poolFrom(counts, readiness);
+      const total = poolTotal(pool);
+      const shares = (Object.entries(pool) as Array<[ProviderId, number]>).map(([id, count]) => `${count} ${providerShort[id]}`).join(' · ');
+      summary.textContent = total === 0 ? `main agent on ${providerShort[leadProvider]} · no subagents yet` : `main agent on ${providerShort[leadProvider]} · pool ${shares}`;
+      start.textContent = 'start main agent';
+      start.disabled = readyProviders.length === 0 || total === 0;
       return;
     }
     const plan = launchPlan(counts, readiness);
@@ -250,11 +260,15 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
   }
 
   function syncMode() {
-    steppers.hidden = mode !== 'parallel';
-    delegate.hidden = mode !== 'delegate';
-    modeHint.textContent = mode === 'parallel'
-      ? 'Every lane gets the same brief and works on its own. Good for independent tasks, or for racing several providers on one problem.'
-      : 'One session plans the work and directs lanes it starts itself. Good for a big brief you would rather not split by hand.';
+    delegate.hidden = mode !== 'orchestrate';
+    poolLabel.hidden = mode !== 'orchestrate';
+    poolLabel.textContent = 'subagent pool — how many of each the main agent may run at once';
+    task.placeholder = mode === 'orchestrate'
+      ? 'What should the main agent accomplish? It plans the work, starts subagents from the pool with their own prompts, reads what they report, and answers you.'
+      : 'What should they work on? One brief, sent to every lane as its first prompt. Leave empty to start bare terminals.';
+    modeHint.textContent = mode === 'orchestrate'
+      ? 'You brief one agent. It splits the work, starts subagents from any model in the pool, reviews their output, and gives them feedback — the way a subagent ecosystem works.'
+      : 'Every lane gets the same brief and works on its own. Good for independent tasks, or for racing several providers on one problem.';
     syncSummary();
   }
 
@@ -267,6 +281,7 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
     status.textContent = 'starting…';
     prefs.launchCounts = Object.fromEntries(Object.entries(counts).filter(([, value]) => (value ?? 0) > 0));
     prefs.launchOptions = {isolate: isolate.checked};
+    prefs.launchMode = mode;
     prefs.workspacePath = request.directory;
     try {
       await options.onLaunch(request);
@@ -288,10 +303,11 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
 
   const el = h('div', {class: `launch-form launch-${options.variant}`}, [
     options.variant === 'sheet' ? null : directoryRow,
-    task,
     h('div', {class: 'launch-mode'}, [modeControl, modeHint]),
-    steppers,
     delegate,
+    task,
+    poolLabel,
+    steppers,
     advanced,
     h('div', {class: 'launch-foot'}, [summary, status, h('div', {class: 'actions'}, [cancel, start])])
   ]);
@@ -318,6 +334,6 @@ export async function openLaunchSheet(options: {directory: string; initialMode?:
       options.onLaunched?.(outcome);
     }
   });
-  sheet = openSheet({title: 'start lanes', subtitle: 'each lane runs the real CLI in its own terminal, on the account that CLI would use', body: form.el});
+  sheet = openSheet({title: 'start agents', subtitle: 'every agent is the real CLI in its own terminal, on the account that CLI would use', body: form.el});
   form.focus();
 }

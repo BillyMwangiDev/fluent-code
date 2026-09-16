@@ -2,7 +2,8 @@ import {existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {delimiter} from 'node:path';
-import {providerIds, type ProviderId} from './daemon-protocol.js';
+import {providerIds, type LeadPool, type ProviderId} from './daemon-protocol.js';
+import {describePool} from './lead-lanes.js';
 import {scriptRunner} from './script-runner.js';
 
 const packageRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -68,9 +69,12 @@ export function briefingArgs(provider: ProviderId, briefing = coordinationBriefi
  * bounded number of lanes, the commands for doing so, and when delegation is worth its cost —
  * every lane is a whole agent's tokens (docs/research/2026-09-13-agent-orchestration.md §2.1).
  */
-export function leadBriefing(maxLanes: number, command = coordCommand()) {
+export function leadBriefing(maxLanes: number, command = coordCommand(), pool?: LeadPool) {
+  const allowance = pool
+    ? `a pool of ${describePool(pool)} subagent lane${maxLanes === 1 ? '' : 's'} (${maxLanes} at once)`
+    : `up to ${maxLanes} other agent lane${maxLanes === 1 ? '' : 's'} at once`;
   return [
-    `You are a lead lane: the user has let you start and direct up to ${maxLanes} other agent lane${maxLanes === 1 ? '' : 's'} on this project at once. Each lane is a separate agent with its own terminal and, unless you pass --shared, its own Git worktree.`,
+    `You are the orchestrator of this project: the user talks to you, and the lanes you start hear only from you. The user has given you ${allowance}. Each lane is a separate agent with its own terminal and, unless you pass --shared, its own Git worktree.${pool ? ' Only the providers in your pool can be started, and only up to their share.' : ''}`,
     '',
     `  ${command} lane start PROVIDER [--shared] [--task ID] PROMPT   start a lane (${providerIds.join(', ')})`,
     `  ${command} lane list                          your lanes, their status, and which of them need you`,
@@ -79,14 +83,14 @@ export function leadBriefing(maxLanes: number, command = coordCommand()) {
     `  ${command} lane wait [LANE...] [--timeout S]  return when a lane finishes, messages you, or stops`,
     `  ${command} lane stop LANE`,
     '',
-    `Delegate only work that splits into independent parts; each lane costs a whole agent's tokens. Put each part on the board with \`${command} task add\` first so the user can see it, give each lane one ticket, and use \`wait\` rather than repeatedly reading screens. Check what a lane reports before you build on it. Merging lanes stays with the user.`
+    `Plan first, then delegate only work that splits into independent parts; each lane costs a whole agent's tokens. Put each part on the board with \`${command} task add\` so the user can see it, give each lane one precise prompt or ticket, and use \`wait\` rather than repeatedly reading screens. When a lane reports, \`read\` its screen, judge the work, and answer it with \`send\` or a follow-up ticket. Report the combined result to the user. Merging lanes stays with the user.`
   ].join('\n');
 }
 
 /** Where a lead's instructions go: Claude Code's system-prompt flag, beside the coordination
  * briefing; for providers without such a flag, ahead of the first prompt. */
-export function leadDirection(provider: ProviderId, maxLanes: number, task?: string, command = coordCommand()): {systemPrompt?: string; prompt?: string} {
-  const briefing = leadBriefing(maxLanes, command);
+export function leadDirection(provider: ProviderId, maxLanes: number, task?: string, command = coordCommand(), pool?: LeadPool): {systemPrompt?: string; prompt?: string} {
+  const briefing = leadBriefing(maxLanes, command, pool);
   if (provider === 'claude') return {systemPrompt: `${coordinationBriefing(command)}\n\n${briefing}`, prompt: task};
   return {prompt: [briefing, task?.trim()].filter(Boolean).join('\n\n')};
 }

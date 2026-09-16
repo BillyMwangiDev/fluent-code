@@ -11,7 +11,7 @@ import {ensureClaudeHooks} from './hooks-config.js';
 import {WorktreeManager} from './worktree-manager.js';
 import {briefingArgs, leadDirection} from './agent-briefing.js';
 import {ptyRuntime} from './pty-runtime.js';
-import type {CredentialEnvironment, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
+import type {CredentialEnvironment, LeadGrant, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 import {RunStore} from './execution/run-store.js';
 import {OutputBuffer} from './output-buffer.js';
@@ -180,7 +180,7 @@ export class SessionManager extends EventEmitter {
     return {...session.summary, output: session.output.text()};
   }
 
-  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; parentSessionId?: string; model?: string; permissionMode?: string}) {
+  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: LeadGrant; parentSessionId?: string; model?: string; permissionMode?: string}) {
     const adapter = providerAdapter(provider);
     // Both checks fail before any session or run record exists.
     resolveProviderExecutable(adapter);
@@ -231,7 +231,7 @@ export class SessionManager extends EventEmitter {
     await this.persist();
 
     // A lead's instructions travel through the same per-CLI channels as the coordination briefing.
-    const direction = lead ? leadDirection(provider, lead.maxLanes, summary.task) : undefined;
+    const direction = lead ? leadDirection(provider, lead.maxLanes, summary.task, undefined, lead.pool) : undefined;
     await this.launch(session, env, [
       ...adapter.args, ...providerLaunchArgs(provider, env), ...optionArgs, ...briefingArgs(provider, direction?.systemPrompt),
       ...(provider === 'claude' ? ['--session-id', id] : []),
@@ -255,7 +255,7 @@ export class SessionManager extends EventEmitter {
       ? [
           ...adapter.args,
           ...sessionOptionArgs('claude', {model: summary.model, permissionMode: summary.permissionMode}),
-          ...briefingArgs('claude', summary.lead ? leadDirection('claude', summary.lead.maxLanes).systemPrompt : undefined),
+          ...briefingArgs('claude', summary.lead ? leadDirection('claude', summary.lead.maxLanes, undefined, undefined, summary.lead.pool).systemPrompt : undefined),
           ...conversation
         ]
       // `codex resume` restores the session's own settings; its options differ from a fresh launch.

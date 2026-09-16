@@ -3,7 +3,7 @@ import {describe, it} from 'node:test';
 import type {CoordinationState, SessionSummary} from './daemon-protocol.js';
 import {leadDirection} from './agent-briefing.js';
 import {parseLaneArguments} from './lane-commands.js';
-import {laneReadiness, renderLanes, screenText, ticketBrief, validLeadBudget} from './lead-lanes.js';
+import {laneReadiness, poolRefusal, renderLanes, screenText, ticketBrief, validLeadBudget, validLeadGrant, validLeadPool} from './lead-lanes.js';
 
 const leadId = 'lead-0000-aaaa';
 const now = Date.parse('2026-09-15T12:00:00.000Z');
@@ -49,10 +49,33 @@ describe('lane command arguments', () => {
 });
 
 describe('lead budget', () => {
-  it('accepts a whole number of lanes from 1 to 10', () => {
+  it('accepts a whole number of lanes from 1 to 20', () => {
     assert.equal(validLeadBudget(1), 1);
-    assert.equal(validLeadBudget(10), 10);
-    for (const value of [0, 11, 2.5, '3', undefined]) assert.throws(() => validLeadBudget(value), /between 1 and 10/);
+    assert.equal(validLeadBudget(20), 20);
+    for (const value of [0, 21, 2.5, '3', undefined]) assert.throws(() => validLeadBudget(value), /between 1 and 20/);
+  });
+
+  it('a pool names each provider\'s share, drops zeros, and totals into the budget', () => {
+    assert.deepEqual(validLeadPool({codex: 5, glm: 5, claude: 0}), {codex: 5, glm: 5});
+    assert.equal(validLeadPool(undefined), undefined);
+    assert.deepEqual(validLeadGrant({pool: {codex: 5, glm: 5}}), {maxLanes: 10, pool: {codex: 5, glm: 5}});
+    assert.deepEqual(validLeadGrant({maxLanes: 3}), {maxLanes: 3});
+    assert.throws(() => validLeadPool({codex: 0}), /at least one lane/);
+    assert.throws(() => validLeadPool({codex: 15, glm: 10}), /at most 20/);
+    assert.throws(() => validLeadPool({gpt: 2}), /Unknown provider gpt/);
+    assert.throws(() => validLeadPool({codex: 1.5}), /whole number/);
+    assert.throws(() => validLeadPool([1, 2]), /map of provider/);
+  });
+
+  it('refuses a provider outside the pool, or beyond its share, before the total budget', () => {
+    const grant = {maxLanes: 3, pool: {codex: 2, glm: 1}};
+    const running = [lane('c1', {provider: 'codex'}), lane('c2', {provider: 'codex'})];
+    assert.equal(poolRefusal(grant, 'glm', running), undefined);
+    assert.match(poolRefusal(grant, 'codex', running) ?? '', /All 2 of your codex lanes are running \(2\/2\)/);
+    assert.match(poolRefusal(grant, 'claude', running) ?? '', /Your pool has no claude lanes — it is 2 codex, 1 glm/);
+    assert.match(poolRefusal(grant, 'glm', [...running, lane('g1', {provider: 'glm'})]) ?? '', /Lane budget reached: 3\/3/);
+    assert.equal(poolRefusal({maxLanes: 3}, 'claude', running), undefined, 'no pool means any provider within the budget');
+    assert.equal(poolRefusal(grant, 'codex', [lane('c1', {provider: 'codex', status: 'exited'}), lane('c2', {provider: 'codex', status: 'exited'})]), undefined, 'ended lanes free their share');
   });
 });
 
@@ -86,6 +109,12 @@ describe('lane readiness', () => {
 
 describe('lane table', () => {
   const lead = lane(leadId, {provider: 'claude', parentSessionId: undefined, lead: {maxLanes: 3}});
+
+  it('shows each provider\'s share when the lead has a pool', () => {
+    const pooled = lane(leadId, {provider: 'claude', parentSessionId: undefined, lead: {maxLanes: 3, pool: {codex: 2, glm: 1}}});
+    const table = renderLanes(pooled, [lane('child-aa-1111')], board(), now);
+    assert.equal(table.split('\n')[0], 'lanes 1/3 · codex 1/2 · glm 0/1');
+  });
 
   it('states the budget, then one compact row per lane with its open task last', () => {
     const table = renderLanes(lead, [
@@ -148,7 +177,7 @@ describe('lead direction', () => {
   it('puts the lead instructions ahead of the first prompt for providers without that flag', () => {
     const direction = leadDirection('codex', 2, 'refactor the router', 'fluent-coord');
     assert.equal(direction.systemPrompt, undefined);
-    assert.match(direction.prompt ?? '', /^You are a lead lane/);
+    assert.match(direction.prompt ?? '', /^You are the orchestrator of this project/);
     assert.match(direction.prompt ?? '', /up to 2/);
     assert.match(direction.prompt ?? '', /refactor the router$/);
   });

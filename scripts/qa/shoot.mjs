@@ -49,7 +49,7 @@ const scenarios = {
   async 'focus-6'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+2'); await p.keyboard.press('Meta+Enter'); await p.waitForTimeout(500); await shot(p, 'focus-6'); await p.close(); },
   async 'empty'() { const p = await open('?lanes=0'); await p.waitForTimeout(600); await shot(p, 'empty'); await p.close(); },
   async 'sheet'() { const p = await open('?lanes=6'); await p.locator('.ws-actions .btn.primary').click(); await p.waitForTimeout(600); await shot(p, 'sheet'); await p.close(); },
-  async 'sheet-delegate'() { const p = await open('?lanes=6'); await p.locator('.ws-actions .btn.primary').click(); await p.waitForTimeout(400); await p.locator('.sheet .seg').filter({hasText: 'one lead'}).click(); await p.waitForTimeout(300); await shot(p, 'sheet-delegate'); await p.close(); },
+  async 'sheet-parallel'() { const p = await open('?lanes=6'); await p.locator('.ws-actions .btn.primary').click(); await p.waitForTimeout(400); await p.locator('.sheet .seg').filter({hasText: 'same brief'}).click(); await p.waitForTimeout(300); await shot(p, 'sheet-parallel'); await p.close(); },
   async 'palette'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+k'); await p.waitForTimeout(400); await shot(p, 'palette'); await p.close(); },
   async 'ticket-menu'() { const p = await open('?lanes=6'); const row = p.locator('.coord-row.ticket').first(); await row.hover(); await row.locator('.row-menu').click(); await p.waitForTimeout(300); await shot(p, 'ticket-menu'); await p.close(); },
   async 'sidebar-setup'() { const p = await open('?lanes=6'); await p.locator('.coord-tab').filter({hasText: 'setup'}).click(); await p.waitForTimeout(500); await shot(p, 'sidebar-setup'); await p.close(); },

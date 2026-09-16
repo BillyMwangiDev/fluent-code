@@ -51,3 +51,20 @@ from "write a prompt, allocate 5 Claude + 5 Codex + 5 GLM" to watching them work
   at 1440×900 and 1180×760, including 0, 1, 3, 6, and 12 lanes, focus mode, sidebar open/closed,
   the launch sheet, and the palette.
 - The packaged frontend against a real fluentd with stand-in provider CLIs.
+
+## Round three — the orchestrator is the product (same day)
+
+The user restated the model: the prompt terminal is the **main agent** (Claude Code or Codex);
+subagents hear only from it, can be any model, and it reads their output and answers them; several
+projects can each have their own main agent.
+
+- fluentd: a lead grant carries a per-provider `pool` (`{codex: 5, glm: 5}`); the total is the
+  budget (cap 20). `lane start` refuses providers outside the pool or beyond their share;
+  `lane list` shows shares. The briefing frames the lead as the orchestrator.
+- Launch form: default mode "main agent + subagents" — pick the main agent, brief it, set the pool
+  with one stepper per provider. "Same brief to every lane" stays as the fan-out.
+- Workspace: main agent first with its subagents after it, focused on arrival, composer talks to
+  it by default; tile pills `main · 2/4 subagents` and `↳ subagent`; strip counts main agents.
+- Rail: running lanes grouped by project (each a one-click switch), main agents starred.
+- `scripts/qa/live.mts` now proves it: a stand-in main agent starts a Codex and a GLM subagent
+  through the real `fluent-coord`, reads a subagent screen, and the workspace shows all of it.

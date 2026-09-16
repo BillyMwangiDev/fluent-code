@@ -318,7 +318,13 @@ details > summary::-webkit-details-marker { display: none; }
 .rail-lane { font-size: 11px; padding: 4px 8px; min-width: 0; }
 .rail-lane-provider { color: var(--fg-faint); flex: 0 0 auto; }
 .rail-lane-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-lane.elsewhere { opacity: .7; }
+.rail-project-row { margin-top: 4px; font-size: 11px; color: var(--fg); gap: 6px; }
+.rail-project-row .rail-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.rail-lane.is-sub { padding-left: 16px; }
+.rail-lane.is-lead .icon { width: 11px; height: 11px; color: var(--coral); }
+.lane.lead .lane-head { background: color-mix(in srgb, var(--bg-raised) 90%, var(--coral)); }
+.pool-label { margin: 0; }
+.pool-label[hidden] { display: none; }
 .rail-empty { margin: 2px 8px 4px; font-size: 11px; }
 .rail-footer { padding: 10px 14px 12px; border-top: 1px solid var(--line-subtle); font-size: 10px; letter-spacing: .035em; }
 

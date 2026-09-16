@@ -41,7 +41,7 @@ export function renderTopbar(): HTMLElement {
     : h('span', {class: 'target-pill local'}, ['● local'])
   const project = prefs.workspacePath;
   const palette = button([icon('search'), 'search or run…', kbd('mod K')], () => openPalette(), {class: 'btn ghost topbar-palette', 'aria-label': 'open command palette'});
-  const launch = button([icon('plus'), 'lanes'], () => startLanes(), {class: 'btn primary small', title: 'start lanes (⌘N)'});
+  const launch = button([icon('plus'), 'agents'], () => startLanes(), {class: 'btn primary small', title: 'start agents (⌘N)'});
   return h('header', {class: 'topbar'}, [
     h('div', {class: 'brand'}, [markEl(), 'fluent code']),
     h('span', {class: 'topbar-project muted'}, [project ? `${workspaceFolderName(project)}  ${project}` : 'no workspace selected']),
@@ -90,31 +90,42 @@ export function renderRail(): HTMLElement {
   const drawLanes = () => {
     const live = store.sessions.filter(session => isLive(session) && !session.archivedAt);
     const current = prefs.workspacePath.replace(/[\\/]+$/, '');
-    const sorted = [...live].sort((a, b) => {
-      const aHere = (a.projectDirectory ?? a.directory) === current ? 0 : 1;
-      const bHere = (b.projectDirectory ?? b.directory) === current ? 0 : 1;
-      return aHere - bHere || a.createdAt.localeCompare(b.createdAt);
-    });
+    const projects = [...new Set(live.map(session => session.projectDirectory ?? session.directory))]
+      .sort((a, b) => (a === current ? 0 : 1) - (b === current ? 0 : 1) || a.localeCompare(b));
     lanesLabel.textContent = live.length ? `lanes · ${live.length}` : 'lanes';
     lanesList.innerHTML = '';
     if (live.length === 0) {
       lanesList.append(h('p', {class: 'rail-empty muted'}, ['none running']));
       return;
     }
-    for (const lane of sorted.slice(0, 14)) {
-      const attention = store.attention.get(lane.id);
-      const row = button([
-        h('span', {class: `lane-dot status-${lane.status}${attention ? ' attention' : ''}`}),
-        h('span', {class: 'rail-lane-provider'}, [providerShort[lane.provider]]),
-        h('span', {class: 'rail-lane-name'}, [sessionName(lane)])
-      ], () => {
-        const project = lane.projectDirectory ?? lane.directory;
-        if (project !== prefs.workspacePath) prefs.workspacePath = project;
-        navigate({name: 'orchestration', focus: lane.id});
-      }, {class: `rail-item rail-lane${(lane.projectDirectory ?? lane.directory) === current ? '' : ' elsewhere'}`, title: `${sessionName(lane)}\n${lane.directory}`});
-      lanesList.append(row);
+    let shown = 0;
+    for (const project of projects) {
+      const lanes = live.filter(session => (session.projectDirectory ?? session.directory) === project);
+      const ordered = [...lanes.filter(lane => lane.lead), ...lanes.filter(lane => !lane.lead)];
+      // Every project with running lanes is one click away, with its main agent named — this is
+      // how several main agents on several projects stay in view at once.
+      const head = button([h('span', {class: 'rail-project-name'}, [workspaceFolderName(project)]), h('span', {class: 'muted'}, [String(lanes.length)])], () => {
+        prefs.workspacePath = project;
+        navigate({name: 'orchestration'});
+      }, {class: `rail-item rail-project-row${project === current ? ' active' : ''}`, title: project});
+      lanesList.append(head);
+      for (const lane of ordered.slice(0, 8)) {
+        if (shown >= 14) break;
+        shown += 1;
+        const attention = store.attention.get(lane.id);
+        const row = button([
+          h('span', {class: `lane-dot status-${lane.status}${attention ? ' attention' : ''}`}),
+          lane.lead ? icon('lead') : null,
+          h('span', {class: 'rail-lane-provider'}, [providerShort[lane.provider]]),
+          h('span', {class: 'rail-lane-name'}, [sessionName(lane)])
+        ], () => {
+          if (project !== prefs.workspacePath) prefs.workspacePath = project;
+          navigate({name: 'orchestration', focus: lane.id});
+        }, {class: `rail-item rail-lane${lane.lead ? ' is-lead' : ''}${lane.parentSessionId ? ' is-sub' : ''}`, title: `${lane.lead ? 'main agent · ' : lane.parentSessionId ? 'subagent · ' : ''}${sessionName(lane)}\n${lane.directory}`});
+        lanesList.append(row);
+      }
+      if (ordered.length > 8) lanesList.append(h('p', {class: 'rail-empty muted'}, [`+${ordered.length - 8} more`]));
     }
-    if (sorted.length > 14) lanesList.append(h('p', {class: 'rail-empty muted'}, [`+${sorted.length - 14} more in sessions`]));
   };
   drawLanes();
   const unsubscribe = store.subscribe(drawLanes);
@@ -141,7 +152,7 @@ export function openPalette() {
   if (paletteOpen) return;
   paletteOpen = true;
   const commands: Command[] = [
-    {id: 'launch', label: 'start lanes…', hint: 'open the launch sheet', keys: 'mod N', run: startLanes},
+    {id: 'launch', label: 'start agents…', hint: 'a main agent with a subagent pool, or one brief to several lanes', keys: 'mod N', run: startLanes},
     ...navItems.map(item => ({id: `go-${item.name}`, label: `go to ${item.label}`, run: () => navigate({name: item.name} as Route)})),
     ...pageCommands(),
     // The workspace lists its own lanes with their positions; elsewhere the palette is the way to
@@ -197,7 +208,7 @@ export function openPalette() {
 export function showShortcuts() {
   const rows: Array<[string, string]> = [
     ['mod K', 'command palette — screens, lanes, and every workspace action'],
-    ['mod N', 'start lanes'],
+    ['mod N', 'start agents'],
     ['mod 1 … 9', 'focus a lane by its position'],
     ['mod ⏎', 'switch between grid and focus'],
     ['mod ⇧L', 'cycle grid → rows → focus'],

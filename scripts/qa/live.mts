@@ -26,14 +26,33 @@ for (const dir of [state, worktrees, bin, project]) await run('mkdir', ['-p', di
 
 // A stand-in CLI that behaves enough like a coding-agent TUI to exercise the lanes: a banner, the
 // positional prompt echoed back, a prompt line, and a reply to every line typed.
+const coordCli = join(root, 'dist', 'coord-cli.js');
 const fakeCli = (name: string) => `#!/usr/bin/env node
 if (process.argv.includes('--version')) { console.log('${name} 9.9.9-qa'); process.exit(0); }
 if (process.argv[2] === 'app-server') process.exit(1);
+const {execFileSync} = require('node:child_process');
 const esc = '\\u001b[';
-const prompt = process.argv.filter(a => !a.startsWith('-')).slice(2).join(' ');
-process.stdout.write(esc + '1m╭─ ${name} ─ stand-in ─╮' + esc + '0m\\r\\n');
+const args = process.argv.slice(2);
+const prompt = args.filter(a => !a.startsWith('-')).join(' ');
+const isLead = /lane start PROVIDER/.test(args.join(' '));
+process.stdout.write(esc + '1m╭─ ${name} ─ stand-in' + (isLead ? ' · main agent' : '') + ' ─╮' + esc + '0m\\r\\n');
 process.stdout.write(esc + '2mcwd ' + process.cwd() + esc + '0m\\r\\n\\r\\n');
-if (prompt) process.stdout.write(esc + '1m> ' + esc + '0m' + prompt + '\\r\\n\\r\\n' + esc + '2m⏺ thinking about it…' + esc + '0m\\r\\n\\r\\n');
+if (prompt) process.stdout.write(esc + '1m> ' + esc + '0m' + prompt.slice(-300) + '\\r\\n\\r\\n' + esc + '2m⏺ thinking about it…' + esc + '0m\\r\\n\\r\\n');
+const coord = (...a) => { try { return execFileSync(process.execPath, [${JSON.stringify(coordCli)}, ...a], {encoding: 'utf8', env: process.env}).trim(); } catch (e) { return 'coord failed: ' + (e.stderr || e.message); } };
+if (isLead) {
+  // What a real orchestrator does with its briefing: split the work and start subagents from the
+  // pool, each with its own prompt, then read what they show.
+  setTimeout(() => {
+    const started = [coord('lane', 'start', 'codex', 'Write the integration test for the health endpoint'), coord('lane', 'start', 'glm', 'Write the docs page for the health endpoint')];
+    for (const line of started) process.stdout.write(esc + '36m⏺ fluent-coord${'\\u0020'}' + esc + '0m' + line.replace(/\\n/g, '\\r\\n') + '\\r\\n');
+    setTimeout(() => {
+      process.stdout.write(esc + '36m⏺ lane list${'\\u0020'}' + esc + '0m' + coord('lane', 'list').replace(/\\n/g, '\\r\\n') + '\\r\\n');
+      const first = (started[0].match(/^started ([0-9a-f]{8})/) || [])[1];
+      if (first) process.stdout.write(esc + '36m⏺ lane read ' + first + esc + '0m\\r\\n' + coord('lane', 'read', first, '--lines', '6').replace(/\\n/g, '\\r\\n') + '\\r\\n');
+      process.stdout.write('\\r\\n' + esc + '32m❯' + esc + '0m ');
+    }, 4000);
+  }, 1500);
+}
 process.stdout.write(esc + '32m❯' + esc + '0m ');
 process.stdin.setRawMode && process.stdin.setRawMode(true);
 process.stdin.resume();
@@ -53,7 +72,7 @@ process.stdin.on('data', chunk => {
 });
 setInterval(() => {}, 1 << 30);
 `;
-for (const name of ['claude', 'codex']) {
+for (const name of ['claude', 'codex', 'opencode']) {
   await writeFile(join(bin, name), fakeCli(name));
   await chmod(join(bin, name), 0o755);
 }
@@ -66,7 +85,7 @@ await run('git', ['-C', project, 'commit', '-m', 'base']);
 
 process.env.FLUENT_SOCKET = socketPath;
 const daemon: ChildProcess = spawn(process.execPath, ['--import', 'tsx', join(root, 'src', 'daemon.ts')], {
-  env: {...process.env, FLUENT_SOCKET: socketPath, FLUENT_STATE_DIR: state, FLUENT_WORKTREE_DIR: worktrees, PATH: [bin, process.env.PATH].join(delimiter)},
+  env: {...process.env, FLUENT_SOCKET: socketPath, FLUENT_STATE_DIR: state, FLUENT_WORKTREE_DIR: worktrees, FLUENT_SECRET_STORE: 'memory', PATH: [bin, process.env.PATH].join(delimiter)},
   stdio: ['ignore', 'pipe', 'pipe']
 });
 daemon.stderr?.on('data', chunk => process.stderr.write(`[fluentd] ${chunk}`));
@@ -91,6 +110,11 @@ for (let attempt = 0; attempt < 100; attempt++) {
   try { await request('ping'); break; } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
 }
 console.log('fluentd up at', socketPath);
+// A GLM account with a model makes the OpenCode provider launchable, exactly as a user's would.
+{
+  const approval = await request<{id: string}>('approvals.issue', {action: 'credential.change', target: 'glm:glm-qa', command: 'credential api-key'});
+  await request('credentials.upsertAccount', {provider: 'glm', id: 'glm-qa', mode: 'api-key', label: 'z.ai qa', apiKey: 'qa-key', model: 'GLM-4.7', baseUrl: 'https://api.z.ai/api/coding/paas/v4', approvalId: approval.id});
+}
 
 // --- Serve the real bundle with the bridge shim in place of Tauri's internals ----------------------
 const types: Record<string, string> = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.woff': 'font/woff', '.woff2': 'font/woff2'};
@@ -204,29 +228,59 @@ await page.waitForSelector('.ws-empty-inner .launch-form', {timeout: 20000});
 await shot('01-empty');
 step('empty state with the launch form');
 
-// Launch 2 claude + 2 codex with one brief.
-await page.locator('.launch-task').fill('Add a health endpoint and cover it with a test.');
+// Scenario A — the flow the product is for: brief one main agent, give it a pool of subagents from
+// other models, and watch it delegate. The stand-in lead starts one codex and one glm lane through
+// the real fluent-coord CLI, then reads a subagent's screen.
+await page.locator('.launch-task').fill('Add a health endpoint: implement it, cover it with a test, and document it.');
 const stepper = (label: string) => page.locator('.stepper-row').filter({hasText: label});
-await stepper('Claude Code').locator('input.stepper-value').fill('2');
+await stepper('Claude Code').locator('input.stepper-value').fill('0');
 await stepper('Codex').locator('input.stepper-value').fill('2');
+await stepper('GLM').locator('input.stepper-value').fill('2');
+await page.waitForFunction(() => document.querySelector('.launch-summary')?.textContent?.includes('pool 2 codex · 2 glm'));
+await shot('01b-orchestrate-form');
 await page.locator('.launch-start').click();
-await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane').length === 4, null, {timeout: 60000});
-await page.waitForFunction(() => [...document.querySelectorAll('.lane .xterm-rows')].every(rows => rows.textContent?.includes('❯')), null, {timeout: 30000});
+await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane, .lane-strip .lane').length === 1, null, {timeout: 60000});
+step('main agent started with a pool of 2 codex + 2 glm');
+await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane, .lane-strip .lane').length === 3, null, {timeout: 60000});
+await page.waitForFunction(() => document.querySelector('.lane-stage .lane .xterm-rows')?.textContent?.includes('screen '), null, {timeout: 30000});
+await page.waitForTimeout(600);
+await shot('02a-orchestrator');
+const roster = await page.evaluate(() => [...document.querySelectorAll('.lane')].map(el => `${el.querySelector('.lane-provider')?.textContent}:${[...el.querySelectorAll('.lane-attention .pill')].map(p => p.textContent).join('|')}`));
+console.log('roster', JSON.stringify(roster));
+if (!roster.some(entry => entry.startsWith('claude:main · 2/4 subagents'))) throw new Error('the main agent tile does not show its pool');
+if (!roster.some(entry => /^codex( · [^:]+)?:↳ subagent/.test(entry)) || !roster.some(entry => /^glm( · [^:]+)?:↳ subagent/.test(entry))) throw new Error('subagents of two models were not started under the main agent');
+const railProjects = await page.evaluate(() => [...document.querySelectorAll('.rail-project-row')].map(el => el.textContent));
+console.log('rail projects', JSON.stringify(railProjects));
+step('main agent delegated to codex and glm subagents and read a subagent screen');
+
+// Scenario B — the plain fan-out, from the sheet: 2 claude + 2 codex with one brief.
+await page.locator('.ws-actions .btn.primary').click();
+await page.locator('.sheet .seg').filter({hasText: 'same brief'}).click();
+await page.locator('.sheet .launch-task').fill('Add a health endpoint and cover it with a test.');
+await page.locator('.sheet .stepper-row').filter({hasText: 'Claude Code'}).locator('input.stepper-value').fill('2');
+await page.locator('.sheet .stepper-row').filter({hasText: 'Codex'}).locator('input.stepper-value').fill('2');
+await page.locator('.sheet .stepper-row').filter({hasText: 'GLM'}).locator('input.stepper-value').fill('0');
+await page.locator('.sheet .launch-start').click();
+await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane, .lane-strip .lane').length === 7, null, {timeout: 60000});
+await page.waitForFunction(() => [...document.querySelectorAll('.lane .xterm-rows')].filter(rows => rows.textContent?.includes('❯')).length >= 6, null, {timeout: 30000});
+await page.keyboard.press('Escape');
+await page.locator('.ws-actions .seg').filter({hasText: 'grid'}).click();
 await page.waitForTimeout(800);
-await shot('02-four-lanes');
-step('four real lanes running, all drew their banner');
+await shot('02-seven-lanes');
+step('four parallel lanes joined the main agent and its subagents');
 const tileIds = await page.evaluate(() => [...document.querySelectorAll('.lane-stage .lane')].map(el => (el as HTMLElement).dataset.sessionId));
-console.log('lanes', tileIds);
-const sessions = await request<Array<{id: string; provider: string; status: string; worktreePath?: string; task?: string}>>('sessions.list');
-console.log('daemon sees', sessions.map(s => `${s.provider}:${s.status}:${s.worktreePath ? 'isolated' : 'shared'}`).join(' '));
+console.log('lanes', tileIds.length);
+const sessions = await request<Array<{id: string; provider: string; status: string; worktreePath?: string; task?: string; lead?: unknown; parentSessionId?: string}>>('sessions.list');
+console.log('daemon sees', sessions.map(s => `${s.provider}:${s.status}${s.lead ? ':main' : s.parentSessionId ? ':sub' : ''}`).join(' '));
 
 // Broadcast from the composer to every lane; each stand-in echoes it back.
+await page.locator('.composer-targets .seg').filter({hasText: 'all'}).click();
 await page.locator('.composer-input').fill('please claim src/health.ts first');
 await page.keyboard.press('Enter');
 await page.waitForFunction(() => [...document.querySelectorAll('.lane-stage .lane .xterm-rows')].every(rows => rows.textContent?.includes('you said')), null, {timeout: 20000});
 await page.waitForTimeout(500);
 await shot('03-broadcast');
-step('composer broadcast reached all four lanes');
+step('composer broadcast reached every lane');
 
 // Terminals must survive a sidebar action: tag the DOM nodes, add a ticket, check identity.
 await page.evaluate(() => { document.querySelectorAll('.lane').forEach((el, index) => { (el as any).__tag = `tile-${index}`; }); });
@@ -243,10 +297,10 @@ await shot('04-ticket-added');
 await page.locator('.coord-row.ticket').first().hover();
 await page.locator('.coord-row.ticket .row-menu').first().click();
 await page.locator('.menu-item').filter({hasText: 'start a clean claude lane'}).click();
-await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane').length === 5, null, {timeout: 60000});
+await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane').length === 8, null, {timeout: 60000});
 await page.waitForTimeout(1200);
 await shot('05-ticket-lane');
-step('a fifth lane started from the ticket and was assigned to it');
+step('a lane started from the ticket and was assigned to it');
 
 // Focus mode: ⌘2 then ⌘⏎, then type straight into the focused terminal.
 await page.keyboard.press('Meta+2');

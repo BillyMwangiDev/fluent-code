@@ -16,6 +16,8 @@ const keys = {
   laneLayout: 'fluent.workspace.layout.v1',
   launchCounts: 'fluent.launch.counts.v1',
   launchOptions: 'fluent.launch.options.v1',
+  launchMode: 'fluent.launch.mode.v1',
+  leadProvider: 'fluent.launch.lead.v1',
   previewUrl: 'fluent.preview-url'
 } as const;
 
@@ -53,6 +55,10 @@ export const prefs = {
   set launchCounts(value: Record<string, number>) { write(keys.launchCounts, JSON.stringify(value)); },
   get launchOptions(): {isolate?: boolean} { return readJson(keys.launchOptions, {}); },
   set launchOptions(value: {isolate?: boolean}) { write(keys.launchOptions, JSON.stringify(value)); },
+  get launchMode(): 'orchestrate' | 'parallel' { return read(keys.launchMode) === 'parallel' ? 'parallel' : 'orchestrate'; },
+  set launchMode(value: 'orchestrate' | 'parallel') { write(keys.launchMode, value); },
+  get leadProvider(): string | undefined { return read(keys.leadProvider) ?? undefined; },
+  set leadProvider(value: string) { write(keys.leadProvider, value); },
   get previewUrl(): string | null { return read(keys.previewUrl); },
   set previewUrl(value: string) { write(keys.previewUrl, value); }
 };
