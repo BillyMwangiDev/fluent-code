@@ -260,9 +260,12 @@ await page.locator('.sheet .launch-task').fill('Add a health endpoint and cover 
 await page.locator('.sheet .stepper-row').filter({hasText: 'Claude Code'}).locator('input.stepper-value').fill('2');
 await page.locator('.sheet .stepper-row').filter({hasText: 'Codex'}).locator('input.stepper-value').fill('2');
 await page.locator('.sheet .stepper-row').filter({hasText: 'GLM'}).locator('input.stepper-value').fill('0');
+const launchStarted = Date.now();
 await page.locator('.sheet .launch-start').click();
 await page.waitForFunction(() => document.querySelectorAll('.lane-stage .lane, .lane-strip .lane').length === 7, null, {timeout: 60000});
+const tilesAt = Date.now() - launchStarted;
 await page.waitForFunction(() => [...document.querySelectorAll('.lane .xterm-rows')].filter(rows => rows.textContent?.includes('❯')).length >= 6, null, {timeout: 30000});
+console.log(`timing: 4 lanes launched from the sheet — tiles in ${tilesAt}ms, all prompts drawn in ${Date.now() - launchStarted}ms (each lane gets its own git worktree)`);
 await page.keyboard.press('Escape');
 await page.locator('.ws-actions .seg').filter({hasText: 'grid'}).click();
 await page.waitForTimeout(800);
@@ -276,8 +279,10 @@ console.log('daemon sees', sessions.map(s => `${s.provider}:${s.status}${s.lead 
 // Broadcast from the composer to every lane; each stand-in echoes it back.
 await page.locator('.composer-targets .seg').filter({hasText: 'all'}).click();
 await page.locator('.composer-input').fill('please claim src/health.ts first');
+const sendAt = Date.now();
 await page.keyboard.press('Enter');
 await page.waitForFunction(() => [...document.querySelectorAll('.lane-stage .lane .xterm-rows')].every(rows => rows.textContent?.includes('you said')), null, {timeout: 20000});
+console.log(`timing: broadcast to 7 lanes echoed back in every terminal in ${Date.now() - sendAt}ms`);
 await page.waitForTimeout(500);
 await shot('03-broadcast');
 step('composer broadcast reached every lane');

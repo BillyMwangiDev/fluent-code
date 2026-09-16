@@ -458,6 +458,8 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
   container-type: inline-size;
   transition: border-color var(--duration) ease, box-shadow var(--duration) ease;
 }
+.lane { animation: tile-in 200ms var(--ease-out); }
+@keyframes tile-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .lane.focused { border-color: color-mix(in srgb, var(--coral) 70%, var(--line-strong)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--coral) 35%, transparent); }
 .lane.needs-you { border-color: var(--coral); }
 .lane.ended { border-style: dashed; }
@@ -487,7 +489,21 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .lane-checks { display: inline-flex; flex: 0 0 auto; }
 .lane-menu { opacity: .55; }
 .lane:hover .lane-menu, .lane-menu:focus-visible { opacity: 1; }
-.lane-screen { min-height: 0; min-width: 0; padding: 4px 0 0 6px; }
+.lane-screen { position: relative; min-height: 0; min-width: 0; padding: 4px 0 0 6px; }
+.lane-screen.loading::after {
+  content: 'starting ' attr(data-provider) '…';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--fg-muted);
+  font-size: 12px;
+  background: var(--bg-inset);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.lane-quick { opacity: 0; }
+.lane:hover .lane-quick, .lane-quick:focus-visible { opacity: .8; }
+.lane-quick:hover { opacity: 1 !important; }
 .lane-screen .xterm { height: 100%; }
 .lane-screen .xterm .xterm-viewport { background: transparent !important; }
 .lane-error { margin: 8px; }
@@ -516,7 +532,12 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .composer-row:first-child { align-items: center; }
 .composer-targets .seg { font-size: 11px; padding: 3px 8px; }
 .composer-status { font-size: 11px; margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.composer-input { flex: 1; min-width: 0; min-height: 36px; max-height: 160px; resize: none; line-height: 1.45; }
+.composer-field { position: relative; flex: 1; min-width: 0; display: flex; }
+.composer-input { flex: 1; min-width: 0; min-height: 36px; max-height: 160px; resize: none; line-height: 1.45; padding-right: 118px; }
+.composer-hint { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 10px; white-space: nowrap; pointer-events: none; }
+.composer-hint .kbd { font-size: 9px; padding: 0 4px; }
+.composer-input:focus + .composer-hint { opacity: .8; }
+@media (max-width: 900px) { .composer-hint { display: none; } .composer-input { padding-right: 10px; } }
 .composer-submit { font-size: 11px; color: var(--fg-muted); white-space: nowrap; padding-bottom: 9px; display: inline-flex; align-items: center; gap: 5px; }
 .composer-send { align-self: stretch; }
 

@@ -154,8 +154,10 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     const checks = h('span', {class: 'lane-checks'});
     const attention = h('span', {class: 'lane-attention'});
     const menu = button(icon('more'), event => { event.stopPropagation(); openTileMenu(tile, menu); }, {class: 'btn ghost icon-button lane-menu', 'aria-label': 'lane actions'});
-    const head = h('header', {class: 'lane-head'}, [pick, dot, provider, title, attention, tokens, checks, menu]);
-    const screen = h('div', {class: 'lane-screen'});
+    // Quick actions surface on hover; the menu holds the rest.
+    const expand = button(icon('expand'), event => { event.stopPropagation(); focusLane(summary.id, {stage: true}); setLayout(layout === 'focus' && focused === summary.id ? 'grid' : 'focus'); }, {class: 'btn ghost icon-button lane-quick', 'aria-label': 'focus this lane', title: 'focus this lane (⌘⏎)'});
+    const head = h('header', {class: 'lane-head'}, [pick, dot, provider, title, attention, tokens, checks, expand, menu]);
+    const screen = h('div', {class: 'lane-screen loading', 'data-provider': providerShort[summary.provider]});
     const foot = h('footer', {class: 'lane-foot'});
     foot.hidden = true;
     const el = h('article', {class: 'lane', 'data-session-id': summary.id, tabindex: '0', role: 'group', 'aria-label': `${providerShort[summary.provider]} lane`}, [head, screen, foot]);
@@ -176,8 +178,11 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     }).then(terminal => {
       if (disposed || !tiles.has(summary.id)) { terminal.dispose(); return; }
       tile.terminal = terminal;
+      screen.classList.remove('loading');
+      terminal.terminal.options.cursorBlink = focused === summary.id;
       if (focused === summary.id && layout === 'focus') terminal.focus();
     }, error => {
+      screen.classList.remove('loading');
       screen.append(h('p', {class: 'lane-error error'}, [actionErrorText(error)]));
     });
     return tile;
@@ -327,6 +332,8 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     if (!tiles.has(id)) return;
     focused = id;
     store.clearAttention(id);
+    // The cursor blinks only where keystrokes will land.
+    for (const [tileId, tile] of tiles) if (tile.terminal) tile.terminal.terminal.options.cursorBlink = tileId === id;
     if (options.stage && layout === 'focus') applyLayout();
     else for (const [tileId, tile] of tiles) tile.el.classList.toggle('focused', tileId === id);
     composer.sync();
@@ -437,7 +444,8 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     type Mode = 'focused' | 'picked' | 'all';
     let mode: Mode = 'all';
     let modeChosen = false;
-    const input = h('textarea', {class: 'composer-input', rows: '1', placeholder: 'send to lanes — Enter sends, Shift+Enter adds a line, click a terminal to type into it directly', 'aria-label': 'Message to lanes'}) as HTMLTextAreaElement;
+    const input = h('textarea', {class: 'composer-input', rows: '1', placeholder: 'message the lanes…', 'aria-label': 'Message to lanes'}) as HTMLTextAreaElement;
+    const hint = h('span', {class: 'composer-hint muted'}, [kbd('↵'), ' send ', kbd('⇧↵'), ' line']);
     const submit = h('input', {type: 'checkbox', checked: ''}) as HTMLInputElement;
     const send = h('button', {type: 'button', class: 'btn primary composer-send'}, [icon('send'), 'send']);
     const targetsGroup = h('div', {class: 'segmented composer-targets', role: 'group', 'aria-label': 'Send to'});
@@ -475,7 +483,8 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
       }
       const count = targets().length;
       send.disabled = count === 0;
-      input.placeholder = count === 0 ? 'no running lane to send to' : count === 1 ? 'send to this lane — Enter sends, Shift+Enter adds a line' : `send to ${count} lanes — Enter sends, Shift+Enter adds a line`;
+      const target = mode === 'focused' && focusedTile ? (focusedTile.summary.lead ? 'message the main agent…' : `message ${providerShort[focusedTile.summary.provider]} · ${sessionName(focusedTile.summary).slice(0, 40)}…`) : count === 1 ? 'message this lane…' : `message ${count} lanes…`;
+      input.placeholder = count === 0 ? 'no running lane to send to' : target;
     };
     const grow = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };
     input.addEventListener('input', grow);
@@ -500,7 +509,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     }
     const el = h('form', {class: 'composer'}, [
       h('div', {class: 'composer-row'}, [targetsGroup, status]),
-      h('div', {class: 'composer-row'}, [input, h('label', {class: 'check-label composer-submit', title: 'press Enter in the lane after pasting'}, [submit, ' enter']), send])
+      h('div', {class: 'composer-row'}, [h('div', {class: 'composer-field'}, [input, hint]), h('label', {class: 'check-label composer-submit', title: 'press Enter in the lane after pasting'}, [submit, ' enter']), send])
     ]);
     el.addEventListener('submit', event => event.preventDefault());
     return {el, sync, focus: () => input.focus()};

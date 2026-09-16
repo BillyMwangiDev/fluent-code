@@ -6,7 +6,7 @@ import {navigate, refresh, setRouteCleanup} from './router';
 import {leadLoad} from './session-tree';
 import {store} from './store';
 import {attachLaneTerminal} from './terminal';
-import {accountLabel, actionErrorText, askConfirm, button, h, icon, isLive, openMenu, providerLabel, providerShort, sessionName, showActionError, verificationPill} from './ui';
+import {accountLabel, actionErrorText, askConfirm, button, h, icon, isLive, kbd, openMenu, providerLabel, providerShort, sessionName, showActionError, verificationPill} from './ui';
 
 export async function renderActiveSession(main: HTMLElement, sessionId: string, options: {review?: 'diff'} = {}) {
   const chains = await api.listCredentials().catch(() => []);
@@ -195,7 +195,8 @@ export async function renderActiveSession(main: HTMLElement, sessionId: string, 
 }
 
 function buildComposer(sessionId: string): HTMLElement {
-  const input = h('textarea', {class: 'composer-input', rows: '1', placeholder: 'paste a brief into this lane — Enter sends, Shift+Enter adds a line', 'aria-label': 'Context to inject'}) as HTMLTextAreaElement;
+  const input = h('textarea', {class: 'composer-input', rows: '1', placeholder: 'message this lane…', 'aria-label': 'Context to inject'}) as HTMLTextAreaElement;
+  const hint = h('span', {class: 'composer-hint muted'}, [kbd('↵'), ' send ', kbd('⇧↵'), ' line']);
   const submit = h('input', {type: 'checkbox', checked: ''}) as HTMLInputElement;
   const status = h('span', {class: 'composer-status muted', role: 'status'});
   const send = h('button', {type: 'button', class: 'btn primary composer-send'}, [icon('send'), 'send']);
@@ -222,7 +223,7 @@ function buildComposer(sessionId: string): HTMLElement {
   };
   input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void deliver(); } });
   send.addEventListener('click', () => void deliver());
-  const form = h('form', {class: 'composer'}, [h('div', {class: 'composer-row'}, [status]), h('div', {class: 'composer-row'}, [input, h('label', {class: 'check-label composer-submit'}, [submit, ' enter']), send])]);
+  const form = h('form', {class: 'composer'}, [h('div', {class: 'composer-row'}, [status]), h('div', {class: 'composer-row'}, [h('div', {class: 'composer-field'}, [input, hint]), h('label', {class: 'check-label composer-submit'}, [submit, ' enter']), send])]);
   form.addEventListener('submit', event => event.preventDefault());
   return form;
 }
