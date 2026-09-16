@@ -48,6 +48,47 @@ const scenarios = {
   async 'palette-commands'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+k'); await p.locator('.palette-input').fill('la'); await p.waitForTimeout(300); await shot(p, 'palette-commands'); await p.close(); },
   async 'focus-6'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+2'); await p.keyboard.press('Meta+Enter'); await p.waitForTimeout(500); await shot(p, 'focus-6'); await p.close(); },
   async 'empty'() { const p = await open('?lanes=0'); await p.waitForTimeout(600); await shot(p, 'empty'); await p.close(); },
+  // T4 (2026-09-17 limits-and-budget): recent-workspace chips need prefs seeded before the app
+  // boots, same technique as the 'light' scenario below (set localStorage, then reload).
+  async 'empty-recent'() {
+    const p = await open('?lanes=0');
+    await p.evaluate(() => localStorage.setItem('fluent.recent-workspaces.v1', JSON.stringify(['/Users/developer/WORK/other-project', '/Users/developer/WORK/api-service', '/Users/developer/WORK/marketing-site'])));
+    await p.reload();
+    await p.waitForSelector('.splash .prompt');
+    await p.keyboard.press('Enter');
+    await p.waitForSelector('.rail');
+    await p.waitForTimeout(700);
+    await shot(p, 'empty-recent');
+    await p.close();
+  },
+  // The limits strip and tile cost/budget chips both come from usage.snapshot + credentials.list,
+  // which the fixture answers immediately — the open() helper's own settle wait is enough.
+  async 'limits'() { const p = await open('?lanes=6'); await p.waitForTimeout(300); await shot(p, 'limits'); await p.close(); },
+  // generatedLanes[4] ('lane-05-codex') carries stoppedBy:'budget' in the fixture; after
+  // projectLanes' lead-then-children-then-rest reorder it lands at order[3] (lead, its two
+  // children, then this one), so ⌘4 focuses it.
+  async 'tile-budget'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+4'); await p.keyboard.press('Meta+Enter'); await p.waitForTimeout(500); await shot(p, 'tile-budget'); await p.close(); },
+  // The fixture fakes fluentd's event push through window.__emitTauriEvent; there is no other way
+  // to populate store.attention/notices without a real daemon, so this simulates one lane needing
+  // input and one credential notice, then opens the inbox popover over them.
+  async 'inbox'() {
+    const p = await open('?lanes=6');
+    await p.evaluate(() => {
+      const now = new Date().toISOString();
+      window.__emitTauriEvent('session-attention', {
+        sessionId: 'lane-02-codex',
+        reason: 'needs-input',
+        detail: 'approve the pending file edit?',
+        summary: {id: 'lane-02-codex', provider: 'codex', command: 'codex', directory: '/Users/developer/WORK/fluent-code', projectDirectory: '/Users/developer/WORK/fluent-code', task: 'Write integration tests for token expiry', status: 'running', createdAt: now, updatedAt: now, accountId: 'codex-api'}
+      });
+      window.__emitTauriEvent('credential-notice', {provider: 'claude', message: 'work subscription hit its 5h limit — switch to work platform credits?', resetAt: new Date(Date.now() + 90 * 60000).toISOString()});
+    });
+    await p.waitForTimeout(200);
+    await p.locator('.inbox-button').click();
+    await p.waitForTimeout(300);
+    await shot(p, 'inbox');
+    await p.close();
+  },
   async 'sheet'() { const p = await open('?lanes=6'); await p.locator('.ws-actions .btn.primary').click(); await p.waitForTimeout(600); await shot(p, 'sheet'); await p.close(); },
   async 'sheet-parallel'() { const p = await open('?lanes=6'); await p.locator('.ws-actions .btn.primary').click(); await p.waitForTimeout(400); await p.locator('.sheet .seg').filter({hasText: 'same brief'}).click(); await p.waitForTimeout(300); await shot(p, 'sheet-parallel'); await p.close(); },
   async 'palette'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+k'); await p.waitForTimeout(400); await shot(p, 'palette'); await p.close(); },

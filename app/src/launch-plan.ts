@@ -89,6 +89,17 @@ export function launchPlan(counts: LaunchCounts, readiness: readonly ProviderRea
   return plan;
 }
 
+/** Parses the launch form's "stop a lane at $" field: blank means no cap. fluentd's own
+ * `validBudgetUsd` is the source of truth for enforcement; this only keeps an obviously bogus
+ * value (0, negative, non-numeric, absurdly large) from being sent instead of silently dropped. */
+export function parseBudgetUsd(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const amount = Number(trimmed);
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 10_000) return undefined;
+  return amount;
+}
+
 export function describePlan(plan: readonly ProviderId[], shortLabel: (id: ProviderId) => string): string {
   if (plan.length === 0) return 'no lanes';
   const counts = new Map<ProviderId, number>();

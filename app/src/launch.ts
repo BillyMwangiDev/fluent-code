@@ -3,7 +3,7 @@
 // behaves the same. Lanes start one after another: each Claude lane needs its own daemon-issued
 // consent to write the project's hook settings, and a failure is reported against its lane.
 import {api, permissionModeChoices, riskyPermissionModes, type CredentialChainState, type ProviderHealth, type ProviderId, type SessionSummary} from './api';
-import {clampCount, defaultCounts, describePlan, launchPlan, maxLanesPerProvider, modelLinkedProviders, providerReadiness, type LaunchCounts, type ProviderReadiness} from './launch-plan';
+import {clampCount, defaultCounts, describePlan, launchPlan, maxLanesPerProvider, modelLinkedProviders, parseBudgetUsd, providerReadiness, type LaunchCounts, type ProviderReadiness} from './launch-plan';
 import {prefs} from './prefs';
 import {store} from './store';
 import {navigate} from './router';
@@ -23,6 +23,9 @@ export type LaunchRequest = {
   accountId?: Partial<Record<ProviderId, string>>;
   model: Partial<Record<'claude' | 'codex', string>>;
   permissionMode: Partial<Record<'claude' | 'codex', string>>;
+  /** Stops a lane once its cost reaches this; undefined means no cap. Applied to every lane the
+   * request starts — a lead's subagents inherit it from fluentd (docs/.../2026-09-17-limits-and-budget-design.md §2.3). */
+  budgetUsd?: number;
 };
 
 export type LaunchProgress = {index: number; total: number; provider: ProviderId};
@@ -58,6 +61,7 @@ export async function runLaunch(request: LaunchRequest, readiness: readonly Prov
         isolate: request.isolate,
         accountId: request.accountId?.[request.leadProvider],
         lead: {maxLanes: poolTotal(pool), pool},
+        budgetUsd: request.budgetUsd,
         ...optionsFor(request.leadProvider)
       });
       created.push(lead);
@@ -77,6 +81,7 @@ export async function runLaunch(request: LaunchRequest, readiness: readonly Prov
         task: request.task.trim() || undefined,
         isolate: request.isolate,
         accountId: request.accountId?.[provider],
+        budgetUsd: request.budgetUsd,
         ...optionsFor(provider)
       });
       created.push(session);
@@ -211,6 +216,9 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
   const directory = h('input', {type: 'text', placeholder: '/path/to/project', value: options.directory, 'aria-label': 'Working directory'}) as HTMLInputElement;
   const isolate = h('input', {type: 'checkbox'}) as HTMLInputElement;
   isolate.checked = prefs.launchOptions.isolate ?? true;
+  const budget = h('input', {type: 'number', inputmode: 'decimal', step: '0.01', min: '0', placeholder: 'no cap', 'aria-label': 'Stop a lane at this cost in dollars'}) as HTMLInputElement;
+  budget.value = prefs.launchOptions.budgetUsd !== undefined ? String(prefs.launchOptions.budgetUsd) : '';
+  const budgetRow = h('div', {class: 'field-row'}, [h('span', {class: 'field-label'}, ['stop a lane at $']), budget, h('span', {class: 'muted'}, ['blank = no cap; applies to every lane this starts, and its subagents'])]);
   const modelInputs: Partial<Record<'claude' | 'codex', HTMLInputElement>> = {};
   const permissionSelects: Partial<Record<'claude' | 'codex', HTMLSelectElement>> = {};
   const advancedRows = (['claude', 'codex'] as const).filter(provider => readiness.find(entry => entry.id === provider)?.ready).map(provider => {
@@ -227,6 +235,7 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
     h('summary', {}, ['more options']),
     options.variant === 'sheet' ? directoryRow : null,
     h('label', {class: 'check-label'}, [isolate, ' give each lane its own Git worktree ', h('span', {class: 'muted'}, ['— recommended for parallel agents; created beside the project'])]),
+    budgetRow,
     ...advancedRows
   ]);
   if (options.variant === 'page') advanced.open = true;
@@ -247,7 +256,8 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
       isolate: isolate.checked,
       accountId,
       model: {claude: modelInputs.claude?.value, codex: modelInputs.codex?.value},
-      permissionMode: {claude: permissionSelects.claude?.value, codex: permissionSelects.codex?.value}
+      permissionMode: {claude: permissionSelects.claude?.value, codex: permissionSelects.codex?.value},
+      budgetUsd: parseBudgetUsd(budget.value)
     };
   }
 
@@ -288,7 +298,7 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
     status.className = 'action-status';
     status.textContent = 'starting…';
     prefs.launchCounts = Object.fromEntries(Object.entries(counts).filter(([, value]) => (value ?? 0) > 0));
-    prefs.launchOptions = {isolate: isolate.checked};
+    prefs.launchOptions = {isolate: isolate.checked, budgetUsd: parseBudgetUsd(budget.value)};
     prefs.launchMode = mode;
     prefs.workspacePath = request.directory;
     try {

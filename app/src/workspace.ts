@@ -1,17 +1,19 @@
 // The orchestration workspace: every lane in the project as a live pane, one composer to talk to
 // them, and the coordination sidebar. It fills the viewport and never rebuilds itself — tiles are
 // added, updated, and removed in place, and terminals stay mounted through every action.
-import {api, type AdmissionVerdict, type SessionSummary} from './api';
+import {api, type AdmissionVerdict, type ProviderId, type SessionSummary} from './api';
 import {coordinationPanel, type CoordinationCounts, type CoordinationPanel} from './coordination-panel';
 import {launchForm, loadReadiness, openLaunchSheet, runLaunch, type LaunchOutcome, type LaunchProgress} from './launch';
+import {parseBudgetUsd} from './launch-plan';
 import {diffById, gridShape, nextFocus} from './lane-layout';
+import {budgetPercent, laneCostText, windowLabel, windowLevel, windowsByProvider} from './limits';
 import {prefs, type LaneLayout} from './prefs';
 import {currentProject} from './project-scope';
 import {navigate, setRouteCleanup} from './router';
 import {setPageCommands, type Command} from './shell';
 import {store, type LaneUsage} from './store';
 import {attachLaneTerminal, type LaneTerminal} from './terminal';
-import {actionErrorText, admissionLabel, askConfirm, button, formatTokens, h, icon, isLive, isMod, kbd, openMenu, providerShort, sessionName, showActionError, showNotice, verificationPill, workspaceFolderName} from './ui';
+import {accountLabel, actionErrorText, admissionLabel, askConfirm, askPrompt, button, formatTokens, h, icon, isLive, isMod, kbd, openMenu, providerLabel, providerShort, sessionName, showActionError, showNotice, verificationPill, workspaceFolderName} from './ui';
 
 type Tile = {
   id: string;
@@ -108,6 +110,27 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     h('div', {class: 'ws-actions'}, [layoutControl, sidebarButton, stopAll, addLanes])
   ]);
 
+  // --- Limits strip: one chip per credential that has reported a usage window ------------------
+  const limitsStrip = h('div', {class: 'limits-strip'});
+  limitsStrip.hidden = true;
+  function syncLimitsStrip() {
+    limitsStrip.innerHTML = '';
+    const windows = windowsByProvider([...store.usage.values()]);
+    limitsStrip.hidden = windows.size === 0;
+    if (windows.size === 0) return;
+    for (const providerId of [...windows.keys()].sort()) {
+      const provider = providerId as ProviderId;
+      const window = windows.get(providerId)!;
+      const chain = store.chains.find(candidate => candidate.provider === provider);
+      const account = accountLabel(chain?.activeAccountId, store.chains);
+      const primaryText = windowLabel(window.primary);
+      const secondaryText = windowLabel(window.secondary);
+      const level = windowLevel(window.primary) ?? windowLevel(window.secondary);
+      const label = [providerShort[provider], account !== '—' ? account : null, primaryText, secondaryText].filter(Boolean).join(' · ');
+      limitsStrip.append(button([h('span', {class: `provider-dot ${provider}`}), label], () => navigate({name: 'credentials'}), {class: `limits-chip${level && level !== 'ok' ? ' warn' : ''}`, title: `${providerLabel[provider]} · ${account} — open credentials`}));
+    }
+  }
+
   // --- Plane -----------------------------------------------------------------------------------
   const stage = h('div', {class: 'lane-stage'});
   const stripList = h('div', {class: 'lane-strip', role: 'list', 'aria-label': 'Other lanes'});
@@ -117,7 +140,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   const composer = buildComposer();
   const plane = h('div', {class: 'ws-plane'}, [grid, emptyState, composer.el]);
   const body = h('div', {class: 'ws-body'}, [plane]);
-  const root = h('section', {class: 'workspace'}, [strip, body]);
+  const root = h('section', {class: 'workspace'}, [strip, limitsStrip, body]);
   main.append(root);
 
   // --- Sidebar -----------------------------------------------------------------------------------
@@ -199,13 +222,21 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     tile.provider.textContent = summary.model ? `${providerShort[summary.provider]} · ${summary.model}` : providerShort[summary.provider];
     tile.title.textContent = sessionName(summary);
     tile.title.title = summary.task ?? summary.directory;
-    tile.tokens.textContent = usageText(usage);
+    const laneUsage = laneUsageText(usage);
+    tile.tokens.textContent = laneUsage.text;
+    tile.tokens.title = laneUsage.title ?? '';
     tile.checks.innerHTML = '';
     if (summary.verification && summary.verification !== 'unavailable') tile.checks.append(verificationPill(summary.verification));
     const attention = store.attention.get(summary.id);
     tile.attention.innerHTML = '';
     tile.el.classList.toggle('needs-you', attention?.reason === 'needs-input');
-    if (attention) tile.attention.append(h('span', {class: `pill attention-${attention.reason}`}, [{finished: 'finished', failed: 'failed', 'needs-input': 'needs you'}[attention.reason]]));
+    if (attention) tile.attention.append(h('span', {class: `pill attention-${attention.reason}`}, [{finished: 'finished', failed: 'failed', 'needs-input': 'needs you', budget: 'over budget'}[attention.reason]]));
+    if (summary.stoppedBy === 'budget') {
+      tile.attention.append(h('span', {class: 'pill budget-pill stopped'}, ['stopped at budget']));
+    } else {
+      const percent = budgetPercent(usage?.costUsd, summary.budgetUsd);
+      if (percent !== undefined && percent >= 80) tile.attention.append(h('span', {class: 'pill budget-pill warn'}, [`budget ${percent}%`]));
+    }
     if (summary.lead) tile.attention.append(h('span', {class: 'pill lead-pill', title: summary.lead.pool ? `subagent pool: ${Object.entries(summary.lead.pool).map(([id, count]) => `${count} ${id}`).join(', ')}` : 'main agent'}, [`main · ${store.sessions.filter(session => session.parentSessionId === summary.id && isLive(session)).length}/${summary.lead.maxLanes} subagents`]));
     if (summary.parentSessionId) tile.attention.append(h('span', {class: 'pill', title: `started by the main agent ${summary.parentSessionId.slice(0, 8)}`}, ['↳ subagent']));
     tile.foot.hidden = live;
@@ -217,7 +248,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
         h('span', {class: 'actions'}, [
           button('review', () => navigate({name: 'active-session', sessionId: summary.id}), {class: 'btn ghost small'}),
           canResume ? button('resume', async () => {
-            try { await api.resumeSession(summary); void store.refresh(); } catch (error) { showActionError(error); }
+            try { await api.resumeSession(summary.id); void store.refresh(); } catch (error) { showActionError(error); }
           }, {class: 'btn ghost small'}) : null,
           button('dismiss', () => { dismissed.add(summary.id); retained.delete(summary.id); sync(); }, {class: 'btn ghost small'})
         ])
@@ -225,29 +256,55 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     }
   }
 
-  function usageText(usage: LaneUsage | undefined): string {
-    if (!usage) return '';
+  /** Tile header line: tokens · cost · context%, with the cache hit ratio in the tooltip — cost is
+   * the provider's own figure when reported, else an estimate from `laneCostText` (limits.ts). */
+  function laneUsageText(usage: LaneUsage | undefined): {text: string; title?: string} {
+    if (!usage) return {text: ''};
     const total = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
     const parts: string[] = [];
     if (total > 0) parts.push(formatTokens(total));
+    const cost = laneCostText(usage);
+    if (cost) parts.push(cost);
     if (usage.contextPercent !== undefined) parts.push(`${usage.contextPercent.toFixed(0)}% ctx`);
-    return parts.join(' · ');
+    const title = usage.cacheHitRatio !== undefined ? `cache hit ${Math.round(usage.cacheHitRatio * 100)}%` : undefined;
+    return {text: parts.join(' · '), title};
   }
 
   function openTileMenu(tile: Tile, anchor: HTMLElement) {
     const summary = tile.summary;
     const live = isLive(summary);
-    openMenu(anchor, [
+    const items: Array<{label: string; onSelect: () => void; danger?: boolean} | 'divider'> = [
       {label: layout === 'focus' && focused === summary.id ? 'back to grid' : 'focus this lane', onSelect: () => { if (layout === 'focus' && focused === summary.id) setLayout('grid'); else { focusLane(summary.id, {stage: true}); setLayout('focus'); } }},
       {label: 'open full view', onSelect: () => navigate({name: 'active-session', sessionId: summary.id})},
       {label: 'review changes', onSelect: () => navigate({name: 'active-session', sessionId: summary.id, review: 'diff'})},
       'divider',
       {label: tile.pick.checked ? 'exclude from send targets' : 'include in send targets', onSelect: () => { tile.pick.checked = !tile.pick.checked; composer.sync(); }},
-      'divider',
-      live
-        ? {label: 'stop lane', danger: true, onSelect: async () => { await api.stop(summary.id).catch(showActionError); void store.refresh(); }}
-        : {label: 'dismiss', onSelect: () => { dismissed.add(summary.id); retained.delete(summary.id); sync(); }}
-    ]);
+      'divider'
+    ];
+    if (live) {
+      items.push({label: 'stop lane', danger: true, onSelect: async () => { await api.stop(summary.id).catch(showActionError); void store.refresh(); }});
+    } else {
+      items.push({label: 'dismiss', onSelect: () => { dismissed.add(summary.id); retained.delete(summary.id); sync(); }});
+      if (summary.stoppedBy === 'budget') items.push({label: 'resume with a higher budget…', onSelect: () => void resumeWithBudget(summary)});
+    }
+    openMenu(anchor, items);
+  }
+
+  /** The lane stopped at its cap (see the `budget-pill stopped` above); asks for a new one and
+   * resumes on it. wry has no native prompt, hence `askPrompt` (ui.ts). */
+  async function resumeWithBudget(summary: SessionSummary) {
+    const value = await askPrompt({
+      title: 'resume with a higher budget',
+      body: `${sessionName(summary)} stopped at its budget${summary.budgetUsd !== undefined ? ` of $${summary.budgetUsd.toFixed(2)}` : ''}. Set a new cap to resume it — blank resumes with no cap.`,
+      placeholder: 'e.g. 5.00',
+      inputType: 'number',
+      confirmLabel: 'resume'
+    });
+    if (value === undefined) return;
+    try {
+      await api.resumeSession(summary.id, {budgetUsd: parseBudgetUsd(value)});
+      void store.refresh();
+    } catch (error) { showActionError(error); }
   }
 
   function removeTile(id: string) {
@@ -276,6 +333,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     firstSync = false;
     focused = nextFocus(order, focused, diff.removed);
     applyLayout();
+    syncLimitsStrip();
     composer.sync();
     syncStats(panel?.counts());
     if (diff.added.length || diff.removed.length) void panel?.refresh();
@@ -427,10 +485,17 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
           onLaunched(outcome);
         }
       });
+      const recent = prefs.recentWorkspaces.filter(path => path !== directory).slice(0, 5);
+      const recentChips = recent.length > 0 ? h('div', {class: 'ws-empty-recent'}, [
+        h('span', {class: 'muted'}, ['recent']),
+        ...recent.map(path => button(workspaceFolderName(path), () => { prefs.workspacePath = path; navigate({name: 'orchestration'}); }, {class: 'chip', title: path}))
+      ]) : null;
       emptyState.append(
         h('div', {class: 'ws-empty-inner'}, [
           h('h1', {}, [project ? `start agents on ${workspaceFolderName(project)}` : 'start agents']),
           h('p', {class: 'muted'}, [project ? project : 'Pick a folder, brief a main agent, and give it a pool of subagents from any model — or send one brief to several lanes.']),
+          h('p', {class: 'muted ws-empty-value'}, ['runs the real CLIs · falls back when a credential hits its limit · stops a lane at your budget · shows what every lane costs']),
+          recentChips,
           form.el
         ])
       );

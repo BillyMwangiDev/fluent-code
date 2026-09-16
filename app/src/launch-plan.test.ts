@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {clampCount, defaultCounts, describePlan, launchPlan, providerReadiness} from './launch-plan';
+import {clampCount, defaultCounts, describePlan, launchPlan, parseBudgetUsd, providerReadiness} from './launch-plan';
 import type {CredentialChainState, ProviderHealth} from './api';
 
 const providers: ProviderHealth[] = [
@@ -57,4 +57,16 @@ test('plan description reads as a short sentence', () => {
   assert.equal(describePlan(['claude', 'codex', 'claude'], id => id), '3 lanes · 2 claude · 1 codex');
   assert.equal(describePlan(['glm'], id => id), '1 lane · 1 glm');
   assert.equal(describePlan([], id => id), 'no lanes');
+});
+
+test('budget field: blank means no cap; bad or out-of-range values are dropped', () => {
+  assert.equal(parseBudgetUsd(''), undefined);
+  assert.equal(parseBudgetUsd('   '), undefined);
+  assert.equal(parseBudgetUsd('5'), 5);
+  assert.equal(parseBudgetUsd('5.50'), 5.5);
+  assert.equal(parseBudgetUsd('0'), undefined);
+  assert.equal(parseBudgetUsd('-3'), undefined);
+  assert.equal(parseBudgetUsd('abc'), undefined);
+  assert.equal(parseBudgetUsd('20000'), undefined);
+  assert.equal(parseBudgetUsd('10000'), 10000);
 });

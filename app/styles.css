@@ -908,3 +908,52 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
   mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
 }
+
+/* --- T4 (2026-09-17 limits-and-budget): limits strip, lane cost/budget pills, attention inbox,
+   recent-workspace chips. Appended only, same rule as the T2 block above. --- */
+
+/* .workspace's original two-row grid (header strip, body) has no row for the limits strip
+   between them; without this, .ws-body lands in an implicit auto row and paints over it. Later
+   source order lets this property win over the original rule above without editing it. */
+.workspace { grid-template-rows: auto auto minmax(0, 1fr); }
+
+/* One row, hidden entirely (and taking no grid row) when nothing has been reported yet — the
+   workspace grid must not drop more than this single line. */
+.limits-strip { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; overflow: hidden; border-bottom: 1px solid var(--line); background: var(--bg-raised); font-size: 11px; }
+.limits-strip[hidden] { display: none; }
+.limits-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding: 2px 8px; border: 1px solid transparent; border-radius: var(--radius-chip); background: transparent; color: var(--fg-muted); font: inherit; white-space: nowrap; }
+.limits-chip:hover { background: var(--bg-hover); color: var(--fg); }
+.limits-chip.warn { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 40%, transparent); }
+.limits-chip .provider-dot { width: 6px; height: 6px; }
+
+/* Tile budget pills — separate from the transient `attention-*` pill above them: these persist
+   for as long as the lane is over budget or was stopped by it, regardless of whether the user has
+   already looked at the lane. */
+.pill.attention-budget { color: #1a0e08; background: var(--coral); border-color: var(--coral); font-weight: 600; }
+.pill.budget-pill.warn { color: #1a0e08; background: var(--coral); border-color: var(--coral); font-weight: 600; }
+.pill.budget-pill.stopped { color: var(--coral); border-color: var(--coral); }
+
+/* Attention inbox: a bell with a count badge in the top bar, and its popover. */
+.inbox-button { position: relative; }
+.inbox-badge { position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: var(--radius-chip); background: var(--fg-faint); color: var(--bg); font-size: 9px; font-weight: 700; line-height: 14px; text-align: center; }
+.inbox-badge[hidden] { display: none; }
+.inbox-badge.warn { background: var(--coral); color: #1a0e08; }
+.inbox-pop { width: 340px; max-height: 60vh; overflow: auto; padding: 4px; }
+.inbox-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; width: 100%; padding: 8px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); text-align: left; font-size: 12px; }
+.inbox-row:hover, .inbox-row:focus-visible { background: var(--bg-hover); outline: none; }
+.inbox-row-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-empty { margin: 0; padding: 16px; text-align: center; color: var(--fg-muted); font-size: 12px; }
+
+/* Empty state: recent workspace chips and the one-line value statement below the title. */
+.ws-empty-value { margin: -12px 0 18px; }
+.ws-empty-recent { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -6px 0 18px; font-size: 11px; }
+.chip { padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-chip); background: var(--bg-card); color: var(--fg); font: inherit; font-size: 11px; }
+.chip:hover { background: var(--bg-hover); }
+
+/* Launch form: the budget field reuses .field-row's layout (see the T2/launch block above). */
+.field-row input[type='number'] { max-width: 120px; }
+
+/* A long title plus a wide "stopped at budget" pill and full tokens/checks can otherwise squeeze
+   .lane-title (the only shrinkable element in .lane-head) down to a few unreadable pixels — give
+   it a floor wide enough for a few characters and an ellipsis. */
+.lane-title { min-width: 44px; }

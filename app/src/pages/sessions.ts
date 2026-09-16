@@ -104,7 +104,7 @@ export async function renderSessions(main: HTMLElement) {
       event.stopPropagation();
       resume.disabled = true;
       try {
-        await api.resumeSession(session);
+        await api.resumeSession(session.id);
         navigate({name: 'active-session', sessionId: session.id});
       } catch (error) {
         showActionError(error);

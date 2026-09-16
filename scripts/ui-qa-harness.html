@@ -88,6 +88,16 @@
             worktreePath: project + '/.fluent-worktrees/fluent-code/lane-' + (index + 1)
           };
         });
+        // Two lanes carry a budget (T4, 2026-09-17 limits-and-budget): one stopped at its cap —
+        // its usage.snapshot costUsd below (index 4, $0.64) sits above this $0.60 budget — and one
+        // still running at 82% of its own ($0.53 of $0.65 ⇒ budgetPercent rounds to 82). The
+        // stopped-by-budget lane keeps status 'running' here on purpose: the workspace only ever
+        // shows a lane that was live at some point while it was open (see workspace.ts's
+        // projectLanes/`retained`), so a lane already stopped on the very first sessions.list
+        // response would never get a tile at all — this fixture is for the tile's pill, not a
+        // simulation of fluentd's stop-then-poll sequence.
+        if (generatedLanes[4]) Object.assign(generatedLanes[4], {stoppedBy: 'budget', budgetUsd: 0.6});
+        if (generatedLanes[5]) Object.assign(generatedLanes[5], {budgetUsd: 0.65});
         if (laneCount !== 3 && generatedLanes.length >= 2) {
           const [first, second] = generatedLanes;
           state.tasks[0].sessionId = first.id;

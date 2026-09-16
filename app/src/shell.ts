@@ -1,6 +1,7 @@
 // The persistent chrome: a top bar with the project and the two global actions, a rail with
 // navigation and the live lanes, and the command palette that reaches everything by keyboard.
 import {activeRemoteSocket} from './api';
+import {renderInboxButton} from './inbox';
 import {openLaunchSheet} from './launch';
 import {prefs} from './prefs';
 import {currentProject} from './project-scope';
@@ -40,13 +41,29 @@ export function renderTopbar(): HTMLElement {
   const target = activeRemoteSocket()
     ? h('span', {class: 'target-pill'}, ['● remote target'])
     : h('span', {class: 'target-pill local'}, ['● local'])
-  const project = currentProject(prefs.workspacePath, store.sessions);
+  // Sessions load asynchronously after this first render, so the label is kept live rather than
+  // computed once — otherwise it reads "no workspace selected" even once the workspace strip
+  // below already knows better (2026-09-17 audit).
+  const projectLabel = h('span', {class: 'topbar-project muted'});
+  const syncProject = () => {
+    const project = currentProject(prefs.workspacePath, store.sessions);
+    projectLabel.textContent = project ? `${workspaceFolderName(project)}  ${project}` : 'no workspace selected';
+  };
+  syncProject();
+  const unsubscribe = store.subscribe(syncProject);
   const palette = button([icon('search'), 'search or run…', kbd('mod K')], () => openPalette(), {class: 'btn ghost topbar-palette', 'aria-label': 'open command palette'});
   const launch = button([icon('plus'), 'agents'], () => startLanes(), {class: 'btn primary small', title: 'start agents (⌘N)'});
-  return h('header', {class: 'topbar'}, [
-    h('span', {class: 'topbar-project muted'}, [project ? `${workspaceFolderName(project)}  ${project}` : 'no workspace selected']),
-    h('div', {class: 'topbar-actions'}, [palette, launch, target])
+  const topbar = h('header', {class: 'topbar'}, [
+    projectLabel,
+    h('div', {class: 'topbar-actions'}, [renderInboxButton(), palette, launch, target])
   ]);
+  // The topbar is rebuilt whole on every route change (main.ts wipes root.innerHTML); release the
+  // subscription once this instance leaves the document rather than leak one per navigation.
+  const observer = new MutationObserver(() => {
+    if (!topbar.isConnected) { unsubscribe(); observer.disconnect(); }
+  });
+  observer.observe(document.body, {childList: true, subtree: true});
+  return topbar;
 }
 
 /** Collapses or expands the navigation rail, remembering the choice. Works whether or not a rail is mounted right now. */
@@ -68,11 +85,11 @@ export function renderRail(): HTMLElement {
   const brand = h('div', {class: 'rail-brand'}, [brandMark, wordmark, toggle]);
 
   // --- Workspace switcher --------------------------------------------------------------------
-  const railProject = currentProject(prefs.workspacePath, store.sessions);
-  const name = railProject ? workspaceFolderName(railProject) : 'choose a workspace';
+  const switchName = h('span', {class: 'rail-switch-name'});
+  const switchPath = h('span', {class: 'rail-switch-path'});
   const switcher = button([
     icon('folder'),
-    h('span', {class: 'rail-switch-text'}, [h('span', {class: 'rail-switch-name'}, [name]), h('span', {class: 'rail-switch-path'}, [railProject || 'pick a folder to begin'])]),
+    h('span', {class: 'rail-switch-text'}, [switchName, switchPath]),
     h('span', {class: 'rail-switch-chevron'}, [icon('chevron')])
   ], async () => {
     const projects = [...new Set(store.sessions.filter(session => isLive(session) && !session.archivedAt).map(session => session.projectDirectory ?? session.directory))]
@@ -90,6 +107,15 @@ export function renderRail(): HTMLElement {
       {label: 'browse for a folder…', onSelect: () => void browse()}
     ]);
   }, {class: 'rail-switch', title: prefs.workspacePath ? `${prefs.workspacePath}\nswitch workspace` : 'choose a workspace folder'});
+  // Sessions load asynchronously after this first render, so the name/path stay live rather than
+  // computed once (same fix as the topbar's project label, 2026-09-17 audit).
+  const syncSwitcher = () => {
+    const railProject = currentProject(prefs.workspacePath, store.sessions);
+    switchName.textContent = railProject ? workspaceFolderName(railProject) : 'choose a workspace';
+    switchPath.textContent = railProject || 'pick a folder to begin';
+  };
+  syncSwitcher();
+  // Re-synced below alongside drawLanes(), by the same store subscription.
 
   // --- Navigation ------------------------------------------------------------------------------
   const groups: Record<'work' | 'control' | 'tools', HTMLElement> = {
@@ -167,8 +193,9 @@ export function renderRail(): HTMLElement {
       if (ordered.length > 8) lanesList.append(h('p', {class: 'rail-empty muted'}, [`+${ordered.length - 8} more`]));
     }
   };
-  drawLanes();
-  const unsubscribe = store.subscribe(drawLanes);
+  const syncRail = () => { syncSwitcher(); drawLanes(); };
+  syncRail();
+  const unsubscribe = store.subscribe(syncRail);
 
   // --- Footer ----------------------------------------------------------------------------------
   const target = activeRemoteSocket() ? 'remote daemon' : 'local daemon';

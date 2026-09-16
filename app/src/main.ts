@@ -32,7 +32,7 @@ matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
   if (prefs.appearance === 'system') applyAppearance();
 });
 
-const attentionTitles = {finished: 'finished', failed: 'stopped with an error', 'needs-input': 'needs you'} as const;
+const attentionTitles = {finished: 'finished', failed: 'stopped with an error', 'needs-input': 'needs you', budget: 'over budget'} as const;
 
 /**
  * A lane that finished, failed, or is waiting on the user reaches them even while Fluent is in the

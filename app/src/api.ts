@@ -40,6 +40,10 @@ export type SessionSummary = {
   archivedAt?: string;
   lead?: LeadGrant;
   parentSessionId?: string;
+  /** Dollar cap the user set for this lane; fluentd stops the lane when its cost reaches it. */
+  budgetUsd?: number;
+  /** Set when fluentd stopped the lane itself rather than the user. */
+  stoppedBy?: 'budget';
 };
 
 export type FallbackGuidance = {
@@ -338,7 +342,7 @@ export const riskyPermissionModes: Partial<Record<ProviderId, string>> = {claude
 export const api = {
   ping: () => daemonRequest<{ok: boolean; pid: number; protocolVersion: number}>('ping'),
   listSessions: (includeArchived = false) => daemonRequest<SessionSummary[]>('sessions.list', includeArchived ? {includeArchived: true} : {}),
-  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number; pool?: LeadPool}; model?: string; permissionMode?: string}) => {
+  createSession: async (params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; lead?: {maxLanes: number; pool?: LeadPool}; model?: string; permissionMode?: string; budgetUsd?: number}) => {
     const approval = params.provider === 'claude'
       ? await issueApproval('project.configure', params.directory, 'configure Claude hooks')
       : undefined;
@@ -348,13 +352,15 @@ export const api = {
       : undefined;
     return daemonRequest<SessionSummary>('sessions.create', {...params, approvalId: approval?.id, leadApprovalId: leadApproval?.id, permissionApprovalId: permissionApproval?.id});
   },
-  /** Starts a stopped session's CLI again on its own conversation, with the consent a new launch needs. */
-  resumeSession: async (session: SessionSummary) => {
+  /** Starts a stopped session's CLI again on its own conversation, with the consent a new launch
+   * needs. A lane stopped by budget resumes with a new cap when one is given. */
+  resumeSession: async (sessionId: string, options: {budgetUsd?: number} = {}) => {
+    const session = await daemonRequest<SessionSnapshot>('sessions.get', {sessionId});
     const approval = session.provider === 'claude' ? await issueApproval('project.configure', session.directory, 'configure Claude hooks') : undefined;
     const permissionApproval = session.permissionMode && riskyPermissionModes[session.provider] === session.permissionMode
       ? await issueApproval('session.permissions', session.directory, `permission ${session.permissionMode}`)
       : undefined;
-    return daemonRequest<SessionSummary>('sessions.resume', {sessionId: session.id, approvalId: approval?.id, permissionApprovalId: permissionApproval?.id});
+    return daemonRequest<SessionSummary>('sessions.resume', {sessionId, approvalId: approval?.id, permissionApprovalId: permissionApproval?.id, budgetUsd: options.budgetUsd});
   },
   getSession: (sessionId: string) => daemonRequest<SessionSnapshot>('sessions.get', {sessionId}),
   getRun: (runId: string) => daemonRequest<Run>('runs.get', {runId}),
@@ -602,9 +608,9 @@ export function onSessionVerification(handler: (event: {sessionId: string; resul
   return listen<{sessionId: string; result: VerificationResult}>('session-verification', event => handler(event.payload));
 }
 
-export type SessionAttention = {sessionId: string; reason: 'finished' | 'failed' | 'needs-input'; summary: SessionSummary; detail?: string};
+export type SessionAttention = {sessionId: string; reason: 'finished' | 'failed' | 'needs-input' | 'budget'; summary: SessionSummary; detail?: string};
 
-/** A lane that finished, failed, or is waiting on the user, pushed once by fluentd. */
+/** A lane that finished, failed, is waiting on the user, or hit its budget, pushed once by fluentd. */
 export async function onSessionAttention(handler: (event: SessionAttention) => void) {
   return listen<SessionAttention>('session-attention', event => handler(event.payload));
 }

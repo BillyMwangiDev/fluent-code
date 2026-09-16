@@ -35,7 +35,7 @@ export function button(label: Child | Child[], onClick: (event: MouseEvent) => v
 }
 
 /** Inline SVG icons, 16px grid, stroke-based so they inherit `currentColor`. */
-export type IconName = 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' | 'panel' | 'panel-left' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh' | 'list' | 'globe' | 'pulse' | 'coin' | 'branch' | 'key' | 'package' | 'pen' | 'eye' | 'swatch';
+export type IconName = 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' | 'panel' | 'panel-left' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh' | 'list' | 'globe' | 'pulse' | 'coin' | 'branch' | 'key' | 'package' | 'pen' | 'eye' | 'swatch' | 'bell';
 
 export function icon(name: IconName): SVGSVGElement {
   const paths: Record<string, string[]> = {
@@ -69,7 +69,8 @@ export function icon(name: IconName): SVGSVGElement {
     package: ['M2.5 5l5.5-3 5.5 3v6l-5.5 3-5.5-3z', 'M2.5 5l5.5 3 5.5-3', 'M8 8v6'],
     pen: ['M3 13l1-4 7-7 3 3-7 7z', 'M10 3l3 3'],
     eye: ['M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z', 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'],
-    swatch: ['M8 14A6 6 0 1 1 8 2c3.3 0 6 2.2 6 5 0 1.4-1.1 2.4-2.5 2.4H10a1.2 1.2 0 0 0-.9 2c.3.3.4.7.4 1.1A1.4 1.4 0 0 1 8 14z', 'M5 8h.01', 'M6.5 5h.01', 'M10 4.5h.01']
+    swatch: ['M8 14A6 6 0 1 1 8 2c3.3 0 6 2.2 6 5 0 1.4-1.1 2.4-2.5 2.4H10a1.2 1.2 0 0 0-.9 2c.3.3.4.7.4 1.1A1.4 1.4 0 0 1 8 14z', 'M5 8h.01', 'M6.5 5h.01', 'M10 4.5h.01'],
+    bell: ['M4.5 11.5V7a3.5 3.5 0 1 1 7 0v4.5l1.2 1.5H3.3z', 'M6.6 13a1.4 1.4 0 0 0 2.8 0']
   };
   const svg = svgEl('svg', {class: `icon icon-${name}`, viewBox: '0 0 16 16', width: '16', height: '16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true'});
   for (const d of paths[name] ?? []) svg.append(svgEl('path', {d}));
@@ -135,6 +136,35 @@ export function askConfirm(options: {title: string; body: string; detail?: strin
     document.body.append(dialog);
     dialog.showModal();
     (options.danger ? cancel : accept).focus();
+  });
+}
+
+/**
+ * Asks for one short value inline. Same rationale as `askConfirm`: wry has no native
+ * `window.prompt`. Resolves the typed value on confirm/Enter, `undefined` on cancel/Escape.
+ */
+export function askPrompt(options: {title: string; body: string; placeholder?: string; defaultValue?: string; confirmLabel?: string; inputType?: string}): Promise<string | undefined> {
+  return new Promise(resolve => {
+    const input = h('input', {type: options.inputType ?? 'text', value: options.defaultValue ?? '', placeholder: options.placeholder ?? '', 'aria-label': options.title}) as HTMLInputElement;
+    const cancel = h('button', {class: 'btn', type: 'button'}, ['cancel']);
+    const accept = h('button', {class: 'btn primary', type: 'button'}, [options.confirmLabel ?? 'ok']);
+    const dialog = h('dialog', {class: 'confirm-dialog', 'aria-label': options.title}, [
+      h('h2', {}, [options.title]),
+      h('p', {}, [options.body]),
+      h('div', {class: 'field'}, [input]),
+      h('div', {class: 'actions'}, [cancel, accept])
+    ]);
+    cancel.addEventListener('click', () => dialog.close('cancel'));
+    accept.addEventListener('click', () => dialog.close('confirm'));
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); dialog.close('confirm'); } });
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      resolve(dialog.returnValue === 'confirm' ? input.value : undefined);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+    input.select();
   });
 }
 

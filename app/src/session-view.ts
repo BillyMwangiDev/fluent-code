@@ -109,7 +109,7 @@ export async function renderActiveSession(main: HTMLElement, sessionId: string, 
     stop.disabled = summary.status !== 'running';
     const resume = button('resume', async () => {
       resume.disabled = true;
-      try { await api.resumeSession(summary); void refresh(); } catch (error) { showActionError(error); resume.disabled = false; }
+      try { await api.resumeSession(summary.id); void refresh(); } catch (error) { showActionError(error); resume.disabled = false; }
     }, {class: 'btn primary'});
     resume.hidden = live || Boolean(summary.archivedAt) || (summary.provider !== 'claude' && summary.provider !== 'codex');
     const more = button([icon('more'), 'actions'], () => openMenu(more, [
