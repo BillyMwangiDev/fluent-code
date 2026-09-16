@@ -26,6 +26,14 @@ an owner-local IPC endpoint: a Unix socket (`$XDG_RUNTIME_DIR/fluent-code.sock`,
 with `FLUENT_SOCKET` (and optionally set `FLUENT_PIPE_NAME` on Windows). There is no other channel
 between them.
 
+Fluent finds CLIs the way your terminal does: the daemon adopts your login shell's `PATH` (plus the
+usual installer directories such as `~/.local/bin` and Homebrew) even when the app was launched from
+Finder or the Dock. A provider that is not installed gets an **install** button in the launch sheet
+and the design workspace; it runs the vendor's own installer (Claude Code, Codex and OpenCode ship
+native installers that need neither Node.js nor Homebrew) only after you have seen and approved the
+exact command, and shows the installer's output if it fails. Gemini CLI and the pen.dev CLI ship
+only through Homebrew or npm, so those need one of the two present first.
+
 First run: the splash screen routes you to onboarding if no provider account is connected yet.
 "Connect via CLI login" opens a real `claude` session in the app so you complete auth through the
 CLI's own flow (Fluent never reimplements login); "API key" saves a credential straight to

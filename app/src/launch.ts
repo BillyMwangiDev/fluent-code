@@ -8,6 +8,7 @@ import {prefs} from './prefs';
 import {store} from './store';
 import {navigate} from './router';
 import {actionErrorText, askConfirm, button, directoryField, h, icon, openSheet, providerLabel, providerShort, segmented, showActionError, showNotice} from './ui';
+import {installableToolFor, offerInstall} from './install';
 
 export type LaunchMode = 'orchestrate' | 'parallel';
 
@@ -126,12 +127,20 @@ type FormOptions = {
   initialMode?: LaunchMode;
   onLaunch: (request: LaunchRequest) => Promise<void> | void;
   onCancel?: () => void;
+  /** After a CLI was installed from the form. By default the form re-probes and redraws itself in place. */
+  onInstalled?: () => void | Promise<void>;
 };
 
 /** The launch form itself, without a container, so the workspace, the sheet, and the New Session
  * page can all mount it. */
 export function launchForm(options: FormOptions): {el: HTMLElement; focus: () => void} {
   const {readiness} = options;
+  const rebuildAfterInstall = async () => {
+    const fresh = await loadReadiness();
+    const next = launchForm({...options, readiness: fresh.readiness, chains: fresh.chains});
+    el.replaceWith(next.el);
+    next.focus();
+  };
   const readyProviders = readiness.filter(provider => provider.ready);
   let mode: LaunchMode = options.initialMode ?? prefs.launchMode;
   const counts: LaunchCounts = defaultCounts(readiness, prefs.launchCounts);
@@ -166,10 +175,9 @@ export function launchForm(options: FormOptions): {el: HTMLElement; focus: () =>
     const chain = options.chains.find(candidate => candidate.provider === provider.id);
     let detail: HTMLElement;
     if (!provider.ready) {
-      const fix = button(provider.blocker === 'not installed' ? 'how to install' : 'connect an API key', () => {
-        if (provider.blocker === 'not installed') {
-          showNotice(`${provider.label} is not on fluentd's PATH. Install its CLI, then reopen this sheet.`);
-        } else navigate({name: 'credentials'});
+      const fix = button(provider.blocker === 'not installed' ? 'install' : 'connect an API key', () => {
+        if (provider.blocker !== 'not installed') { navigate({name: 'credentials'}); return; }
+        void offerInstall(installableToolFor(provider.id), fix, {afterInstall: () => options.onInstalled ? options.onInstalled() : rebuildAfterInstall()});
       }, {class: 'btn link'});
       detail = h('span', {class: 'stepper-detail muted'}, [provider.blocker ?? '', ' · ', fix]);
     } else if (chain && chain.accounts.length > 1) {

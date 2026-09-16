@@ -3,6 +3,7 @@ import {api} from '../api';
 import {navigate, refresh} from '../router';
 import {prefs} from '../prefs';
 import {h, markEl, button, askConfirm, showActionError, showNotice, actionErrorText, relativeTime, formatTokens, formatUsd, formatPercent, bytes, duration, providerLabel, providerColor, modelLinkDefaults, accountLabel, verificationPill, laneReady, quotaLabel, directoryField, pickDirectory, workspaceFolderName, segmented, isLive} from '../ui';
+import {offerInstall} from '../install';
 import {metricCard, sparklineChart, lineChart} from '../charts';
 
 import {currentProject} from '../project-scope';
@@ -39,12 +40,17 @@ export async function renderDesignWorkspace(main: HTMLElement) {
     h('p', {class: 'section-sub'}, ['Local loopback only. OpenDesign keeps control of its agents and credentials; Fluent does not proxy design traffic.'])
   ]));
   const toolRows = designTools.map(tool => {
-    const status = tool.installed ? `connected CLI${tool.version ? ` · ${tool.version}` : ''}` : 'not installed';
+    const status = tool.installed ? `connected CLI${tool.version ? ` · ${tool.version}` : ''}` : tool.desktopApp ? 'desktop app installed · CLI not installed' : 'not installed';
     const row = h('div', {class: 'option-row'}, [
       h('span', {class: tool.installed ? 'label' : 'meta'}, [`● ${tool.label}`]),
       h('span', {class: 'meta'}, [status]),
       h('span', {class: 'section-sub'}, [tool.detail])
     ]);
+    if (!tool.installed) {
+      const install = h('button', {class: 'btn'}, [tool.desktopApp ? 'install CLI' : `install ${tool.id === 'pen' ? 'CLI' : 'OpenDesign CLI'}`]);
+      install.addEventListener('click', () => void offerInstall(tool.id, install, {agent: 'claude', afterInstall: () => refresh()}));
+      row.append(install);
+    }
     if (tool.id === 'open-design' && tool.installed) {
       for (const target of ['claude', 'codex'] as const) {
         const install = h('button', {class: 'btn'}, [`install MCP for ${target}`]);

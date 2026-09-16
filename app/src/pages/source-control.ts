@@ -50,26 +50,38 @@ function issueRow(issue: AssignedIssue): HTMLElement {
 function pullRequestRow(pr: OpenPullRequest): HTMLElement {
   const link = h('a', {href: pr.url, target: '_blank', rel: 'noreferrer'}, [pr.title]);
   return h('div', {class: 'option-row'}, [
-    h('div', {}, [h('div', {class: 'label'}, [link]), h('div', {class: 'meta'}, [`${pr.repo} #${pr.number}`])]),
+    h('div', {}, [h('div', {class: 'label'}, [link]), h('div', {class: 'meta'}, [`${pr.repo} #${pr.number}${pr.authored ? '' : ' · you are a reviewer, assignee, or mentioned'}`])]),
     pr.isDraft ? h('span', {class: 'pill'}, ['draft']) : h('span', {class: 'pill status-running'}, ['open'])
   ]);
 }
 
+/** Set by the refresh button for the render it triggers; every other render reuses the daemon's cached answers. */
+let forceFresh = false;
+
 export async function renderSourceControl(main: HTMLElement) {
+  const refreshButton = h('button', {class: 'btn', type: 'button', title: 'ask GitHub again now; otherwise answers are reused for a minute'}, ['refresh']);
+  refreshButton.addEventListener('click', () => { forceFresh = true; refresh(); });
   main.append(
-    h('h1', {class: 'section-title'}, [markEl(), 'source control']),
-    h('p', {class: 'section-sub'}, ["GitHub status via gh — merge state for what you're working on, issues assigned to you, and your open pull requests across every repo"])
+    h('div', {class: 'toolbar'}, [
+      h('div', {}, [
+        h('h1', {class: 'section-title'}, [markEl(), 'source control']),
+        h('p', {class: 'section-sub'}, ["GitHub status via gh — merge state for what you're working on, issues assigned to you, and every open pull request you are part of, across every repo"])
+      ]),
+      refreshButton
+    ])
   );
   const container = h('div', {});
   main.append(container);
   container.append(h('div', {class: 'empty-state'}, ['checking GitHub…']));
+  const fresh = forceFresh;
+  forceFresh = false;
 
   const sessions = await api.listSessions().catch(() => [] as SessionSummary[]);
   const directories = [...new Set(sessions.filter(session => session.status === 'running' || session.status === 'starting').map(session => session.directory))];
   const [statuses, issuesResult, pullRequestsResult] = await Promise.all([
     Promise.all(directories.map(async directory => ({directory, status: await api.repoStatus(directory).catch((error: unknown): RepoStatus => ({connected: false, error: error instanceof Error ? error.message : String(error)}))}))),
-    api.assignedIssues(),
-    api.myOpenPullRequests()
+    api.assignedIssues({fresh}),
+    api.myOpenPullRequests({fresh})
   ]);
 
   container.innerHTML = '';
@@ -95,7 +107,7 @@ export async function renderSourceControl(main: HTMLElement) {
 
   container.append(
     h('div', {class: 'card'}, [
-      h('h3', {}, ['your open pull requests']),
+      h('h3', {}, ['open pull requests you are part of']),
       ...(Array.isArray(pullRequestsResult)
         ? pullRequestsResult.length
           ? pullRequestsResult.map(pr => pullRequestRow(pr))

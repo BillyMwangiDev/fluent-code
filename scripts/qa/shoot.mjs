@@ -61,6 +61,12 @@ const scenarios = {
   async 'credentials'() { const p = await open('?lanes=6'); await nav(p, 'credentials'); await shot(p, 'credentials'); await p.close(); },
   async 'catalog'() { const p = await open('?lanes=6'); await nav(p, 'catalog'); await shot(p, 'catalog'); await p.close(); },
   async 'themes'() { const p = await open('?lanes=6'); await nav(p, 'themes'); await shot(p, 'themes'); await p.close(); },
+  async 'rail-collapsed'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+b'); await p.waitForTimeout(500); await shot(p, 'rail-collapsed'); await p.close(); },
+  async 'rail-collapsed-page'() { const p = await open('?lanes=6'); await p.keyboard.press('Meta+b'); await p.waitForTimeout(300); await nav(p, 'sessions'); await shot(p, 'rail-collapsed-page'); await p.close(); },
+  async 'preview'() { const p = await open('?lanes=6'); await nav(p, 'preview'); await shot(p, 'preview'); await p.close(); },
+  async 'design'() { const p = await open('?lanes=6'); await nav(p, 'design'); await shot(p, 'design'); await p.close(); },
+  async 'source-control'() { const p = await open('?lanes=6'); await nav(p, 'source control'); await shot(p, 'source-control'); await p.close(); },
+  async 'remote'() { const p = await open('?lanes=6'); await nav(p, 'remote'); await shot(p, 'remote'); await p.close(); },
   async 'light'() { const p = await open('?lanes=6'); await p.evaluate(() => { localStorage.setItem('fluent.appearance', 'light'); }); await p.reload(); await p.waitForSelector('.splash .prompt'); await p.keyboard.press('Enter'); await p.waitForSelector('.rail'); await p.waitForTimeout(800); await shot(p, 'light'); await p.close(); },
   async 'narrow'() { const p = await open('?lanes=6', {viewport: {width: 1180, height: 760}}); await shot(p, 'narrow'); await p.close(); },
   async 'onboarding'() { const p = await open('?lanes=6&onboarding'); await shot(p, 'onboarding'); await p.close(); }

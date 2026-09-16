@@ -21,6 +21,30 @@ export async function renderSessions(main: HTMLElement) {
 
   const newSessionButton = h('button', {class: 'btn primary'}, ['+ new session']);
   newSessionButton.addEventListener('click', () => navigate({name: 'new-session'}));
+  // Bulk actions for the view you are looking at: archive everything finished, or delete every
+  // archived record. Each is one confirmation, then the same per-session calls the row buttons use.
+  const archivable = allSessions.filter(session => !session.archivedAt && !isLive(session));
+  const archiveAll = h('button', {class: 'btn', type: 'button'}, [`archive all finished · ${archivable.length}`]);
+  archiveAll.hidden = sessionView === 'archived' || archivable.length === 0;
+  archiveAll.addEventListener('click', async () => {
+    if (!(await askConfirm({title: 'archive finished sessions', body: `Archive ${archivable.length} finished session${archivable.length === 1 ? '' : 's'}? Running lanes are left alone. Archived records stay local, with their worktrees and project files, until you delete them.`, confirmLabel: `archive ${archivable.length}`}))) return;
+    archiveAll.disabled = true;
+    const results = await Promise.allSettled(archivable.map(session => api.archiveSession(session.id)));
+    const failed = results.filter(result => result.status === 'rejected').length;
+    if (failed) showActionError(new Error(`${failed} of ${archivable.length} could not be archived.`));
+    void refresh();
+  });
+  const archived = allSessions.filter(session => session.archivedAt);
+  const deleteAll = h('button', {class: 'btn danger', type: 'button'}, [`delete all archived · ${archived.length}`]);
+  deleteAll.hidden = sessionView !== 'archived' || archived.length === 0;
+  deleteAll.addEventListener('click', async () => {
+    if (!(await askConfirm({title: 'delete archived session records', body: `Delete the local records of ${archived.length} archived session${archived.length === 1 ? '' : 's'}? Project files and any isolated worktrees stay on disk.`, confirmLabel: `delete ${archived.length}`, danger: true}))) return;
+    deleteAll.disabled = true;
+    const results = await Promise.allSettled(archived.map(session => api.deleteSession(session.id)));
+    const failed = results.filter(result => result.status === 'rejected').length;
+    if (failed) showActionError(new Error(`${failed} of ${archived.length} could not be deleted.`));
+    void refresh();
+  });
   const viewButtons = (['all', 'active', 'archived'] as const).map(view => {
     const count = allSessions.filter(session => sessionMatches(session, view, '')).length;
     const button = h('button', {class: `btn${sessionView === view ? ' primary' : ''}`, type: 'button', 'aria-pressed': sessionView === view ? 'true' : 'false'}, [`${view} · ${count}`]);
@@ -31,7 +55,7 @@ export async function renderSessions(main: HTMLElement) {
   main.append(
     h('div', {class: 'toolbar'}, [
       h('div', {}, [h('h1', {class: 'section-title'}, [markEl(), sessionView === 'archived' ? 'archived sessions' : 'sessions']), h('p', {class: 'section-sub'}, [sessionView === 'archived' ? 'Archived session records stay local until you restore or delete them.' : 'Archive finished sessions to clear this list without deleting their worktree or project files.'])]),
-      h('div', {class: 'actions'}, [newSessionButton])
+      h('div', {class: 'actions'}, [archiveAll, deleteAll, newSessionButton])
     ]),
     h('div', {class: 'session-filters'}, [h('div', {class: 'segmented', role: 'group', 'aria-label': 'Session views'}, viewButtons), search])
   );

@@ -35,7 +35,9 @@ export function button(label: Child | Child[], onClick: (event: MouseEvent) => v
 }
 
 /** Inline SVG icons, 16px grid, stroke-based so they inherit `currentColor`. */
-export function icon(name: 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' | 'panel' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh'): SVGSVGElement {
+export type IconName = 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' | 'panel' | 'panel-left' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh' | 'list' | 'globe' | 'pulse' | 'coin' | 'branch' | 'key' | 'package' | 'pen' | 'eye' | 'swatch';
+
+export function icon(name: IconName): SVGSVGElement {
   const paths: Record<string, string[]> = {
     plus: ['M8 3v10', 'M3 8h10'],
     minus: ['M3 8h10'],
@@ -56,7 +58,18 @@ export function icon(name: 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' 
     folder: ['M2 4.5h4l1.5 1.5H14v7.5H2z'],
     lead: ['M8 2.5l2 4 4 .5-3 3 .8 4.2L8 12l-3.8 2.2.8-4.2-3-3 4-.5z'],
     'arrow-right': ['M3 8h10', 'M9 4l4 4-4 4'],
-    refresh: ['M13 8a5 5 0 1 1-1.5-3.6', 'M13 2.5v3h-3']
+    refresh: ['M13 8a5 5 0 1 1-1.5-3.6', 'M13 2.5v3h-3'],
+    'panel-left': ['M2.5 2.5h11v11h-11z', 'M6 2.5v11'],
+    list: ['M3 4.5h10', 'M3 8h10', 'M3 11.5h10'],
+    globe: ['M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12z', 'M2 8h12', 'M8 2c2.2 2 2.2 10 0 12', 'M8 2c-2.2 2-2.2 10 0 12'],
+    pulse: ['M2 8.5h2.6l1.6-4.5 3.2 8 1.6-3.5H14'],
+    coin: ['M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12z', 'M10 6.3c-.4-.7-1.1-1.1-2-1.1-1.2 0-2.1.6-2.1 1.4s.9 1.2 2.1 1.4c1.2.2 2.1.6 2.1 1.4s-.9 1.4-2.1 1.4c-.9 0-1.6-.4-2-1.1', 'M8 4.2v1', 'M8 10.8v1'],
+    branch: ['M5 3v6.5', 'M5 13a1.75 1.75 0 1 0 0-3.5A1.75 1.75 0 0 0 5 13z', 'M11 6.5A1.75 1.75 0 1 0 11 3a1.75 1.75 0 0 0 0 3.5z', 'M11 6.5c0 3.2-6 1.8-6 4.5'],
+    key: ['M9.5 9.8a3.4 3.4 0 1 0-3.3-2.6L2 11.4V14h2.6l.8-.8v-1.4H7l.8-.8v-1.2z', 'M10.6 5.4h.01'],
+    package: ['M2.5 5l5.5-3 5.5 3v6l-5.5 3-5.5-3z', 'M2.5 5l5.5 3 5.5-3', 'M8 8v6'],
+    pen: ['M3 13l1-4 7-7 3 3-7 7z', 'M10 3l3 3'],
+    eye: ['M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z', 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'],
+    swatch: ['M8 14A6 6 0 1 1 8 2c3.3 0 6 2.2 6 5 0 1.4-1.1 2.4-2.5 2.4H10a1.2 1.2 0 0 0-.9 2c.3.3.4.7.4 1.1A1.4 1.4 0 0 1 8 14z', 'M5 8h.01', 'M6.5 5h.01', 'M10 4.5h.01']
   };
   const svg = svgEl('svg', {class: `icon icon-${name}`, viewBox: '0 0 16 16', width: '16', height: '16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true'});
   for (const d of paths[name] ?? []) svg.append(svgEl('path', {d}));

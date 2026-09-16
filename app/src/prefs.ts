@@ -18,7 +18,8 @@ const keys = {
   launchOptions: 'fluent.launch.options.v1',
   launchMode: 'fluent.launch.mode.v1',
   leadProvider: 'fluent.launch.lead.v1',
-  previewUrl: 'fluent.preview-url'
+  previewUrl: 'fluent.preview-url',
+  rail: 'fluent.rail.v1'
 } as const;
 
 function read(key: string): string | null {
@@ -47,6 +48,8 @@ export const prefs = {
   set workspacePath(value: string) { write(keys.workspacePath, value); },
   get explorerScope(): ExplorerScope { const saved = read(keys.explorerScope); return isExplorerScope(saved) ? saved : 'overview'; },
   set explorerScope(value: ExplorerScope) { write(keys.explorerScope, value); },
+  get railCollapsed(): boolean { return read(keys.rail) === 'collapsed'; },
+  set railCollapsed(value: boolean) { write(keys.rail, value ? 'collapsed' : 'expanded'); },
   get sidebarOpen(): boolean { return read(keys.sidebar) !== 'closed'; },
   set sidebarOpen(value: boolean) { write(keys.sidebar, value ? 'open' : 'closed'); },
   get laneLayout(): LaneLayout { const saved = read(keys.laneLayout); return saved === 'focus' || saved === 'rows' ? saved : 'grid'; },

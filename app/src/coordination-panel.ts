@@ -51,7 +51,14 @@ export function coordinationPanel(options: PanelOptions): CoordinationPanel {
     body
   ]);
   boardTab.addEventListener('click', () => { tab = 'board'; draw(); });
-  setupTab.addEventListener('click', () => { tab = 'setup'; void loadSetup().then(draw); });
+  // Switch first, fetch second: the setup data comes from provider CLIs and can take seconds, and a
+  // tab that does nothing until then reads as broken.
+  let setupLoaded = false;
+  setupTab.addEventListener('click', () => {
+    tab = 'setup';
+    draw();
+    if (!setupLoaded) void loadSetup().then(() => { setupLoaded = true; if (tab === 'setup') draw(); });
+  });
 
   const laneLabel = (sessionId: string) => {
     const lane = store.get(sessionId);
@@ -461,7 +468,10 @@ export function coordinationPanel(options: PanelOptions): CoordinationPanel {
     setupTab.classList.toggle('active', tab === 'setup');
     body.innerHTML = '';
     if (tab === 'board') body.append(tasksSection(), claimsSection(), handoffsSection(), messagesSection(), memorySection(), verificationSection(), activitySection());
-    else body.append(...setupView());
+    else {
+      body.append(...setupView());
+      if (!setupLoaded) body.append(h('p', {class: 'coord-loading muted'}, ['checking skills and evals…']));
+    }
   }
 
   draw();

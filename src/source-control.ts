@@ -1,4 +1,5 @@
 import {execFile} from 'node:child_process';
+import {KeyedMemo, Memo} from './swr-cache.js';
 import {promisify} from 'node:util';
 
 const run = promisify(execFile);
@@ -48,17 +49,17 @@ export type OpenPullRequest = {
   url: string;
   repo: string;
   isDraft: boolean;
+  /** Opened by the signed-in user; otherwise they are a reviewer, assignee, or mentioned. */
+  authored: boolean;
 };
 
-let ghAvailableCache: {value: boolean; checkedAt: number} | undefined;
+// `gh auth status` and `gh api user` both round-trip to GitHub; neither answer changes within a
+// screen visit, and the three lists below are asked for together on every visit.
+const ghAvailableMemo = new Memo(60_000, () => run('gh', ['auth', 'status'], {timeout: 5_000}).then(() => true).catch(() => false));
+const viewerMemo = new Memo(60 * 60_000, () => run('gh', ['api', 'user', '--jq', '.login'], {timeout: 8_000}).then(result => result.stdout.trim()).catch(() => ''));
 
-async function ghAvailable(): Promise<boolean> {
-  if (ghAvailableCache && Date.now() - ghAvailableCache.checkedAt < 60_000) return ghAvailableCache.value;
-  const value = await run('gh', ['auth', 'status'], {timeout: 3_000})
-    .then(() => true)
-    .catch(() => false);
-  ghAvailableCache = {value, checkedAt: Date.now()};
-  return value;
+function ghAvailable(): Promise<boolean> {
+  return ghAvailableMemo.get();
 }
 
 function checksStatusFrom(rollup: unknown): PullRequestChecksStatus {
@@ -76,7 +77,11 @@ function parseGitHubRemote(remoteUrl: string): {owner: string; repo: string} | u
 
 /** Status for one project directory — the "what am I working on" view for a single Fluent
  * session. Never throws: an unconnected or non-GitHub repo is a normal, advisory result. */
-export async function repoStatus(directory: string): Promise<RepoStatus> {
+export function repoStatus(directory: string, options: {fresh?: boolean} = {}): Promise<RepoStatus> {
+  return repoStatusMemo.get(directory, options);
+}
+
+async function loadRepoStatus(directory: string): Promise<RepoStatus> {
   let remoteUrl: string;
   try {
     remoteUrl = (await run('git', ['remote', 'get-url', 'origin'], {cwd: directory, timeout: 3_000})).stdout;
@@ -117,10 +122,14 @@ export async function repoStatus(directory: string): Promise<RepoStatus> {
 
 /** Issues assigned to the authenticated GitHub user, across every repo they can see — GitHub's
  * own `/issues?filter=assigned` endpoint, not scoped to the current project. */
-export async function assignedIssues(): Promise<AssignedIssue[] | {error: string}> {
+export function assignedIssues(options: {fresh?: boolean} = {}): Promise<AssignedIssue[] | {error: string}> {
+  return assignedIssuesMemo.get(options);
+}
+
+async function loadAssignedIssues(): Promise<AssignedIssue[] | {error: string}> {
   if (!(await ghAvailable())) return {error: 'gh CLI is not installed or not authenticated — run `gh auth login`'};
   try {
-    const {stdout} = await run('gh', ['api', '/issues?filter=assigned&state=open&per_page=30'], {timeout: 8_000});
+    const {stdout} = await run('gh', ['api', '/issues?filter=assigned&state=open&per_page=100&sort=updated'], {timeout: 10_000});
     const items = JSON.parse(stdout) as Array<{number: number; title: string; html_url: string; repository?: {full_name: string}; pull_request?: unknown}>;
     return items.filter(item => !item.pull_request).map(item => ({number: item.number, title: item.title, url: item.html_url, repo: item.repository?.full_name ?? ''}));
   } catch (error) {
@@ -128,18 +137,31 @@ export async function assignedIssues(): Promise<AssignedIssue[] | {error: string
   }
 }
 
-/** Open PRs authored by the authenticated user across every repo — the cross-project half of
- * "what am I working on," complementing per-session repoStatus above. */
-export async function myOpenPullRequests(): Promise<OpenPullRequest[] | {error: string}> {
+/** Every open PR the authenticated user is part of — authored, assigned, review-requested or
+ * mentioned — across every repo, newest activity first: the cross-project half of "what am I
+ * working on," complementing per-session repoStatus above. */
+export function myOpenPullRequests(options: {fresh?: boolean} = {}): Promise<OpenPullRequest[] | {error: string}> {
+  return pullRequestsMemo.get(options);
+}
+
+async function loadMyOpenPullRequests(): Promise<OpenPullRequest[] | {error: string}> {
   if (!(await ghAvailable())) return {error: 'gh CLI is not installed or not authenticated — run `gh auth login`'};
   try {
-    const {stdout} = await run('gh', ['api', '-X', 'GET', 'search/issues', '-f', 'q=is:pr is:open author:@me', '--jq', '.items'], {timeout: 8_000});
-    const items = JSON.parse(stdout) as Array<{number: number; title: string; html_url: string; repository_url: string; draft?: boolean}>;
+    const [{stdout}, viewer] = await Promise.all([
+      run('gh', ['api', '-X', 'GET', 'search/issues', '-f', 'q=is:pr is:open involves:@me', '-f', 'per_page=100', '-f', 'sort=updated', '--jq', '.items'], {timeout: 10_000}),
+      viewerMemo.get()
+    ]);
+    const items = JSON.parse(stdout) as Array<{number: number; title: string; html_url: string; repository_url: string; draft?: boolean; user?: {login?: string}}>;
     return items.map(item => {
       const repoMatch = item.repository_url.match(/repos\/([^/]+\/[^/]+)$/);
-      return {number: item.number, title: item.title, url: item.html_url, repo: repoMatch ? repoMatch[1]! : item.repository_url, isDraft: Boolean(item.draft)};
+      return {number: item.number, title: item.title, url: item.html_url, repo: repoMatch ? repoMatch[1]! : item.repository_url, isDraft: Boolean(item.draft), authored: Boolean(viewer) && item.user?.login === viewer};
     });
   } catch (error) {
     return {error: error instanceof Error ? error.message : 'failed to reach GitHub'};
   }
 }
+
+const listTtlMs = 60_000;
+const repoStatusMemo = new KeyedMemo(45_000, loadRepoStatus);
+const assignedIssuesMemo = new Memo(listTtlMs, loadAssignedIssues);
+const pullRequestsMemo = new Memo(listTtlMs, loadMyOpenPullRequests);

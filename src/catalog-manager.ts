@@ -1,4 +1,5 @@
 import {execFile} from 'node:child_process';
+import {Memo} from './swr-cache.js';
 import {createHash} from 'node:crypto';
 import {promisify} from 'node:util';
 import {readFile} from 'node:fs/promises';
@@ -268,7 +269,7 @@ export async function codexMarketplaceList(): Promise<MarketplaceEntry[]> {
   });
 }
 
-export async function allMarketplaces(): Promise<MarketplaceEntry[]> {
+async function loadAllMarketplaces(): Promise<MarketplaceEntry[]> {
   const [claude, codex] = await Promise.all([claudeMarketplaceList(), codexMarketplaceList()]);
   return [...claude, ...codex].sort((left, right) => left.target.localeCompare(right.target) || left.name.localeCompare(right.name));
 }
@@ -280,7 +281,9 @@ export async function allMarketplaces(): Promise<MarketplaceEntry[]> {
 export async function codexPlugins(): Promise<CatalogPlugin[]> {
   try {
     const [{stdout}, marketplaces] = await Promise.all([
-      run('codex', ['plugin', 'list', '--json'], {timeout: 15_000}),
+      // Codex asks its remote marketplaces here and has been seen to stall for 20s+; the catalog
+      // screen shows the other providers' plugins rather than wait longer than this for it.
+      run('codex', ['plugin', 'list', '--json'], {timeout: 8_000}),
       codexMarketplaces()
     ]);
     const trustByMarketplace = new Map(marketplaces.map(entry => [entry.name, codexMarketplaceTrust(entry)]));
@@ -307,7 +310,7 @@ export async function codexPlugins(): Promise<CatalogPlugin[]> {
   }
 }
 
-export async function allPlugins(): Promise<CatalogPlugin[]> {
+async function loadAllPlugins(): Promise<CatalogPlugin[]> {
   const [claude, codex] = await Promise.all([claudePlugins(), codexPlugins()]);
   return [...claude, ...codex];
 }
@@ -487,7 +490,7 @@ async function geminiMcpServers(): Promise<McpServerEntry[]> {
   }
 }
 
-export async function mcpServers(): Promise<McpServerEntry[]> {
+async function loadMcpServers(): Promise<McpServerEntry[]> {
   const [claude, codex, gemini] = await Promise.all([claudeMcpServers(), codexMcpServers(), geminiMcpServers()]);
   return [...claude, ...codex, ...gemini];
 }
@@ -560,4 +563,34 @@ export async function addMcpServerToTargets(targets: readonly ProviderId[], conf
   const unique = [...new Set(targets)];
   if (unique.length === 0) throw new Error('Choose at least one agent runtime');
   return Promise.all(unique.map(target => addMcpServer(target, config)));
+}
+
+// --- Cached reads --------------------------------------------------------------------------------
+// Each listing spawns two or three provider CLIs (a Claude Code start alone is about a second), and
+// the catalog screen asks for all three at once on every visit. The lists change only when something
+// is installed or added — through Fluent, which invalidates below, or outside it, which the TTL and
+// the screen's refresh catch.
+
+const catalogTtlMs = 5 * 60_000;
+const pluginsMemo = new Memo(catalogTtlMs, loadAllPlugins);
+const marketplacesMemo = new Memo(catalogTtlMs, loadAllMarketplaces);
+const mcpServersMemo = new Memo(catalogTtlMs, loadMcpServers);
+
+export function allPlugins(options: {fresh?: boolean} = {}): Promise<CatalogPlugin[]> {
+  return pluginsMemo.get(options);
+}
+
+export function allMarketplaces(options: {fresh?: boolean} = {}): Promise<MarketplaceEntry[]> {
+  return marketplacesMemo.get(options);
+}
+
+export function mcpServers(options: {fresh?: boolean} = {}): Promise<McpServerEntry[]> {
+  return mcpServersMemo.get(options);
+}
+
+/** After an install or an add, the next read reflects it. */
+export function invalidateCatalog() {
+  pluginsMemo.invalidate();
+  marketplacesMemo.invalidate();
+  mcpServersMemo.invalidate();
 }

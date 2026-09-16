@@ -72,7 +72,7 @@ async function render(current: Route) {
     root.append(main);
     page = main;
   } else {
-    root.append(renderTopbar(), h('div', {class: 'app-shell'}, [renderRail(), main]));
+    root.append(renderTopbar(), h('div', {class: `app-shell${prefs.railCollapsed ? ' rail-collapsed' : ''}`}, [renderRail(), main]));
     if (current.name === 'orchestration' || current.name === 'active-session') {
       main.classList.add('main-plane');
       page = main;

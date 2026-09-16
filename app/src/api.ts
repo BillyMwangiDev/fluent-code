@@ -152,7 +152,7 @@ export type PullRequestChecksStatus = 'pending' | 'passing' | 'failing' | 'unkno
 export type PullRequestStatus = {number: number; title: string; url: string; state: 'OPEN' | 'CLOSED' | 'MERGED'; isDraft: boolean; mergedAt: string | null; checksStatus: PullRequestChecksStatus};
 export type RepoStatus = {connected: boolean; owner?: string; repo?: string; branch?: string; dirty?: boolean; pullRequest?: PullRequestStatus; error?: string};
 export type AssignedIssue = {number: number; title: string; url: string; repo: string};
-export type OpenPullRequest = {number: number; title: string; url: string; repo: string; isDraft: boolean};
+export type OpenPullRequest = {number: number; title: string; url: string; repo: string; isDraft: boolean; authored: boolean};
 
 // Mirrors src/catalog-manager.ts.
 export type ExtensionTrustLevel = 'provider-bundled' | 'provider-owned' | 'local' | 'third-party' | 'unverified';
@@ -268,7 +268,13 @@ export type ClaimResult = {granted: boolean; state: CoordinationState; conflicts
 export type RemoteProfile = {id: string; name: string; host: string; port: number; remoteSocket: string; localSocket: string; autoReconnect: boolean; status: 'disconnected' | 'connecting' | 'reconnecting' | 'connected' | 'failed'; error?: string};
 export type OpenDesignProfile = {url: string; enabled: boolean};
 export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?: number; error?: string};
-export type DesignTool = {id: 'pen' | 'open-design'; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
+export type DesignTool = {id: 'pen' | 'open-design'; label: string; installed: boolean; executable?: string; version?: string; desktopApp?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
+export type InstallableTool = 'claude' | 'codex' | 'gemini' | 'opencode' | 'gh' | 'open-design' | 'pen';
+export type InstallAgent = 'claude' | 'codex';
+export type InstallPlan =
+  | {tool: InstallableTool; label: string; ready: true; command: string; summary: string; docsUrl: string; alsoConfigures?: string}
+  | {tool: InstallableTool; label: string; ready: false; unavailable: string; docsUrl: string};
+export type InstallResult = {tool: InstallableTool; ok: boolean; exitCode: number | null; output: string; command: string; durationMs: number};
 
 export type CredentialAccount = {
   id: string;
@@ -396,14 +402,14 @@ export const api = {
   resourceHistory: (windowMs: number) => daemonRequest<ResourceSnapshot[]>('resources.history', {windowMs}),
   spendSummary: (rangeDays?: number) => daemonRequest<SpendSummary>('spend.summary', {rangeDays}),
   repoStatus: (directory: string) => daemonRequest<RepoStatus>('sourceControl.repoStatus', {directory}),
-  assignedIssues: () => daemonRequest<AssignedIssue[] | {error: string}>('sourceControl.assignedIssues'),
-  myOpenPullRequests: () => daemonRequest<OpenPullRequest[] | {error: string}>('sourceControl.myOpenPullRequests'),
-  catalogPlugins: () => daemonRequest<CatalogPlugin[]>('catalog.plugins'),
+  assignedIssues: (options: {fresh?: boolean} = {}) => daemonRequest<AssignedIssue[] | {error: string}>('sourceControl.assignedIssues', options),
+  myOpenPullRequests: (options: {fresh?: boolean} = {}) => daemonRequest<OpenPullRequest[] | {error: string}>('sourceControl.myOpenPullRequests', options),
+  catalogPlugins: (options: {fresh?: boolean} = {}) => daemonRequest<CatalogPlugin[]>('catalog.plugins', options),
   installCatalogPlugin: async (target: ProviderId, pluginId: string) => {
     const approval = await issueApproval('extension.install', `${target}:${pluginId}`, `plugin install ${pluginId}`);
     return daemonRequest<CatalogActionResult>('catalog.installPlugin', {target, pluginId, approvalId: approval.id});
   },
-  catalogMarketplaces: () => daemonRequest<MarketplaceEntry[]>('catalog.marketplaces'),
+  catalogMarketplaces: (options: {fresh?: boolean} = {}) => daemonRequest<MarketplaceEntry[]>('catalog.marketplaces', options),
   addCatalogMarketplace: async (target: ProviderId, source: string, trustSource = false) => {
     const policyApproval = trustSource ? await issueApproval('extension.policy', `marketplace:${source}`, 'trust marketplace source') : undefined;
     const approval = await issueApproval('extension.install', `${target}:${source}`, `marketplace add ${source}`);
@@ -422,7 +428,7 @@ export const api = {
     const approval = await issueApproval('extension.policy', `extension-source-policy:${sourceId}`, `remove ${sourceId}`);
     return daemonRequest<ExtensionSourcePolicyState>('catalog.sourcePolicy.remove', {sourceId, approvalId: approval.id});
   },
-  catalogMcpServers: () => daemonRequest<McpServerEntry[]>('catalog.mcpServers'),
+  catalogMcpServers: (options: {fresh?: boolean} = {}) => daemonRequest<McpServerEntry[]>('catalog.mcpServers', options),
   addCatalogMcpServer: async (targets: ProviderId[], config: McpServerConfig, trustSource = false) => {
     const target = `mcp:${[...new Set(targets)].sort().join(',')}:${config.name}`;
     const command = config.transport === 'stdio' ? [config.command, ...(config.args ?? [])].filter(Boolean).join(' ') : config.url;
@@ -432,7 +438,13 @@ export const api = {
   },
   setPriceOverride: (model: string, override: PriceOverride) => daemonRequest<{ok: boolean}>('spend.setPriceOverride', {model, override}),
   clearPriceOverride: (model: string) => daemonRequest<{ok: boolean}>('spend.clearPriceOverride', {model}),
-  listProviders: () => daemonRequest<ProviderHealth[]>('providers.list'),
+  listProviders: (options: {fresh?: boolean} = {}) => daemonRequest<ProviderHealth[]>('providers.list', options),
+  installPlan: (tool: InstallableTool, agent?: InstallAgent) => daemonRequest<InstallPlan>('tools.installPlan', {tool, agent}),
+  /** Runs the vendor's installer for `tool` after the approval the caller has shown the user. */
+  installTool: async (plan: Extract<InstallPlan, {ready: true}>, agent?: InstallAgent) => {
+    const approval = await issueApproval('extension.install', `tool:${plan.tool}`, plan.command);
+    return daemonRequest<InstallResult>('tools.install', {tool: plan.tool, agent, approvalId: approval.id});
+  },
   coordination: (project: string) => daemonRequest<CoordinationState>('coordination.get', {project}),
   setMasterBrief: (project: string, brief: string) => daemonRequest<CoordinationState>('coordination.brief.set', {project, brief}),
   createTask: (project: string, task: {title: string; description?: string; role?: string; provider?: ProviderId; source?: 'manual' | 'spec' | 'planner'; sessionId?: string; designHandoff?: DesignHandoffSpec; dependsOn?: string[]}) => daemonRequest<CoordinationState>('coordination.task.create', {project, ...task}),
@@ -443,7 +455,7 @@ export const api = {
   releaseClaim: (project: string, path: string, sessionId: string) => daemonRequest<CoordinationState>('coordination.claim.release', {project, path, sessionId}),
   conflicts: (project: string) => daemonRequest<RankedConflict[]>('coordination.conflicts', {project}),
   messages: (project: string) => daemonRequest<LaneMessage[]>('coordination.messages', {project}),
-  skillStatus: () => daemonRequest<SkillInstallState[]>('skills.status'),
+  skillStatus: (options: {fresh?: boolean} = {}) => daemonRequest<SkillInstallState[]>('skills.status', options),
   installSkill: async () => {
     const approval = await issueApproval('extension.install', 'fluent-collab', 'install collaboration skill');
     return daemonRequest<SkillInstallState[]>('skills.install', {approvalId: approval.id});
@@ -481,7 +493,7 @@ export const api = {
   openDesignStatus: () => localDaemonRequest<OpenDesignStatus>('openDesign.status'),
   /** Opens one exact user-enabled loopback origin in its own native guarded webview. */
   openEmbeddedContent: (kind: 'preview' | 'open-design', url: string) => invoke<string>('open_embedded_content', {kind, origin: url}),
-  listDesignTools: () => localDaemonRequest<DesignTool[]>('designTools.list'),
+  listDesignTools: (options: {fresh?: boolean} = {}) => localDaemonRequest<DesignTool[]>('designTools.list', options),
   installOpenDesignMcp: async (target: 'claude' | 'codex') => {
     const approval = await issueApproval('extension.install', `open-design:${target}`, 'install OpenDesign MCP', undefined, true);
     return localDaemonRequest<{target: string; output: string}>('designTools.installOpenDesignMcp', {target, approvalId: approval.id});

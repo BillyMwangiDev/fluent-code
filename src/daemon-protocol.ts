@@ -367,7 +367,8 @@ export type OpenDesignStatus = OpenDesignProfile & {reachable: boolean; status?:
 export type DesignToolId = 'pen' | 'open-design';
 /** OpenDesign's native installer documents only these two host CLIs. */
 export type McpTarget = Extract<ProviderId, 'claude' | 'codex'>;
-export type DesignTool = {id: DesignToolId; label: string; installed: boolean; executable?: string; version?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
+export type DesignTool = {id: DesignToolId; label: string; installed: boolean; executable?: string; version?: string; /** The desktop app's install path when it is present, whether or not its CLI is. */ desktopApp?: string; mcp: 'desktop-settings' | 'install-command'; detail: string};
+export type {InstallableTool, InstallAgent, InstallPlan, InstallResult} from './installer.js';
 
 /** What a lead lane asks fluentd to do with the lanes it started. */
 export type LaneOperation =
@@ -415,7 +416,7 @@ export type RpcRequest =
   | {id: string; method: 'agent.send'; params: {cwd: string; sessionId?: string; to: string; body: string}}
   | {id: string; method: 'agent.inbox'; params: {cwd: string; sessionId?: string; peek?: boolean}}
   | {id: string; method: 'agent.lane'; params: {cwd: string; sessionId?: string} & LaneOperation}
-  | {id: string; method: 'skills.status'}
+  | {id: string; method: 'skills.status'; params?: {fresh?: boolean}}
   | {id: string; method: 'skills.install'; params?: {approvalId?: string}}
   | {id: string; method: 'evals.latest'}
   | {id: string; method: 'evals.readiness'}
@@ -441,19 +442,21 @@ export type RpcRequest =
   | {id: string; method: 'spend.setPriceOverride'; params: {model: string; override: PriceOverride}}
   | {id: string; method: 'spend.clearPriceOverride'; params: {model: string}}
   | {id: string; method: 'sourceControl.repoStatus'; params: {directory: string}}
-  | {id: string; method: 'sourceControl.assignedIssues'}
-  | {id: string; method: 'sourceControl.myOpenPullRequests'}
-  | {id: string; method: 'catalog.plugins'}
+  | {id: string; method: 'sourceControl.assignedIssues'; params?: {fresh?: boolean}}
+  | {id: string; method: 'sourceControl.myOpenPullRequests'; params?: {fresh?: boolean}}
+  | {id: string; method: 'catalog.plugins'; params?: {fresh?: boolean}}
   | {id: string; method: 'catalog.installPlugin'; params: {target: ProviderId; pluginId: string; approvalId?: string}}
-  | {id: string; method: 'catalog.marketplaces'}
+  | {id: string; method: 'catalog.marketplaces'; params?: {fresh?: boolean}}
   | {id: string; method: 'catalog.addMarketplace'; params: {target: ProviderId; source: string; approvalId?: string; trustSource?: boolean; policyApprovalId?: string}}
   | {id: string; method: 'catalog.sourcePolicy.get'}
   | {id: string; method: 'catalog.sourcePolicy.mode.set'; params: {mode: import('./security/extension-source-policy.js').ExtensionSourcePolicyMode; approvalId?: string}}
   | {id: string; method: 'catalog.sourcePolicy.trustMarketplace'; params: {source: string; approvalId?: string}}
   | {id: string; method: 'catalog.sourcePolicy.remove'; params: {sourceId: string; approvalId?: string}}
-  | {id: string; method: 'catalog.mcpServers'}
+  | {id: string; method: 'catalog.mcpServers'; params?: {fresh?: boolean}}
   | {id: string; method: 'catalog.addMcpServer'; params: {targets: ProviderId[]; config: import('./catalog-manager.js').McpServerConfig; approvalId?: string; trustSource?: boolean; policyApprovalId?: string}}
-  | {id: string; method: 'providers.list'}
+  | {id: string; method: 'providers.list'; params?: {fresh?: boolean}}
+  | {id: string; method: 'tools.installPlan'; params: {tool: import('./installer.js').InstallableTool; agent?: import('./installer.js').InstallAgent}}
+  | {id: string; method: 'tools.install'; params: {tool: import('./installer.js').InstallableTool; agent?: import('./installer.js').InstallAgent; approvalId?: string}}
   | {id: string; method: 'admission.assess'; params: {provider: ProviderId; accountId?: string}}
   | {id: string; method: 'coordination.get'; params: {project: string}}
   | {id: string; method: 'coordination.brief.set'; params: {project: string; brief: string}}
@@ -482,7 +485,7 @@ export type RpcRequest =
   | {id: string; method: 'openDesign.get'}
   | {id: string; method: 'openDesign.save'; params: {url: string}}
   | {id: string; method: 'openDesign.status'}
-  | {id: string; method: 'designTools.list'}
+  | {id: string; method: 'designTools.list'; params?: {fresh?: boolean}}
   | {id: string; method: 'designTools.installOpenDesignMcp'; params: {target: McpTarget; approvalId?: string}}
   | {id: string; method: 'credentials.list'}
   | {id: string; method: 'credentials.upsertAccount'; params: {provider: ProviderId; id: string; mode: CredentialMode; label: string; apiKey?: string; baseUrl?: string; model?: string; sameIdentityAs?: string; approvalId?: string}}

@@ -16,7 +16,8 @@
   --radius-chip: 999px;
   --radius-pane: 6px;
   --topbar-height: 44px;
-  --rail-width: 216px;
+  --rail-width: 232px;
+  --rail-collapsed-width: 52px;
   --coord-width: 336px;
   --strip-width: 232px;
   --content-max: 1680px;
@@ -275,58 +276,100 @@ details > summary::-webkit-details-marker { display: none; }
   border-bottom: 1px solid var(--line);
   background: var(--bg-raised);
 }
-.topbar .brand { display: flex; align-items: center; gap: 9px; font-family: var(--font-display); font-weight: 700; font-size: 15px; letter-spacing: -.02em; white-space: nowrap; }
-.topbar .brand .mark { transform: scale(.85); }
-.topbar-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.topbar-project { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; padding-left: 2px; }
 .topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .topbar-palette { font-size: 11px; color: var(--fg-muted); padding: 5px 8px 5px 10px; border-color: var(--line); }
 .topbar-palette .kbd { margin-left: 4px; }
 .target-pill { width: max-content; color: var(--coral); border: 1px solid color-mix(in srgb, var(--coral) 60%, var(--line)); border-radius: var(--radius-chip); padding: 2px 8px; font-size: 10px; white-space: nowrap; }
 .target-pill.local { color: var(--fg-muted); border-color: var(--line-strong); }
 
-.app-shell { display: grid; grid-template-columns: var(--rail-width) minmax(0, 1fr); min-height: 0; }
+.app-shell { display: grid; grid-template-columns: var(--rail-width) minmax(0, 1fr); min-height: 0; transition: grid-template-columns 200ms var(--ease-out); }
+.app-shell.rail-collapsed { grid-template-columns: var(--rail-collapsed-width) minmax(0, 1fr); }
+
+/* --- Navigation rail ---------------------------------------------------------------------------
+   Brand and workspace at the top, iconed routes grouped by spacing (no rules), the live lanes as
+   the rail's own content, one shortcut in the footer. Collapses to an icon rail on ⌘B. */
 .rail {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
+  min-width: 0;
   border-right: 1px solid var(--line);
   background: var(--bg-raised);
+  overflow: hidden;
 }
-.rail-project { display: flex; align-items: center; gap: 6px; padding: 12px 8px 8px 14px; border-bottom: 1px solid var(--line-subtle); }
-.rail-project-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
-.rail-project strong { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-project-path { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-scroll { overflow: hidden auto; padding: 6px 8px 12px; }
-.rail-nav, .rail-lanes-block { display: grid; gap: 1px; margin-bottom: 10px; }
-.rail-label { display: block; padding: 8px 8px 3px; color: var(--fg-faint); font-size: 10px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+.rail-brand { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 6px 0 12px; }
+.rail-mark { display: inline-flex; padding: 2px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: default; }
+.rail.collapsed .rail-mark { cursor: pointer; }
+.rail.collapsed .rail-mark:hover { background: var(--bg-hover); }
+.rail-wordmark { font-family: var(--font-display); font-weight: 700; font-size: 14.5px; letter-spacing: -.02em; white-space: nowrap; color: var(--fg); }
+.rail-toggle { margin-left: auto; color: var(--fg-faint); }
+.rail-toggle:hover { color: var(--fg); }
+.rail-workspace { padding: 0 8px 8px; }
+.rail-switch { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-card); color: var(--fg); text-align: left; transition: border-color var(--duration) ease, background-color var(--duration) ease; }
+.rail-switch:hover { border-color: var(--line-strong); background: var(--bg-hover); }
+.rail-switch > .icon { flex: 0 0 auto; color: var(--fg-muted); }
+.rail-switch-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.rail-switch-name { font-family: var(--font-display); font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-switch-path { font-size: 10px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-switch-chevron { display: inline-flex; color: var(--fg-faint); }
+.rail-switch-chevron .icon { transform: rotate(90deg); width: 13px; height: 13px; }
+.rail-scroll { overflow: hidden auto; padding: 2px 8px 12px; scrollbar-width: thin; }
+.rail-group { display: grid; gap: 1px; margin-bottom: 14px; }
+.rail-group:last-child { margin-bottom: 0; }
+.rail-label { display: block; padding: 6px 8px 4px; color: var(--fg-faint); font-family: var(--font-display); font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .rail-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
   width: 100%;
-  padding: 5px 8px;
+  height: 30px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  font-weight: 500;
   text-align: left;
   transition: background-color var(--duration) ease, color var(--duration) ease;
 }
+.rail-item > .icon { width: 15px; height: 15px; flex: 0 0 auto; opacity: .8; }
 .rail-item:hover { color: var(--fg); background: var(--bg-hover); }
-.rail-item.active { color: var(--fg); background: var(--bg-elevated); font-weight: 600; box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 8%, transparent); }
-.rail-lane { font-size: 11px; padding: 4px 8px; min-width: 0; }
+.rail-item:hover > .icon { opacity: 1; }
+.rail-item.active { color: var(--fg); background: var(--bg-elevated); font-weight: 600; }
+.rail-item.active > .icon { color: var(--coral); opacity: 1; }
+.rail-item-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-count { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; color: var(--fg-faint); white-space: nowrap; }
+.rail-count.warn { color: var(--coral); }
+.rail-lanes { display: grid; gap: 1px; }
+.rail-project-row { height: 26px; margin-top: 2px; gap: 6px; font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--fg); }
+.rail-project-row .rail-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-lane { height: 24px; gap: 7px; padding: 0 8px 0 10px; font-family: var(--font-mono); font-size: 11px; font-weight: 400; min-width: 0; }
+.rail-lane.is-sub { padding-left: 20px; }
+.rail-lane.is-lead .icon { width: 11px; height: 11px; color: var(--coral); }
+.rail-lane.needs-you { color: var(--fg); }
 .rail-lane-provider { color: var(--fg-faint); flex: 0 0 auto; }
 .rail-lane-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-project-row { margin-top: 4px; font-size: 11px; color: var(--fg); gap: 6px; }
-.rail-project-row .rail-project-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.rail-lane.is-sub { padding-left: 16px; }
-.rail-lane.is-lead .icon { width: 11px; height: 11px; color: var(--coral); }
-.lane.lead .lane-head { background: color-mix(in srgb, var(--bg-raised) 90%, var(--coral)); }
-.pool-label { margin: 0; }
-.pool-label[hidden] { display: none; }
 .rail-empty { margin: 2px 8px 4px; font-size: 11px; }
-.rail-footer { padding: 10px 14px 12px; border-top: 1px solid var(--line-subtle); font-size: 10px; letter-spacing: .035em; }
+.rail-footer { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 14px 10px; color: var(--fg-muted); font-size: 10.5px; white-space: nowrap; }
+.rail-footer .state-dot.local { background: var(--success); }
+.rail-footer .state-dot.remote { background: var(--coral); }
+.rail-footer .kbd { font-size: 9px; }
+/* collapsed: icons only, labels in tooltips, the live count as a badge, lanes as dots */
+.rail.collapsed .rail-wordmark, .rail.collapsed .rail-toggle, .rail.collapsed .rail-label, .rail.collapsed .rail-item-label, .rail.collapsed .rail-switch-text, .rail.collapsed .rail-switch-chevron, .rail.collapsed .rail-project-row, .rail.collapsed .rail-lane-provider, .rail.collapsed .rail-lane-name, .rail.collapsed .rail-lane .icon, .rail.collapsed .rail-empty, .rail.collapsed .rail-footer-text { display: none; }
+.rail.collapsed .rail-brand { justify-content: center; padding: 0; }
+.rail.collapsed .rail-workspace { padding: 0 8px 8px; }
+.rail.collapsed .rail-switch { justify-content: center; padding: 0; min-height: 36px; }
+.rail.collapsed .rail-scroll { padding: 2px 8px 8px; }
+.rail.collapsed .rail-item { justify-content: center; padding: 0; gap: 0; }
+.rail.collapsed .rail-item > .icon { width: 17px; height: 17px; }
+.rail.collapsed .rail-count { position: absolute; top: 3px; right: 4px; font-size: 9px; line-height: 1; }
+.rail.collapsed .rail-lanes { gap: 3px; padding: 2px 0; }
+.rail.collapsed .rail-lane { height: 16px; justify-content: center; padding: 0; }
+.rail.collapsed .rail-footer { justify-content: center; padding: 8px 0 10px; }
 
 main { min-width: 0; min-height: 0; overflow: auto; }
 main.main-plane { overflow: hidden; display: flex; flex-direction: column; }
@@ -407,19 +450,24 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
   padding: 0 10px 0 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-raised);
+  container-type: inline-size;
 }
-.ws-project { display: flex; align-items: baseline; gap: 8px; min-width: 0; max-width: 30%; flex: 0 1 auto; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); text-align: left; }
+/* The project name keeps its width (capped, then ellipsized inside its own box); the stats and the
+   headroom note are what give way at the 1280px default window, as one ellipsized line each. */
+.ws-project { display: flex; align-items: baseline; gap: 8px; min-width: 0; max-width: 30%; flex: 0 0 auto; overflow: hidden; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); text-align: left; }
 .ws-project:hover { background: var(--bg-hover); }
-.ws-project-name { font-size: 13px; font-weight: 700; white-space: nowrap; }
+.ws-project-name { font-size: 13px; font-weight: 700; white-space: nowrap; flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .ws-project-path { font-size: 10px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-project .icon { align-self: center; transform: rotate(90deg); color: var(--fg-muted); }
-.ws-stats { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; overflow: hidden; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
+.ws-stats { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
+.ws-stats > * + * { margin-left: 8px; }
 .ws-stat strong { color: var(--fg); font-weight: 600; }
 .ws-stat.warn, .ws-stat.warn strong { color: var(--coral); }
 .btn.link.ws-stat { font-size: 11px; text-decoration-color: color-mix(in srgb, var(--coral) 50%, transparent); }
 .ws-sep { color: var(--fg-faint); }
-.ws-headroom { font-size: 11px; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.ws-headroom { font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
 .ws-headroom.warn { color: var(--coral); }
+@container (max-width: 1150px) { .ws-headroom:not(.warn) { display: none; } }
 .ws-progress { font-size: 11px; color: var(--coral); white-space: nowrap; }
 .ws-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
@@ -477,16 +525,20 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
   user-select: none;
   overflow: hidden;
 }
-@container (max-width: 380px) { .lane-tokens, .lane-checks { display: none; } }
-@container (max-width: 300px) { .lane-attention .pill:not(.attention-needs-input) { display: none; } }
 .lane.focused .lane-head { background: color-mix(in srgb, var(--bg-raised) 92%, var(--coral)); }
 .lane-pick { opacity: 0; width: 0; margin: 0 -8px 0 0; transition: opacity var(--duration) ease, width var(--duration) ease, margin var(--duration) ease; }
 .lane-head:hover .lane-pick, .lane-pick:not(:checked), .lane-pick:focus-visible { opacity: 1; width: 14px; margin: 0; }
-.lane-provider { color: var(--fg); font-weight: 600; white-space: nowrap; }
+.lane-provider { color: var(--fg); font-weight: 600; white-space: nowrap; flex: 0 0 auto; }
 .lane-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
 .lane-attention { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .lane-tokens { white-space: nowrap; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 .lane-checks { display: inline-flex; flex: 0 0 auto; }
+/* Chips leave in priority order as a tile narrows — tokens, then the checks chip, then the
+   informational pills — so the head never clips one mid-glyph. These must follow the base rules
+   above: equal specificity, and the later declaration wins. */
+@container (max-width: 520px) { .lane-tokens { display: none; } }
+@container (max-width: 400px) { .lane-checks { display: none; } }
+@container (max-width: 300px) { .lane-attention .pill:not(.attention-needs-input) { display: none; } }
 .lane-menu { opacity: .55; }
 .lane:hover .lane-menu, .lane-menu:focus-visible { opacity: 1; }
 .lane-screen { position: relative; min-height: 0; min-width: 0; padding: 4px 0 0 6px; }
@@ -532,12 +584,14 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .composer-row:first-child { align-items: center; }
 .composer-targets .seg { font-size: 11px; padding: 3px 8px; }
 .composer-status { font-size: 11px; margin-left: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.composer-field { position: relative; flex: 1; min-width: 0; display: flex; }
+.composer-field { position: relative; flex: 1; min-width: 0; display: flex; container-type: inline-size; }
 .composer-input { flex: 1; min-width: 0; min-height: 36px; max-height: 160px; resize: none; line-height: 1.45; padding-right: 118px; }
+.composer-input::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.coord-loading { padding: 6px 12px 10px; font-size: 11px; }
 .composer-hint { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 10px; white-space: nowrap; pointer-events: none; }
 .composer-hint .kbd { font-size: 9px; padding: 0 4px; }
 .composer-input:focus + .composer-hint { opacity: .8; }
-@media (max-width: 900px) { .composer-hint { display: none; } .composer-input { padding-right: 10px; } }
+@container (max-width: 480px) { .composer-hint { display: none; } .composer-input { padding-right: 10px; } }
 .composer-submit { font-size: 11px; color: var(--fg-muted); white-space: nowrap; padding-bottom: 9px; display: inline-flex; align-items: center; gap: 5px; }
 .composer-send { align-self: stretch; }
 
@@ -772,7 +826,7 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
 
 .preview-controls { display: flex; gap: 8px; margin-bottom: 16px; }
 .preview-controls input { flex: 1; }
-.preview-empty { display: grid; place-content: center; min-height: 320px; padding: 36px; border: 1px dashed var(--line-strong); border-radius: var(--radius-card); background: var(--bg-card); color: var(--fg-muted); text-align: center; }
+.preview-empty { display: grid; place-content: center; min-height: 320px; margin-bottom: var(--space-5); padding: 36px; border: 1px dashed var(--line-strong); border-radius: var(--radius-card); background: var(--bg-card); color: var(--fg-muted); text-align: center; }
 .preview-empty strong { color: var(--fg); font-family: var(--font-display); font-size: 18px; }
 .preview-empty p { max-width: 50ch; margin: 8px 0 0; }
 .remote-connect-card { max-width: 760px; }
@@ -823,9 +877,9 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
   .spend-grid { grid-template-columns: 1fr; }
   .app-shell { display: block; }
   .rail { display: flex; width: 100%; height: auto; align-items: center; border-right: 0; border-bottom: 1px solid var(--line); }
-  .rail-project, .rail-footer, .rail-label, .rail-lanes-block { display: none; }
+  .rail-brand, .rail-workspace, .rail-footer, .rail-label, .rail-lanes-block, .rail-count { display: none; }
   .rail-scroll { display: flex; flex: 1; gap: 2px; overflow-x: auto; padding: 6px 8px; }
-  .rail-nav { display: flex; flex: 0 0 auto; gap: 2px; margin: 0; }
+  .rail-group { display: flex; flex: 0 0 auto; gap: 2px; margin: 0; }
   .rail-item { width: max-content; white-space: nowrap; }
   .page { padding: 20px 16px 32px; }
   .toolbar, .banner, .preview-controls { align-items: stretch; flex-direction: column; }

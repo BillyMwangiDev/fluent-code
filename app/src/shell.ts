@@ -5,22 +5,22 @@ import {openLaunchSheet} from './launch';
 import {prefs} from './prefs';
 import {navigate, onRouteChange, route, type Route, type RouteName} from './router';
 import {store} from './store';
-import {button, h, icon, isLive, isMod, kbd, markEl, openSheet, pickDirectory, providerShort, sessionName, workspaceFolderName} from './ui';
+import {button, h, icon, isLive, isMod, kbd, markEl, openMenu, openSheet, pickDirectory, providerShort, sessionName, workspaceFolderName, type IconName} from './ui';
 
 export type Command = {id: string; label: string; hint?: string; keys?: string; run: () => void};
 
-const navItems: Array<{name: RouteName; label: string; group: 'work' | 'control' | 'tools'}> = [
-  {name: 'orchestration', label: 'orchestrate', group: 'work'},
-  {name: 'sessions', label: 'sessions', group: 'work'},
-  {name: 'remote', label: 'remote', group: 'work'},
-  {name: 'usage', label: 'usage', group: 'control'},
-  {name: 'spend', label: 'spend', group: 'control'},
-  {name: 'source-control', label: 'source control', group: 'control'},
-  {name: 'credentials', label: 'credentials', group: 'control'},
-  {name: 'catalog', label: 'catalog', group: 'control'},
-  {name: 'design', label: 'design', group: 'tools'},
-  {name: 'preview', label: 'preview', group: 'tools'},
-  {name: 'themes', label: 'themes', group: 'tools'}
+const navItems: Array<{name: RouteName; label: string; icon: IconName; group: 'work' | 'control' | 'tools'}> = [
+  {name: 'orchestration', label: 'orchestrate', icon: 'grid', group: 'work'},
+  {name: 'sessions', label: 'sessions', icon: 'list', group: 'work'},
+  {name: 'remote', label: 'remote', icon: 'globe', group: 'work'},
+  {name: 'usage', label: 'usage', icon: 'pulse', group: 'control'},
+  {name: 'spend', label: 'spend', icon: 'coin', group: 'control'},
+  {name: 'source-control', label: 'source control', icon: 'branch', group: 'control'},
+  {name: 'credentials', label: 'credentials', icon: 'key', group: 'control'},
+  {name: 'catalog', label: 'catalog', icon: 'package', group: 'control'},
+  {name: 'design', label: 'design', icon: 'pen', group: 'tools'},
+  {name: 'preview', label: 'preview', icon: 'eye', group: 'tools'},
+  {name: 'themes', label: 'themes', icon: 'swatch', group: 'tools'}
 ];
 
 let pageCommands: () => Command[] = () => [];
@@ -43,30 +43,72 @@ export function renderTopbar(): HTMLElement {
   const palette = button([icon('search'), 'search or run…', kbd('mod K')], () => openPalette(), {class: 'btn ghost topbar-palette', 'aria-label': 'open command palette'});
   const launch = button([icon('plus'), 'agents'], () => startLanes(), {class: 'btn primary small', title: 'start agents (⌘N)'});
   return h('header', {class: 'topbar'}, [
-    h('div', {class: 'brand'}, [markEl(), 'fluent code']),
     h('span', {class: 'topbar-project muted'}, [project ? `${workspaceFolderName(project)}  ${project}` : 'no workspace selected']),
     h('div', {class: 'topbar-actions'}, [palette, launch, target])
   ]);
 }
 
+/** Collapses or expands the navigation rail, remembering the choice. Works whether or not a rail is mounted right now. */
+export function toggleRail(next = !prefs.railCollapsed) {
+  prefs.railCollapsed = next;
+  document.querySelector('.app-shell')?.classList.toggle('rail-collapsed', next);
+  const rail = document.querySelector<HTMLElement>('.rail');
+  rail?.classList.toggle('collapsed', next);
+  rail?.dispatchEvent(new CustomEvent('rail-toggle'));
+}
+
 export function renderRail(): HTMLElement {
+  const collapsed = prefs.railCollapsed;
+
+  // --- Brand + collapse ----------------------------------------------------------------------
+  const wordmark = h('span', {class: 'rail-wordmark'}, ['fluent code']);
+  const toggle = button(icon('panel-left'), () => toggleRail(), {class: 'btn ghost icon-button rail-toggle', 'aria-label': 'collapse navigation', title: 'collapse navigation (⌘B)'});
+  const brandMark = button(markEl(), () => { if (prefs.railCollapsed) toggleRail(false); }, {class: 'rail-mark', 'aria-label': 'expand navigation', title: 'expand navigation (⌘B)'});
+  const brand = h('div', {class: 'rail-brand'}, [brandMark, wordmark, toggle]);
+
+  // --- Workspace switcher --------------------------------------------------------------------
+  const name = prefs.workspacePath ? workspaceFolderName(prefs.workspacePath) : 'choose a workspace';
+  const switcher = button([
+    icon('folder'),
+    h('span', {class: 'rail-switch-text'}, [h('span', {class: 'rail-switch-name'}, [name]), h('span', {class: 'rail-switch-path'}, [prefs.workspacePath || 'pick a folder to begin'])]),
+    h('span', {class: 'rail-switch-chevron'}, [icon('chevron')])
+  ], async () => {
+    const projects = [...new Set(store.sessions.filter(session => isLive(session) && !session.archivedAt).map(session => session.projectDirectory ?? session.directory))]
+      .filter(project => project !== prefs.workspacePath);
+    const browse = async () => {
+      const selected = await pickDirectory('Choose workspace folder', prefs.workspacePath);
+      if (!selected) return;
+      prefs.workspacePath = selected;
+      navigate({name: 'orchestration'});
+    };
+    if (projects.length === 0) { await browse(); return; }
+    openMenu(switcher, [
+      ...projects.map(project => ({label: `${workspaceFolderName(project)}  ${project}`, onSelect: () => { prefs.workspacePath = project; navigate({name: 'orchestration'}); }})),
+      'divider',
+      {label: 'browse for a folder…', onSelect: () => void browse()}
+    ]);
+  }, {class: 'rail-switch', title: prefs.workspacePath ? `${prefs.workspacePath}\nswitch workspace` : 'choose a workspace folder'});
+
+  // --- Navigation ------------------------------------------------------------------------------
   const groups: Record<'work' | 'control' | 'tools', HTMLElement> = {
-    work: h('nav', {class: 'rail-nav', 'aria-label': 'Workspace'}),
-    control: h('nav', {class: 'rail-nav', 'aria-label': 'Control plane'}),
-    tools: h('nav', {class: 'rail-nav', 'aria-label': 'Tools'})
+    work: h('nav', {class: 'rail-group', 'aria-label': 'Workspace'}),
+    control: h('nav', {class: 'rail-group', 'aria-label': 'Control plane'}),
+    tools: h('nav', {class: 'rail-group', 'aria-label': 'Tools'})
   };
-  groups.work.append(h('span', {class: 'rail-label'}, ['workspace']));
   groups.control.append(h('span', {class: 'rail-label'}, ['control plane']));
   groups.tools.append(h('span', {class: 'rail-label'}, ['tools']));
   const buttons = new Map<RouteName, HTMLButtonElement>();
+  const counts = new Map<RouteName, HTMLElement>();
   for (const item of navItems) {
-    const element = button(item.label, () => navigate({name: item.name} as Route), {class: 'rail-item'});
+    const count = h('span', {class: 'rail-count'});
+    counts.set(item.name, count);
+    const element = button([icon(item.icon), h('span', {class: 'rail-item-label'}, [item.label]), count], () => navigate({name: item.name} as Route), {class: 'rail-item', title: item.label});
     buttons.set(item.name, element);
     groups[item.group].append(element);
   }
   const markActive = (current: Route) => {
-    for (const [name, element] of buttons) {
-      const active = current.name === name || (name === 'sessions' && current.name === 'active-session') || (name === 'sessions' && current.name === 'new-session');
+    for (const [routeName, element] of buttons) {
+      const active = current.name === routeName || (routeName === 'sessions' && (current.name === 'active-session' || current.name === 'new-session'));
       element.classList.toggle('active', active);
       if (active) element.setAttribute('aria-current', 'page'); else element.removeAttribute('aria-current');
     }
@@ -74,21 +116,19 @@ export function renderRail(): HTMLElement {
   markActive(route());
   const unlistenRoute = onRouteChange(markActive);
 
-  const workspaceName = h('strong', {}, [prefs.workspacePath ? workspaceFolderName(prefs.workspacePath) : 'choose a workspace']);
-  const workspaceLocation = h('span', {class: 'rail-project-path muted'}, [prefs.workspacePath || 'select a folder to begin']);
-  const chooseWorkspace = button(icon('folder'), async () => {
-    const selected = await pickDirectory('Choose workspace folder', prefs.workspacePath);
-    if (!selected) return;
-    prefs.workspacePath = selected;
-    navigate({name: 'orchestration'});
-  }, {class: 'btn ghost icon-button', 'aria-label': 'choose workspace folder', title: 'choose workspace folder'});
-
-  // Live lanes, so any lane is one click away from any route. Lanes of the current workspace come
-  // first; a lane that needs the user is marked.
+  // --- Live lanes ------------------------------------------------------------------------------
+  // Every running lane, grouped by project with the main agent first, one click from any route.
   const lanesList = h('div', {class: 'rail-lanes', role: 'list'});
   const lanesLabel = h('span', {class: 'rail-label'}, ['lanes']);
   const drawLanes = () => {
     const live = store.sessions.filter(session => isLive(session) && !session.archivedAt);
+    const needsYou = live.filter(lane => store.attention.get(lane.id)?.reason === 'needs-input').length;
+    const orchestrateCount = counts.get('orchestration');
+    if (orchestrateCount) {
+      orchestrateCount.textContent = needsYou ? `${needsYou}!` : live.length ? String(live.length) : '';
+      orchestrateCount.classList.toggle('warn', needsYou > 0);
+      orchestrateCount.title = needsYou ? `${needsYou} lane${needsYou === 1 ? '' : 's'} waiting on you` : `${live.length} running`;
+    }
     const current = prefs.workspacePath.replace(/[\\/]+$/, '');
     const projects = [...new Set(live.map(session => session.projectDirectory ?? session.directory))]
       .sort((a, b) => (a === current ? 0 : 1) - (b === current ? 0 : 1) || a.localeCompare(b));
@@ -102,9 +142,7 @@ export function renderRail(): HTMLElement {
     for (const project of projects) {
       const lanes = live.filter(session => (session.projectDirectory ?? session.directory) === project);
       const ordered = [...lanes.filter(lane => lane.lead), ...lanes.filter(lane => !lane.lead)];
-      // Every project with running lanes is one click away, with its main agent named — this is
-      // how several main agents on several projects stay in view at once.
-      const head = button([h('span', {class: 'rail-project-name'}, [workspaceFolderName(project)]), h('span', {class: 'muted'}, [String(lanes.length)])], () => {
+      const head = button([h('span', {class: 'rail-project-name'}, [workspaceFolderName(project)]), h('span', {class: 'rail-count'}, [String(lanes.length)])], () => {
         prefs.workspacePath = project;
         navigate({name: 'orchestration'});
       }, {class: `rail-item rail-project-row${project === current ? ' active' : ''}`, title: project});
@@ -121,7 +159,7 @@ export function renderRail(): HTMLElement {
         ], () => {
           if (project !== prefs.workspacePath) prefs.workspacePath = project;
           navigate({name: 'orchestration', focus: lane.id});
-        }, {class: `rail-item rail-lane${lane.lead ? ' is-lead' : ''}${lane.parentSessionId ? ' is-sub' : ''}`, title: `${lane.lead ? 'main agent · ' : lane.parentSessionId ? 'subagent · ' : ''}${sessionName(lane)}\n${lane.directory}`});
+        }, {class: `rail-item rail-lane${lane.lead ? ' is-lead' : ''}${lane.parentSessionId ? ' is-sub' : ''}${attention ? ' needs-you' : ''}`, title: `${lane.lead ? 'main agent · ' : lane.parentSessionId ? 'subagent · ' : ''}${providerShort[lane.provider]} · ${sessionName(lane)}${attention ? '\nwaiting on you' : ''}\n${lane.directory}`});
         lanesList.append(row);
       }
       if (ordered.length > 8) lanesList.append(h('p', {class: 'rail-empty muted'}, [`+${ordered.length - 8} more`]));
@@ -130,12 +168,23 @@ export function renderRail(): HTMLElement {
   drawLanes();
   const unsubscribe = store.subscribe(drawLanes);
 
-  const footer = h('div', {class: 'rail-footer muted'}, ['local-first · inspectable']);
-  const rail = h('aside', {class: 'rail'}, [
-    h('div', {class: 'rail-project'}, [h('div', {class: 'rail-project-text'}, [workspaceName, workspaceLocation]), chooseWorkspace]),
-    h('div', {class: 'rail-scroll'}, [groups.work, h('div', {class: 'rail-lanes-block'}, [lanesLabel, lanesList]), groups.control, groups.tools]),
+  // --- Footer ----------------------------------------------------------------------------------
+  const target = activeRemoteSocket() ? 'remote daemon' : 'local daemon';
+  const footer = h('div', {class: 'rail-footer'}, [h('span', {class: `state-dot ${activeRemoteSocket() ? 'remote' : 'local'}`}), h('span', {class: 'rail-footer-text'}, [target, ' · ', kbd('mod B'), ' rail'])]);
+
+  const rail = h('aside', {class: `rail${collapsed ? ' collapsed' : ''}`, 'aria-label': 'Navigation'}, [
+    brand,
+    h('div', {class: 'rail-workspace'}, [switcher]),
+    h('div', {class: 'rail-scroll'}, [groups.work, h('div', {class: 'rail-group rail-lanes-block'}, [lanesLabel, lanesList]), groups.control, groups.tools]),
     footer
   ]);
+  const syncToggle = () => {
+    const isCollapsed = rail.classList.contains('collapsed');
+    toggle.setAttribute('aria-label', isCollapsed ? 'expand navigation' : 'collapse navigation');
+    toggle.title = `${isCollapsed ? 'expand' : 'collapse'} navigation (⌘B)`;
+  };
+  syncToggle();
+  rail.addEventListener('rail-toggle', syncToggle);
   // The rail is rebuilt with every route render; release its store subscription then.
   const observer = new MutationObserver(() => {
     if (!rail.isConnected) { unsubscribe(); unlistenRoute(); observer.disconnect(); }
@@ -164,6 +213,7 @@ export function openPalette() {
       run: () => { prefs.workspacePath = session.projectDirectory ?? session.directory; navigate({name: 'orchestration', focus: session.id}); }
     })),
     {id: 'shortcuts', label: 'keyboard shortcuts', hint: 'everything the keyboard can do here', run: showShortcuts},
+    {id: 'rail', label: prefs.railCollapsed ? 'expand navigation' : 'collapse navigation', hint: 'the rail on the left', keys: 'mod B', run: () => toggleRail()},
     {id: 'workspace', label: 'choose workspace folder…', run: async () => {
       const selected = await pickDirectory('Choose workspace folder', prefs.workspacePath);
       if (selected) { prefs.workspacePath = selected; navigate({name: 'orchestration'}); }
@@ -208,6 +258,7 @@ export function openPalette() {
 export function showShortcuts() {
   const rows: Array<[string, string]> = [
     ['mod K', 'command palette — screens, lanes, and every workspace action'],
+    ['mod B', 'collapse or expand the navigation rail'],
     ['mod N', 'start agents'],
     ['mod 1 … 9', 'focus a lane by its position'],
     ['mod ⏎', 'switch between grid and focus'],
@@ -230,10 +281,11 @@ export function installGlobalShortcuts() {
   document.addEventListener('keydown', event => {
     if (!isMod(event)) return;
     const key = event.key.toLowerCase();
-    if (key !== 'k' && !(key === 'n' && !event.shiftKey)) return;
+    if (key !== 'k' && key !== 'b' && !(key === 'n' && !event.shiftKey)) return;
+    if (key === 'b' && event.shiftKey) return;
     // Consumed in the capture phase so a focused terminal never sees the keystroke.
     event.preventDefault();
     event.stopImmediatePropagation();
-    if (key === 'k') openPalette(); else startLanes();
+    if (key === 'k') openPalette(); else if (key === 'b') toggleRail(); else startLanes();
   }, true);
 }

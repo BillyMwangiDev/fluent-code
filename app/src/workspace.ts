@@ -345,9 +345,11 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     const running = lanes.filter(isLive).length;
     const needsYou = lanes.filter(lane => store.attention.get(lane.id)?.reason === 'needs-input').length;
     const parts: Array<[string, string]> = [[String(running), 'running']];
+    // The line ellipsizes from the right at narrow widths, so the one part the user must not miss
+    // comes before the long main-agent summary.
+    if (needsYou) parts.push([String(needsYou), needsYou === 1 ? 'needs you' : 'need you']);
     const mains = lanes.filter(lane => lane.lead && isLive(lane));
     if (mains.length) parts.push([String(mains.length), mains.length === 1 ? `main agent · ${mains.reduce((sum, lead) => sum + store.sessions.filter(session => session.parentSessionId === lead.id && isLive(session)).length, 0)}/${mains[0]!.lead!.maxLanes} subagents` : 'main agents']);
-    if (needsYou) parts.push([String(needsYou), needsYou === 1 ? 'needs you' : 'need you']);
     if (counts) {
       if (counts.tasks) parts.push([`${counts.active}/${counts.tasks}`, 'tasks active']);
       if (counts.overlaps) parts.push([String(counts.overlaps), counts.overlaps === 1 ? 'overlap' : 'overlaps']);
@@ -483,7 +485,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
       }
       const count = targets().length;
       send.disabled = count === 0;
-      const target = mode === 'focused' && focusedTile ? (focusedTile.summary.lead ? 'message the main agent…' : `message ${providerShort[focusedTile.summary.provider]} · ${sessionName(focusedTile.summary).slice(0, 40)}…`) : count === 1 ? 'message this lane…' : `message ${count} lanes…`;
+      const target = mode === 'focused' && focusedTile ? (focusedTile.summary.lead ? 'message the main agent…' : `message ${providerShort[focusedTile.summary.provider]} · ${sessionName(focusedTile.summary).slice(0, 24)}…`) : count === 1 ? 'message this lane…' : `message ${count} lanes…`;
       input.placeholder = count === 0 ? 'no running lane to send to' : target;
     };
     const grow = () => { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 160)}px`; };

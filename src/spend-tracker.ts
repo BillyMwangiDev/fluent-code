@@ -11,10 +11,11 @@ import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
  * Fluent entirely still counts. Ported to plain TypeScript (no Effect-TS — Fluent doesn't use
  * it) and trimmed to the two providers Fluent supports (T3 also reads Grok).
  *
- * Deliberately simpler than the original in one respect: T3 resumes each transcript from a
- * cached byte offset to stay fast over a 1.4 GB/30-day corpus. This scans whole files every
- * call, bounded by the requested day window — fine at Fluent's current scale, worth revisiting
- * if a summary call starts being slow on a very long-lived machine.
+ * Like T3, it never re-reads a transcript it has already parsed: each file's usage records are
+ * kept in memory keyed by size and mtime, so a summary over a 2 GB corpus costs one stat per file
+ * after the first pass. The first pass runs in the background shortly after fluentd starts, so
+ * the spend screen is fast on its first open too. Parsing yields to the event loop every few
+ * thousand lines so a big transcript cannot stall the daemon's socket.
  */
 
 export type TokenTotals = {
@@ -236,63 +237,122 @@ async function listFilesRecursive(root: string): Promise<string[]> {
   return found;
 }
 
-async function recentTranscripts(root: string, sinceMs: number): Promise<string[]> {
+type TranscriptFile = {path: string; size: number; mtimeMs: number};
+type ParsedTranscript = {size: number; mtimeMs: number; records: UsageRecord[]};
+type TranscriptCache = Map<string, ParsedTranscript>;
+
+const parseConcurrency = 2;
+const yieldEveryLines = 2_000;
+
+async function transcriptFiles(root: string): Promise<TranscriptFile[]> {
   const files = await listFilesRecursive(root);
   const withStats = await Promise.all(
     files.map(async path => {
       try {
-        return {path, mtimeMs: (await stat(path)).mtimeMs};
+        const details = await stat(path);
+        return {path, size: details.size, mtimeMs: details.mtimeMs};
       } catch {
         return null;
       }
     })
   );
-  return withStats.filter((entry): entry is {path: string; mtimeMs: number} => entry !== null && entry.mtimeMs >= sinceMs).map(entry => entry.path);
+  return withStats.filter((entry): entry is TranscriptFile => entry !== null);
 }
 
-async function scanClaude(sinceMs: number): Promise<UsageRecord[]> {
-  const files = await recentTranscripts(join(homedir(), '.claude', 'projects'), sinceMs);
-  const records: UsageRecord[] = [];
-  const seenDedupeKeys = new Set<string>();
-  for (const file of files) {
-    let content: string;
+const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve));
+
+async function mapWithConcurrency<T>(items: readonly T[], limit: number, work: (item: T) => Promise<void>) {
+  let next = 0;
+  await Promise.all(Array.from({length: Math.min(limit, items.length)}, async () => {
+    while (next < items.length) await work(items[next++]!);
+  }));
+}
+
+/**
+ * Records for every transcript under `root` touched since `sinceMs`, re-reading only the files
+ * whose size or mtime changed since they were last parsed. Files that have disappeared leave the
+ * cache; files outside the window stay cached for a wider window later.
+ */
+async function scanWithCache(root: string, sinceMs: number, cache: TranscriptCache, parse: (content: string) => Promise<UsageRecord[]>): Promise<{records: UsageRecord[]; parsedFiles: number; parsedBytes: number}> {
+  const files = await transcriptFiles(root);
+  const present = new Set(files.map(file => file.path));
+  for (const path of cache.keys()) if (!present.has(path)) cache.delete(path);
+  const wanted = files.filter(file => file.mtimeMs >= sinceMs);
+  const stale = wanted.filter(file => {
+    const cached = cache.get(file.path);
+    return !cached || cached.size !== file.size || cached.mtimeMs !== file.mtimeMs;
+  });
+  let parsedBytes = 0;
+  await mapWithConcurrency(stale, parseConcurrency, async file => {
     try {
-      content = await readFile(file, 'utf8');
+      const content = await readFile(file.path, 'utf8');
+      parsedBytes += content.length;
+      cache.set(file.path, {size: file.size, mtimeMs: file.mtimeMs, records: await parse(content)});
     } catch {
-      continue;
+      cache.delete(file.path);
     }
-    for (const line of content.split('\n')) {
-      if (!line.includes('"usage"')) continue; // cheap gate before JSON.parse
-      const record = parseClaudeLine(line);
-      if (!record || record.timestampMs < sinceMs) continue;
-      if (record.dedupeKey) {
-        if (seenDedupeKeys.has(record.dedupeKey)) continue;
-        seenDedupeKeys.add(record.dedupeKey);
-      }
-      records.push(record);
+  });
+  const records: UsageRecord[] = [];
+  for (const file of wanted) {
+    const cached = cache.get(file.path);
+    if (!cached) continue;
+    for (const record of cached.records) if (record.timestampMs >= sinceMs) records.push(record);
+  }
+  return {records, parsedFiles: stale.length, parsedBytes};
+}
+
+async function parseClaudeTranscript(content: string): Promise<UsageRecord[]> {
+  const records: UsageRecord[] = [];
+  const seen = new Set<string>();
+  let lines = 0;
+  for (const line of content.split('\n')) {
+    if (++lines % yieldEveryLines === 0) await yieldToEventLoop();
+    if (!line.includes('"usage"')) continue; // cheap gate before JSON.parse
+    const record = parseClaudeLine(line);
+    if (!record) continue;
+    if (record.dedupeKey) {
+      if (seen.has(record.dedupeKey)) continue;
+      seen.add(record.dedupeKey);
     }
+    records.push(record);
   }
   return records;
 }
 
-async function scanCodex(sinceMs: number): Promise<UsageRecord[]> {
-  const files = await recentTranscripts(join(homedir(), '.codex', 'sessions'), sinceMs);
+async function parseCodexTranscript(content: string): Promise<UsageRecord[]> {
   const records: UsageRecord[] = [];
-  for (const file of files) {
-    let content: string;
-    try {
-      content = await readFile(file, 'utf8');
-    } catch {
-      continue;
-    }
-    const state = initialCodexScanState();
-    for (const line of content.split('\n')) {
-      if (!line.includes('"token_count"')) continue;
-      const record = parseCodexLine(line, state);
-      if (record && record.timestampMs >= sinceMs) records.push(record);
-    }
+  const state = initialCodexScanState();
+  let lines = 0;
+  for (const line of content.split('\n')) {
+    if (++lines % yieldEveryLines === 0) await yieldToEventLoop();
+    if (!line.includes('"token_count"')) continue;
+    const record = parseCodexLine(line, state);
+    if (record) records.push(record);
   }
   return records;
+}
+
+const claudeCache: TranscriptCache = new Map();
+const codexCache: TranscriptCache = new Map();
+
+async function scanClaude(sinceMs: number) {
+  return scanWithCache(join(homedir(), '.claude', 'projects'), sinceMs, claudeCache, parseClaudeTranscript);
+}
+
+async function scanCodex(sinceMs: number) {
+  return scanWithCache(join(homedir(), '.codex', 'sessions'), sinceMs, codexCache, parseCodexTranscript);
+}
+
+/** A forked Claude session copies its parent's transcript, so the same message can sit in two
+ * files; keep the first occurrence across files, as within one. */
+function dedupeAcrossFiles(records: readonly UsageRecord[]): UsageRecord[] {
+  const seen = new Set<string>();
+  return records.filter(record => {
+    if (!record.dedupeKey) return true;
+    if (seen.has(record.dedupeKey)) return false;
+    seen.add(record.dedupeKey);
+    return true;
+  });
 }
 
 // --- LiteLLM pricing ---------------------------------------------------------------------
@@ -409,6 +469,7 @@ export class SpendTracker {
   private ratesUpdatedAt: string | undefined;
   private ratesError: string | undefined;
   private overrides: Record<string, PriceOverride> = {};
+  private inflight = new Map<number, Promise<SpendSummary>>();
 
   constructor(stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent')) {
     this.ratesCachePath = join(stateDirectory, 'litellm-rates.json');
@@ -462,10 +523,29 @@ export class SpendTracker {
     await writePrivateJson(this.overridesPath, this.overrides);
   }
 
-  async summary(rangeDays = 30): Promise<SpendSummary> {
+  /** Parses the last month's transcripts ahead of the first spend screen; safe to call any time. */
+  warm() {
+    return this.summary(30);
+  }
+
+  summary(rangeDays = 30): Promise<SpendSummary> {
+    // Two screens asking at once (or the warm-up racing the first open) share one scan.
+    const pending = this.inflight.get(rangeDays);
+    if (pending) return pending;
+    const work = this.computeSummary(rangeDays).finally(() => this.inflight.delete(rangeDays));
+    this.inflight.set(rangeDays, work);
+    return work;
+  }
+
+  private async computeSummary(rangeDays: number): Promise<SpendSummary> {
     await this.ensureRates();
     const sinceMs = Date.now() - rangeDays * 24 * 60 * 60 * 1_000;
-    const [claudeRecords, codexRecords] = await Promise.all([scanClaude(sinceMs), scanCodex(sinceMs)]);
+    const startedAt = Date.now();
+    const [claude, codex] = await Promise.all([scanClaude(sinceMs), scanCodex(sinceMs)]);
+    const parsedFiles = claude.parsedFiles + codex.parsedFiles;
+    if (parsedFiles > 0) console.log(`fluentd spend: parsed ${parsedFiles} transcript(s), ${((claude.parsedBytes + codex.parsedBytes) / 1_048_576).toFixed(1)} MB, in ${Date.now() - startedAt}ms`);
+    const claudeRecords = dedupeAcrossFiles(claude.records);
+    const codexRecords = codex.records;
 
     const byDayModel = new Map<string, {provider: ProviderId; model: string; totals: TokenTotals; costUsd: number; costSource: CostSource; cacheSavingsUsd: number}>();
     for (const record of [...claudeRecords, ...codexRecords]) {

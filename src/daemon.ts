@@ -38,6 +38,9 @@ import {coordCommand} from './agent-briefing.js';
 import {isRiskyPermission, sessionOptionArgs} from './session-options.js';
 import {attentionDetail, attentionForStatus, type AttentionReason} from './attention.js';
 import {shouldAutoVerify} from './auto-verify.js';
+import {adoptConventionalPath, adoptLoginShellPath} from './shell-path.js';
+import {Memo} from './swr-cache.js';
+import {installFacts, installPlan, runInstall} from './installer.js';
 
 const socketPath = daemonSocketPath();
 /** Lanes whose exit has already started an automatic verification, so recording that verification's
@@ -737,10 +740,12 @@ async function dispatch(request: RpcRequest) {
       const {session, project} = laneFor(request.params.cwd, request.params.sessionId);
       return {text: renderInbox(await coordination.inbox(project, session.id, {peek: request.params.peek}))};
     }
-    case 'skills.status': return collaborationStatus();
+    case 'skills.status': return skillsMemo.get({fresh: request.params?.fresh});
     case 'skills.install': {
       await requireApproval(request.params?.approvalId, 'extension.install', 'fluent-collab', 'install collaboration skill');
-      return installCollaboration();
+      const installed = await installCollaboration();
+      skillsMemo.invalidate();
+      return installed;
     }
     case 'evals.latest': return {run: evals.last(), running: evals.isRunning()};
     case 'evals.readiness': {
@@ -793,21 +798,25 @@ async function dispatch(request: RpcRequest) {
     case 'spend.setPriceOverride': await spend.setPriceOverride(request.params.model, request.params.override); return {ok: true};
     case 'spend.clearPriceOverride': await spend.clearPriceOverride(request.params.model); return {ok: true};
     case 'sourceControl.repoStatus': return sourceControl.repoStatus(request.params.directory);
-    case 'sourceControl.assignedIssues': return sourceControl.assignedIssues();
-    case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests();
-    case 'catalog.plugins': return catalog.allPlugins();
+    case 'sourceControl.assignedIssues': return sourceControl.assignedIssues({fresh: request.params?.fresh});
+    case 'sourceControl.myOpenPullRequests': return sourceControl.myOpenPullRequests({fresh: request.params?.fresh});
+    case 'catalog.plugins': return catalog.allPlugins({fresh: request.params?.fresh});
     case 'catalog.installPlugin': {
       await allowPluginSource(request.params.target, request.params.pluginId);
       await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${request.params.pluginId}`, `plugin install ${request.params.pluginId}`);
-      return catalog.installPlugin(request.params.target, request.params.pluginId);
+      const installed = await catalog.installPlugin(request.params.target, request.params.pluginId);
+      catalog.invalidateCatalog();
+      return installed;
     }
-    case 'catalog.marketplaces': return catalog.allMarketplaces();
+    case 'catalog.marketplaces': return catalog.allMarketplaces({fresh: request.params?.fresh});
     case 'catalog.addMarketplace': {
       // Validate before consuming the one-time approval. An invalid source must not spend the
       // user's consent record or reach a provider CLI as a surprising option/remote string.
       const source = (await allowMarketplaceSource(request.params.source, request.params.trustSource, request.params.policyApprovalId)).validated.source;
       await requireApproval(request.params.approvalId, 'extension.install', `${request.params.target}:${source}`, `marketplace add ${source}`);
-      return catalog.addMarketplace(request.params.target, source);
+      const added = await catalog.addMarketplace(request.params.target, source);
+      catalog.invalidateCatalog();
+      return added;
     }
     case 'catalog.sourcePolicy.get': return extensionSources.get();
     case 'catalog.sourcePolicy.mode.set': {
@@ -824,13 +833,28 @@ async function dispatch(request: RpcRequest) {
       await requireApproval(request.params.approvalId, 'extension.policy', `extension-source-policy:${request.params.sourceId}`, `remove ${request.params.sourceId}`);
       return extensionSources.remove(request.params.sourceId);
     }
-    case 'catalog.mcpServers': return catalog.mcpServers();
+    case 'catalog.mcpServers': return catalog.mcpServers({fresh: request.params?.fresh});
     case 'catalog.addMcpServer': {
       const binding = await allowMcpSource(request.params.targets, request.params.config, request.params.trustSource, request.params.policyApprovalId);
       await requireApproval(request.params.approvalId, 'extension.install', binding.target, binding.command);
-      return catalog.addMcpServerToTargets(request.params.targets, request.params.config);
+      const results = await catalog.addMcpServerToTargets(request.params.targets, request.params.config);
+      catalog.invalidateCatalog();
+      return results;
     }
-    case 'providers.list': return providerHealth();
+    case 'providers.list': return providersMemo.get({fresh: request.params?.fresh});
+    case 'tools.installPlan': return installPlan(request.params.tool, installFacts(), {agent: request.params.agent});
+    case 'tools.install': {
+      const plan = installPlan(request.params.tool, installFacts(), {agent: request.params.agent});
+      if (!plan.ready) throw new Error(plan.unavailable);
+      await requireApproval(request.params.approvalId, 'extension.install', `tool:${plan.tool}`, plan.command);
+      const result = await runInstall(plan);
+      // Installers add their own bin directory; adopt it and forget every answer that said "not installed".
+      adoptConventionalPath();
+      providersMemo.invalidate();
+      designToolsMemo.invalidate();
+      skillsMemo.invalidate();
+      return result;
+    }
     case 'admission.assess': return assessAdmission(request.params.provider, request.params.accountId);
     case 'coordination.get': return coordination.get(request.params.project);
     case 'coordination.brief.set': return coordination.setMasterBrief(request.params.project, request.params.brief);
@@ -899,7 +923,7 @@ async function dispatch(request: RpcRequest) {
     case 'openDesign.get': return openDesign.get();
     case 'openDesign.save': return openDesign.save(request.params.url);
     case 'openDesign.status': return openDesign.status();
-    case 'designTools.list': return designTools.list();
+    case 'designTools.list': return designToolsMemo.get({fresh: request.params?.fresh});
     case 'designTools.installOpenDesignMcp': {
       await requireApproval(request.params.approvalId, 'extension.install', `open-design:${request.params.target}`, 'install OpenDesign MCP');
       return designTools.installOpenDesignMcp(request.params.target);
@@ -1023,7 +1047,23 @@ function pidAlive(pid: number) {
   }
 }
 
+// Probing a CLI costs a process start each; these answers change only when something is installed.
+const providersMemo = new Memo(60_000, providerHealth);
+const designToolsMemo = new Memo(60_000, () => designTools.list());
+const skillsMemo = new Memo(60_000, () => collaborationStatus());
+
 async function main() {
+  // Before any probe or lane: see the same PATH the user's terminal does (see shell-path.ts). The
+  // usual installer directories apply now; the login shell's own PATH is merged in when it answers,
+  // and every "not installed" answer given before then is forgotten.
+  adoptConventionalPath();
+  void adoptLoginShellPath({timeoutMs: 10_000}).then(result => {
+    if (!result.added.length) return;
+    console.log(`fluentd PATH: +${result.added.length} director${result.added.length === 1 ? 'y' : 'ies'} from the login shell`);
+    providersMemo.invalidate();
+    designToolsMemo.invalidate();
+    skillsMemo.invalidate();
+  });
   // Starting a second daemon used to unlink the first one's socket and listen in its place, leaving
   // the first running but unreachable — together with every lane it held. Each app launch did this,
   // so the window could end up talking to a stale daemon while live lanes sat orphaned. Defer to the
@@ -1143,6 +1183,17 @@ async function main() {
     void chmod(socketPath, 0o600)
       .then(() => console.log(`fluentd listening on ${socketPath}`))
       .catch(error => console.error(`fluentd could not secure its socket: ${error.message}`));
+    // Warm the screens whose answers come from provider CLIs and GitHub, staggered and well after
+    // startup, so the first visit finds a cached answer and a short-lived daemon (tests, a quick
+    // status check) never pays for any of it. `claude mcp list` health-checks every server (~10s)
+    // and `codex plugin list` asks remote marketplaces; neither belongs on a click.
+    const warm = (delayMs: number, label: string, work: () => Promise<unknown>) =>
+      setTimeout(() => void work().catch(error => console.error(`fluentd ${label} warm-up failed: ${error.message}`)), delayMs).unref();
+    warm(3_000, 'providers', () => providersMemo.get());
+    warm(5_000, 'design tools', () => designToolsMemo.get());
+    warm(8_000, 'skills', () => skillsMemo.get());
+    warm(12_000, 'catalog', () => Promise.all([catalog.allPlugins(), catalog.allMarketplaces(), catalog.mcpServers()]));
+    warm(20_000, 'spend', () => spend.warm());
   });
   let shuttingDown = false;
   const shutdown = () => {
