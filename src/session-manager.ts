@@ -217,6 +217,7 @@ export class SessionManager extends EventEmitter {
       worktreePath: worktree?.path,
       prepareMs: worktree?.prepareMs,
       warmedPaths: worktree?.warmedPaths,
+      includedPaths: worktree?.includedPaths,
       ...(lead ? {lead} : {}),
       ...(parentSessionId ? {parentSessionId} : {}),
       ...(permissionMode?.trim() ? {permissionMode: permissionMode.trim()} : {}),
@@ -504,8 +505,11 @@ export class SessionManager extends EventEmitter {
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     if (session.terminal) throw new Error('Stop the session before removing its worktree');
     if (!session.summary.worktreePath) throw new Error('This session does not use an isolated worktree');
-    await this.worktrees.remove(session.summary.projectDirectory ?? session.summary.worktreePath, session.summary.worktreePath);
+    // Removing the checkout is not the same as discarding what was in it: the snapshot is kept on
+    // the record so the user can still find the work after the worktree is gone.
+    const snapshot = await this.worktrees.remove(session.summary.projectDirectory ?? session.summary.worktreePath, session.summary.worktreePath);
     session.summary.worktreePath = undefined;
+    session.summary.worktreeSnapshot = snapshot;
     await this.persist();
     return session.summary;
   }

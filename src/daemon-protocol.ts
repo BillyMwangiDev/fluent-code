@@ -49,12 +49,18 @@ export type SessionSummary = {
   /** Original Git project when this session runs in an isolated worktree. */
   projectDirectory?: string;
   worktreePath?: string;
+  /** Where the uncommitted work of a *removed* worktree was saved, set only when there was any.
+   * Removing a worktree is recoverable because of this: `git worktree add <path> <ref>`. */
+  worktreeSnapshot?: {ref: string; commit: string};
   /** Lane-ready latency: how long preparing this session's isolated worktree actually took,
    * including warming its caches. Measured so the orchestrator's speed claim stays falsifiable. */
   prepareMs?: number;
   /** Ignored cache directories reference-cloned into the worktree, empty when the filesystem
    * cannot reflink — so a slow lane start is explainable rather than mysterious. */
   warmedPaths?: string[];
+  /** Ignored paths carried in from the project's `.worktreeinclude`, so a lane that needs local
+   * config is explainable rather than mysteriously broken. */
+  includedPaths?: string[];
   /** Outcome of the project's own checks in this lane. Deliberately separate from `status`: a lane
    * can be running and verified, or exited and failing, and collapsing the two loses that. */
   verification?: VerificationStatus;

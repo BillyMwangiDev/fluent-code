@@ -28,8 +28,10 @@ export type SessionSummary = {
   accountId?: string;
   projectDirectory?: string;
   worktreePath?: string;
+  worktreeSnapshot?: {ref: string; commit: string};
   prepareMs?: number;
   warmedPaths?: string[];
+  includedPaths?: string[];
   verification?: VerificationStatus;
   archivedAt?: string;
   lead?: {maxLanes: number};

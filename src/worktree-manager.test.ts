@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
-import {mkdir, mkdtemp, rm, stat, writeFile} from 'node:fs/promises';
+import {mkdir, mkdtemp, readFile, rm, stat, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {promisify} from 'node:util';
@@ -153,5 +153,92 @@ describe('worktree creation', () => {
     directories.push(plain);
 
     await assert.rejects(() => new WorktreeManager().create(plain, 'lane-d'));
+  });
+});
+
+/** A worktree root outside the project, as `create` would choose. */
+async function worktreeRoot() {
+  const root = await mkdtemp(join(tmpdir(), 'fluent-worktrees-'));
+  directories.push(root);
+  process.env.FLUENT_WORKTREE_DIR = root;
+  return root;
+}
+
+describe('snapshot before removal', () => {
+  it('keeps uncommitted work recoverable after the worktree is gone', async () => {
+    const root = await project();
+    await worktreeRoot();
+    const manager = new WorktreeManager();
+    const worktree = await manager.create(root, 'lane-snapshot');
+    // Exactly what a stopped lane leaves behind: an edit to a tracked file and a brand new one.
+    await writeFile(join(worktree.path, 'README.md'), '# edited by the agent\n');
+    await writeFile(join(worktree.path, 'invoice.txt'), 'agent work\n');
+
+    const snapshot = await manager.remove(worktree.projectDirectory, worktree.path);
+
+    assert.ok(snapshot, 'removing a dirty worktree must not discard its work');
+    await assert.rejects(() => stat(join(worktree.path, 'README.md')), 'the worktree is still removed');
+    // Recoverable from the project itself, which is the only copy that outlives the worktree.
+    assert.equal((await run('git', ['-C', root, 'show', `${snapshot.ref}:README.md`])).stdout, '# edited by the agent\n');
+    assert.equal((await run('git', ['-C', root, 'show', `${snapshot.ref}:invoice.txt`])).stdout, 'agent work\n');
+    delete process.env.FLUENT_WORKTREE_DIR;
+  });
+
+  it('writes no snapshot when the worktree has nothing uncommitted', async () => {
+    const root = await project();
+    await worktreeRoot();
+    const manager = new WorktreeManager();
+    const worktree = await manager.create(root, 'lane-clean');
+
+    assert.equal(await manager.remove(worktree.projectDirectory, worktree.path), undefined);
+    delete process.env.FLUENT_WORKTREE_DIR;
+  });
+
+  it('leaves ignored caches out of the snapshot', async () => {
+    const root = await project();
+    await worktreeRoot();
+    const manager = new WorktreeManager();
+    const worktree = await manager.create(root, 'lane-ignored');
+    await writeFile(join(worktree.path, 'invoice.txt'), 'agent work\n');
+    await mkdir(join(worktree.path, '.venv'), {recursive: true});
+    await writeFile(join(worktree.path, '.venv', 'pyvenv.cfg'), 'home = /usr\n');
+
+    const snapshot = await manager.remove(worktree.projectDirectory, worktree.path);
+
+    assert.ok(snapshot);
+    await assert.rejects(
+      () => run('git', ['-C', root, 'show', `${snapshot.ref}:.venv/pyvenv.cfg`]),
+      'a snapshot that swallowed ignored caches would be gigabytes of nothing'
+    );
+    delete process.env.FLUENT_WORKTREE_DIR;
+  });
+});
+
+describe('.worktreeinclude', () => {
+  it('copies a listed ignored file into a new worktree', async () => {
+    const root = await project();
+    await writeFile(join(root, '.gitignore'), 'node_modules/\n.venv/\n.env.local\n');
+    await writeFile(join(root, '.env.local'), 'SECRET=1\n');
+    await writeFile(join(root, '.worktreeinclude'), '# local config the checkout cannot carry\n\n.env.local\n');
+    await worktreeRoot();
+
+    const worktree = await new WorktreeManager().create(root, 'lane-include');
+
+    assert.deepEqual(worktree.includedPaths, ['.env.local']);
+    assert.equal(await readFile(join(worktree.path, '.env.local'), 'utf8'), 'SECRET=1\n');
+    delete process.env.FLUENT_WORKTREE_DIR;
+  });
+
+  it('never copies a path Git does not ignore', async () => {
+    const root = await project();
+    // `vendor` is tracked, so the checkout already has it; copying would shadow what the agent reads.
+    await writeFile(join(root, '.worktreeinclude'), 'vendor\n');
+    await worktreeRoot();
+
+    const worktree = await new WorktreeManager().create(root, 'lane-shadow');
+
+    assert.deepEqual(worktree.includedPaths, []);
+    assert.equal(await readFile(join(worktree.path, 'vendor', 'tracked.txt'), 'utf8'), 'tracked\n');
+    delete process.env.FLUENT_WORKTREE_DIR;
   });
 });

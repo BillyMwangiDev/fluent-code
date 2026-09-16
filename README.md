@@ -65,7 +65,11 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
 - Coordination stores tasks, claims, decisions, and handoffs. Claims remain advisory; Fluent can
   observe changed paths, run project checks, predict merge conflicts, and serialize user-requested
   worktree integration, but it does not resolve conflicts automatically. New sessions can opt into
-  a detached Git worktree, which is only removable after its session stops.
+  a detached Git worktree, which is only removable after its session stops. Removing one first saves
+  anything left uncommitted in it to a `refs/fluent-snapshots/` ref in the project, restorable with
+  `git worktree add <path> <ref>`; Git-ignored files in it are still deleted. A project can list
+  Git-ignored paths it wants copied into every new worktree — a `.env.local`, say — one per line in
+  a `.worktreeinclude` file at its root.
 - The catalog screen distinguishes native provider plugins from portable MCP servers. Native
   marketplace plugins remain host-specific; a structured MCP declaration and Fluent's
   collaboration skill can be installed at user scope across Claude Code, Codex, and Gemini CLI

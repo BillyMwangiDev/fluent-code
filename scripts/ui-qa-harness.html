@@ -23,7 +23,7 @@
           id: 'lane-claude-01', provider: 'claude', command: 'claude', directory: project,
           projectDirectory: project, worktreePath: project + '/.fluent-worktrees/fluent-code/lane-claude-01',
           task: 'Refine desktop shell and credential states', status: 'running', accountId: 'claude-subscription',
-          createdAt: now, updatedAt: now, prepareMs: 1200, warmedPaths: ['app/src', 'app/styles.css'], verification: 'passed',
+          createdAt: now, updatedAt: now, prepareMs: 1200, warmedPaths: ['app/src', 'app/styles.css'], includedPaths: ['.env.local'], verification: 'passed',
           lead: {maxLanes: 3}
         };
         const credentials = [
@@ -71,6 +71,7 @@
             session,
             {...session, id: 'lane-codex-02', provider: 'codex', task: 'Review platform-specific IPC', accountId: 'codex-api', status: 'running', verification: 'running', lead: undefined},
             {...session, id: 'lane-stopped-05', provider: 'claude', task: 'Fix payment webhook', status: 'stopped', lead: undefined, directory: project + '/.fluent-worktrees/fluent-code/lane-stopped-05', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-stopped-05'},
+            {...session, id: 'lane-removed-06', provider: 'claude', task: 'Migrate the session store', status: 'stopped', lead: undefined, parentSessionId: undefined, directory: project, worktreePath: undefined, worktreeSnapshot: {ref: 'refs/fluent-snapshots/lane-removed-06', commit: '9f2c1ab4d7e35608b1c2d3e4f5a6b7c8d9e0f1a2'}},
             {...session, id: 'lane-child-04', provider: 'codex', task: 'Parse the config file', accountId: 'codex-api', status: 'running', lead: undefined, parentSessionId: 'lane-claude-01', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-child-04'},
             {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', lead: undefined, archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}
           ],

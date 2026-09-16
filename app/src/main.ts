@@ -288,12 +288,17 @@ function verificationPill(status?: VerificationStatus) {
 
 /** Lane-ready latency, shown per session rather than averaged away: this is the number the
  * orchestrator's speed claim rests on, and a lane whose caches could not be warmed says so. */
-function laneReady(session: {prepareMs?: number; warmedPaths?: string[]; worktreePath?: string}) {
+function laneReady(session: {prepareMs?: number; warmedPaths?: string[]; includedPaths?: string[]; worktreePath?: string}) {
   if (session.prepareMs === undefined) return session.worktreePath ? '—' : 'shared checkout';
   const seconds = session.prepareMs / 1000;
   const duration = seconds < 1 ? `${session.prepareMs}ms` : `${seconds.toFixed(1)}s`;
   const warmed = session.warmedPaths ?? [];
-  return warmed.length > 0 ? `${duration} · warmed ${warmed.join(', ')}` : `${duration} · cold`;
+  const included = session.includedPaths ?? [];
+  // Warming is a guess the filesystem may refuse; an include is something the project asked for by
+  // name. Reporting them apart is what makes a lane missing its local config diagnosable.
+  const carried = [warmed.length > 0 ? `warmed ${warmed.join(', ')}` : 'cold'];
+  if (included.length > 0) carried.push(`included ${included.join(', ')}`);
+  return `${duration} · ${carried.join(' · ')}`;
 }
 
 function relativeTime(iso: string): string {
@@ -3389,7 +3394,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
     const removeWorktree = h('button', {class: 'btn'}, ['remove worktree']);
     removeWorktree.disabled = !summary.worktreePath || summary.status === 'running' || summary.status === 'starting';
     removeWorktree.addEventListener('click', async () => {
-      if (!(await askConfirm({title: 'remove worktree', body: 'Remove this stopped agent worktree? Uncommitted changes in it will be discarded.', confirmLabel: 'remove worktree', danger: true}))) return;
+      if (!(await askConfirm({title: 'remove worktree', body: 'Remove this stopped agent worktree? Uncommitted work is saved to the project first and stays restorable, but Git-ignored files in it — caches, and any local config carried in by .worktreeinclude — are deleted for good.', confirmLabel: 'remove worktree', danger: true}))) return;
       await api.removeWorktree(sessionId);
       void render();
     });
@@ -3513,6 +3518,7 @@ async function renderActiveSession(main: HTMLElement, sessionId: string) {
           ...(currentRun?.checkpoint ? [h('span', {class: 'pill'}, [`checkpoint · ${currentRun.checkpoint.gitRef?.slice(0, 8) ?? 'no git ref'} · ${currentRun.checkpoint.workingTree}`])] : []),
           ...(currentRun?.timing['provider.first_event']?.available === false ? [h('span', {class: 'pill'}, ['provider first event · unavailable'])] : []),
           verificationPill(summary.verification),
+          ...(summary.worktreeSnapshot ? [h('span', {class: 'pill', title: `restore with: git worktree add <path> ${summary.worktreeSnapshot.ref}`}, [`snapshot · ${summary.worktreeSnapshot.commit.slice(0, 8)}`])] : []),
           h('span', {class: 'dir'}, [summary.worktreePath ? `isolated · ${summary.directory}` : summary.directory])
         ])
       ]),
