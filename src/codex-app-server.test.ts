@@ -258,3 +258,58 @@ function handle(request, send) { send({id: request.id, result: {}}); }`);
     assert.equal(closed, 1);
   });
 });
+
+describe('app-server request timeouts', () => {
+  /**
+   * The rate-limit poller used to cancel every timer it could see once a read came back, including
+   * the timeouts of requests still in flight — so a request the server never answered hung forever
+   * instead of rejecting. Poll timers and request timers have to be tracked apart.
+   */
+  it('still times out a request the server never answers, after a rate-limit read succeeds', async () => {
+    const executable = await fakeServer(`
+      let answeredRateLimits = false;
+      function handle(request, send) {
+        if (request.method === 'initialize') return send({id: request.id, result: {}});
+        if (request.method === 'account/rateLimits/read') {
+          // The first read succeeds, which is what used to clear every pending timer.
+          if (!answeredRateLimits) {
+            answeredRateLimits = true;
+            return send({id: request.id, result: {rateLimits: {primary: {usedPercent: 11, windowDurationMins: 300}}}});
+          }
+          // Every later read is swallowed: this is the request that must still time out.
+          return;
+        }
+      }
+    `);
+    // Comfortably longer than spawning the stand-in server and finishing the handshake (~500ms
+    // here), but short enough that the unanswered read below still resolves quickly.
+    const server = new CodexAppServer({executable, requestTimeoutMs: 1_500, initialReadDelaysMs: [50]});
+
+    assert.equal(await server.start(), true);
+    // Let the scheduled poll land and succeed first — that success is what used to cancel the
+    // timeout of every request still in flight.
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    const hung = await server.readRateLimits();
+
+    assert.equal(hung, undefined, 'an unanswered read must resolve undefined via its own timeout, not hang');
+    server.stop();
+  });
+
+  it('keeps answering after many completed requests', async () => {
+    const executable = await fakeServer(`
+      function handle(request, send) {
+        if (request.method === 'initialize') return send({id: request.id, result: {}});
+        if (request.method === 'account/rateLimits/read') {
+          return send({id: request.id, result: {rateLimits: {primary: {usedPercent: 5, windowDurationMins: 300}}}});
+        }
+      }
+    `);
+    const server = new CodexAppServer({executable, requestTimeoutMs: 5_000, initialReadDelaysMs: []});
+
+    assert.equal(await server.start(), true);
+    for (let i = 0; i < 25; i++) assert.equal((await server.readRateLimits())?.primary?.usedPercent, 5);
+
+    server.stop();
+  });
+});

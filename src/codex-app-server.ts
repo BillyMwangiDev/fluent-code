@@ -8,8 +8,9 @@ import type {ProviderQuota, QuotaWindow} from './daemon-protocol.js';
  * schedule and then left to the event stream.
  */
 const initialReadDelaysMs = [1_500, 6_000, 20_000];
+const defaultRequestTimeoutMs = 15_000;
 
-type Pending = {resolve: (value: unknown) => void; reject: (error: Error) => void};
+type Pending = {resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout};
 
 export type CodexApproval = {
   /** The server-request id. This is deliberately opaque: app-server request ids need not be numbers. */
@@ -117,10 +118,12 @@ export class CodexAppServer extends EventEmitter {
   private buffer = '';
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
-  private timers: NodeJS.Timeout[] = [];
+  /** Only the rate-limit poll timers. A request's own timeout rides on its pending record instead,
+   * so cancelling the polls can never cancel a request that is still in flight. */
+  private pollTimers: NodeJS.Timeout[] = [];
   private closed = false;
 
-  constructor(private readonly options: {executable?: string; cwd?: string; env?: NodeJS.ProcessEnv} = {}) {
+  constructor(private readonly options: {executable?: string; cwd?: string; env?: NodeJS.ProcessEnv; requestTimeoutMs?: number; initialReadDelaysMs?: readonly number[]} = {}) {
     super();
   }
 
@@ -180,9 +183,12 @@ export class CodexAppServer extends EventEmitter {
   stop() {
     if (this.closed) return;
     this.closed = true;
-    for (const timer of this.timers) clearTimeout(timer);
-    this.timers = [];
-    for (const {reject} of this.pending.values()) reject(new Error('The Codex app-server channel closed'));
+    for (const timer of this.pollTimers) clearTimeout(timer);
+    this.pollTimers = [];
+    for (const {reject, timer} of this.pending.values()) {
+      clearTimeout(timer);
+      reject(new Error('The Codex app-server channel closed'));
+    }
     this.pending.clear();
     this.child?.kill('SIGTERM');
     this.child = undefined;
@@ -190,15 +196,16 @@ export class CodexAppServer extends EventEmitter {
   }
 
   private scheduleInitialReads() {
-    for (const delay of initialReadDelaysMs) {
+    for (const delay of this.options.initialReadDelaysMs ?? initialReadDelaysMs) {
       const timer = setTimeout(() => {
         void this.readRateLimits().then(quota => {
           // Once something real comes back, stop asking — the event stream carries it from here.
-          if (quota) for (const pending of this.timers) clearTimeout(pending);
+          // Only the polls are cancelled; a request still waiting keeps its own timeout.
+          if (quota) for (const poll of this.pollTimers) clearTimeout(poll);
         });
       }, delay);
       timer.unref();
-      this.timers.push(timer);
+      this.pollTimers.push(timer);
     }
   }
 
@@ -223,6 +230,7 @@ export class CodexAppServer extends EventEmitter {
       const pending = this.pending.get(message.id);
       this.pending.delete(message.id);
       if (!pending) return;
+      clearTimeout(pending.timer);
       if ('error' in message) {
         const error = message.error as {message?: string} | undefined;
         pending.reject(new Error(error?.message ?? 'Codex app-server error'));
@@ -263,16 +271,17 @@ export class CodexAppServer extends EventEmitter {
     return new Promise<unknown>((resolve, reject) => {
       if (!this.child) return reject(new Error('The Codex app-server is not running'));
       const id = this.nextId++;
-      this.pending.set(id, {resolve, reject});
-      // The app-server omits the standard "jsonrpc" member; it is a JSON-RPC 2.0 dialect, not
-      // strict JSON-RPC, and sending the member is not what it reads.
-      this.child.stdin.write(`${JSON.stringify({id, method, params})}\n`);
       const timer = setTimeout(() => {
         if (!this.pending.delete(id)) return;
         reject(new Error(`Codex app-server did not answer ${method}`));
-      }, 15_000);
+      }, this.options.requestTimeoutMs ?? defaultRequestTimeoutMs);
       timer.unref();
-      this.timers.push(timer);
+      // The timeout travels with the pending record, so answering the request clears it. Keeping
+      // every timer in one array instead grew that array for the whole life of the lane.
+      this.pending.set(id, {resolve, reject, timer});
+      // The app-server omits the standard "jsonrpc" member; it is a JSON-RPC 2.0 dialect, not
+      // strict JSON-RPC, and sending the member is not what it reads.
+      this.child.stdin.write(`${JSON.stringify({id, method, params})}\n`);
     });
   }
 
