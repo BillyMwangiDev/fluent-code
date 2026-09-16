@@ -1,5 +1,6 @@
 import {api, type CredentialChainState, type ProviderId} from '../api';
 import {navigate, refresh} from '../router';
+import {prefs} from '../prefs';
 import {button, h, markEl} from '../ui';
 
 /** The packaged daemon is started by Tauri immediately before the webview loads. Give its
@@ -33,7 +34,14 @@ export async function renderSplash(main: HTMLElement) {
     return;
   }
 
-  const [chains, installed] = await Promise.all([api.listCredentials().catch(() => [] as CredentialChainState[]), api.listProviders().catch(() => [])]);
+  const [chains, firstProbe] = await Promise.all([api.listCredentials().catch(() => [] as CredentialChainState[]), api.listProviders().catch(() => [])]);
+  // fluentd's first `--version` probe after it starts can come back empty; a second look a moment
+  // later is cheap, and it keeps a machine with Claude Code installed from being sent to onboarding.
+  let installed = firstProbe;
+  if (!installed.some(provider => provider.installed)) {
+    await new Promise(resolve => setTimeout(resolve, 800));
+    installed = await api.listProviders().catch(() => firstProbe);
+  }
   const providers: Array<{id: ProviderId; label: string}> = [
     {id: 'claude', label: 'anthropic claude'},
     {id: 'codex', label: 'openai codex'},
@@ -57,7 +65,9 @@ export async function renderSplash(main: HTMLElement) {
 
   // A CLI that is installed can already log in on its own, so the workspace is the right landing;
   // onboarding is for a machine with nothing to run yet.
-  const canStart = chains.some(chain => chain.accounts.length > 0) || installed.some(provider => provider.installed);
+  // Someone who already chose a workspace has used Fluent before; the workspace is home, and
+  // credentials stay one click away in the rail. Onboarding is for a first run with nothing to run.
+  const canStart = Boolean(prefs.workspacePath) || chains.some(chain => chain.accounts.length > 0) || installed.some(provider => provider.installed);
   const advance = () => navigate(canStart ? {name: 'orchestration'} : {name: 'onboarding'});
   container.addEventListener('click', advance);
   const onKey = (event: KeyboardEvent) => {
