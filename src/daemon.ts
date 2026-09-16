@@ -41,6 +41,8 @@ import {shouldAutoVerify} from './auto-verify.js';
 import {adoptConventionalPath, adoptLoginShellPath} from './shell-path.js';
 import {Memo} from './swr-cache.js';
 import {installFacts, installPlan, runInstall} from './installer.js';
+import {budgetVerdict, inheritedBudget, validBudgetUsd} from './budget.js';
+import {appendCredentialEvent, listCredentialEvents} from './credential-events.js';
 
 const socketPath = daemonSocketPath();
 /** Lanes whose exit has already started an automatic verification, so recording that verification's
@@ -53,9 +55,11 @@ const hardware = new HardwareMonitor();
 const coordination = new CoordinationManager();
 const remotes = new RemoteManager();
 const software = new SoftwareMonitor();
-const usage = new UsageMonitor();
-const resources = new ResourceMonitorClient();
 const spend = new SpendTracker();
+// Priced the same way a spend summary prices a transcript, so a running lane's live estimate and
+// its later 30-day summary never disagree about a model's rate.
+const usage = new UsageMonitor(undefined, model => spend.rateForModel(model));
+const resources = new ResourceMonitorClient();
 const openDesign = new OpenDesignManager();
 const designTools = new DesignToolManager();
 const verification = new VerificationRunner();
@@ -78,9 +82,29 @@ const sessionSubscribers = new Map<string, Set<Socket>>();
 const runSubscribers = new Map<Socket, string>();
 /** The last status each lane was announced for, so one ending is one notification. */
 const announcedStatus = new Map<string, string>();
+/** Lanes already stopped for budget, so a second usage report for the same lane cannot stop it — or
+ * announce it — twice while the first stop is still in flight. */
+const budgetStopped = new Set<string>();
 
 function announce(sessionId: string, reason: AttentionReason, summary: SessionSummary, detail?: string) {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.attention', sessionId, reason, summary, ...(detail ? {detail} : {})});
+}
+
+/**
+ * Stops a lane the moment its own reported or estimated cost reaches its budget (spec §2.3) — the
+ * only local, loop-agnostic safety net this release ships. Called after every usage update so a
+ * runaway lane is caught on its very next report; a no-op for a lane with no cap or no cost figure.
+ */
+async function enforceBudget(sessionId: string) {
+  const session = manager.list().find(candidate => candidate.id === sessionId);
+  if (!session || session.status !== 'running' || budgetStopped.has(sessionId)) return;
+  const verdict = budgetVerdict(usage.get(sessionId), session.budgetUsd);
+  if (!verdict.enforceable || !verdict.over) return;
+  budgetStopped.add(sessionId);
+  await manager.stop(sessionId);
+  const summary = manager.setStoppedBy(sessionId, 'budget');
+  const detail = `stopped at $${verdict.costUsd!.toFixed(2)} of $${verdict.budgetUsd!.toFixed(2)}`;
+  for (const socket of streamingSockets) pushEvent(socket, {event: 'sessions.attention', sessionId, reason: 'budget', summary, detail});
 }
 
 function reply(socket: Socket, response: RpcResponse) {
@@ -170,10 +194,15 @@ manager.on('status', (sessionId: string, summary) => {
 manager.on('deleted', (sessionId: string) => {
   sessionSubscribers.delete(sessionId);
   autoVerified.delete(sessionId);
+  budgetStopped.delete(sessionId);
 });
 manager.runStore.on('event', event => runEvents.publish(event));
-broker.on('switched', (provider, accountId, reason) => {
+broker.on('switched', (provider, accountId, reason, fromAccountId?: string, resetAt?: string) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.switched', provider, accountId, reason});
+  // Durable, independent of the live push above: the spend page reads this back for a range the
+  // socket that switched the credential may no longer be connected for.
+  const event = {at: new Date().toISOString(), provider, toAccountId: accountId, reason, ...(fromAccountId ? {fromAccountId} : {}), ...(resetAt ? {resetAt} : {})};
+  void appendCredentialEvent(stateDirectory, event).catch(error => console.error(`fluentd could not record a credential event: ${error.message}`));
 });
 broker.on('notice', (provider, message, resetAt, guidance) => {
   for (const socket of streamingSockets) pushEvent(socket, {event: 'credential.notice', provider, message, resetAt, guidance});
@@ -533,7 +562,9 @@ async function laneCommand(params: Extract<RpcRequest, {method: 'agent.lane'}>['
         env: await broker.resolveEnv(provider),
         accountId: broker.list().find(state => state.provider === provider)?.activeAccountId,
         isolate: !params.shared,
-        parentSessionId: caller.id
+        parentSessionId: caller.id,
+        // A subagent a lead starts inherits the lead's own budget cap (spec §2.3).
+        budgetUsd: inheritedBudget(undefined, caller)
       });
       if (task) await coordination.assignTask(project, task.id, {sessionId: lane.id, provider}, caller.id);
       let verdict: ReturnType<typeof assessAdmission> | undefined;
@@ -597,6 +628,7 @@ async function handleHookReport({cwd, sessionId, event, payload}: {cwd: string; 
   if (!session) return {handled: false};
   if (event === 'StatusLine' && session.provider === 'claude') {
     await usage.recordClaude(session.id, payload);
+    await enforceBudget(session.id);
     // The status line is where Claude Code reports its own prompt-cache reuse. Handing it to the
     // broker is what lets a fallback notice say what switching costs instead of implying it is
     // free (spec §9 + docs/research/2026-09-13-agent-orchestration.md §2.5).
@@ -652,6 +684,7 @@ async function dispatch(request: RpcRequest) {
       return manager.create({
         ...request.params,
         lead,
+        budgetUsd: validBudgetUsd(request.params.budgetUsd),
         // Only a lead's own `lane start` may record a parent; a raw request cannot forge one.
         parentSessionId: undefined,
         env: await broker.resolveEnv(request.params.provider, request.params.accountId),
@@ -670,7 +703,9 @@ async function dispatch(request: RpcRequest) {
       if (isRiskyPermission(session.provider, session.permissionMode)) {
         await requireApproval(request.params.permissionApprovalId, 'session.permissions', session.directory, `permission ${session.permissionMode}`);
       }
-      return manager.resume(session.id, await broker.resolveEnv(session.provider, session.accountId));
+      // A resumed lane is not stopped for budget any more, whatever stopped it last time.
+      budgetStopped.delete(session.id);
+      return manager.resume(session.id, await broker.resolveEnv(session.provider, session.accountId), validBudgetUsd(request.params.budgetUsd));
     }
     case 'sessions.archive': return manager.archive(request.params.sessionId);
     case 'sessions.restore': return manager.restoreArchived(request.params.sessionId);
@@ -794,7 +829,11 @@ async function dispatch(request: RpcRequest) {
     case 'usage.snapshot': return usage.snapshot();
     case 'resources.snapshot': return resources.sampleNow();
     case 'resources.history': return resources.readHistory(request.params.windowMs);
-    case 'spend.summary': return spend.summary(request.params.rangeDays);
+    case 'spend.summary': {
+      const summary = await spend.summary(request.params.rangeDays);
+      const sinceMs = Date.now() - summary.rangeDays * 24 * 60 * 60 * 1_000;
+      return {...summary, credentialEvents: await listCredentialEvents(stateDirectory, sinceMs)};
+    }
     case 'spend.setPriceOverride': await spend.setPriceOverride(request.params.model, request.params.override); return {ok: true};
     case 'spend.clearPriceOverride': await spend.clearPriceOverride(request.params.model); return {ok: true};
     case 'sourceControl.repoStatus': return sourceControl.repoStatus(request.params.directory);

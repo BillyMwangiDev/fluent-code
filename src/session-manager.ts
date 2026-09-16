@@ -180,7 +180,7 @@ export class SessionManager extends EventEmitter {
     return {...session.summary, output: session.output.text()};
   }
 
-  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: LeadGrant; parentSessionId?: string; model?: string; permissionMode?: string}) {
+  async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode, budgetUsd}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: LeadGrant; parentSessionId?: string; model?: string; permissionMode?: string; budgetUsd?: number}) {
     const adapter = providerAdapter(provider);
     // Both checks fail before any session or run record exists.
     resolveProviderExecutable(adapter);
@@ -222,6 +222,7 @@ export class SessionManager extends EventEmitter {
       ...(lead ? {lead} : {}),
       ...(parentSessionId ? {parentSessionId} : {}),
       ...(permissionMode?.trim() ? {permissionMode: permissionMode.trim()} : {}),
+      ...(budgetUsd !== undefined ? {budgetUsd} : {}),
       // Claude Code accepts a conversation id at launch; recording it is what makes resume exact.
       ...(provider === 'claude' ? {nativeSessionId: id} : {})
     };
@@ -245,7 +246,7 @@ export class SessionManager extends EventEmitter {
    * conversation with the model and permission mode it launched with. The lane keeps its id, so its
    * tasks, messages, and lead relationships stay attached.
    */
-  async resume(sessionId: string, env?: CredentialEnvironment) {
+  async resume(sessionId: string, env?: CredentialEnvironment, budgetUsd?: number) {
     const session = this.requireStoppedSession(sessionId, 'resume');
     const {summary} = session;
     if (summary.archivedAt) throw new Error('Restore the session before resuming it');
@@ -263,6 +264,10 @@ export class SessionManager extends EventEmitter {
     await this.runStore.reopen(sessionId, 'session resumed', {adapter: 'pty'});
     delete summary.exitCode;
     delete summary.error;
+    // A resumed lane is not stopped any more, whatever stopped it last time; a new cap replaces the
+    // old one when the caller gives one, and is otherwise left as it was.
+    delete summary.stoppedBy;
+    if (budgetUsd !== undefined) summary.budgetUsd = budgetUsd;
     this.setStatus(session, 'starting');
     await this.launch(session, env, args);
     await this.persist();
@@ -442,6 +447,19 @@ export class SessionManager extends EventEmitter {
       await this.runStore.record(sessionId, 'run.finished', {status: 'cancelled'}, {adapter: 'pty'});
     }
     this.setStatus(session, 'stopped');
+    return session.summary;
+  }
+
+  /** Records that fluentd stopped this lane itself, right after the ordinary `stop()` — set only by
+   * budget enforcement, never by a user-requested stop, so a resumed lane's history is honest about
+   * why it last ended. */
+  setStoppedBy(sessionId: string, stoppedBy: SessionSummary['stoppedBy']) {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    session.summary.stoppedBy = stoppedBy;
+    session.summary.updatedAt = new Date().toISOString();
+    this.queuePersist();
+    this.emit('status', session.summary.id, session.summary);
     return session.summary;
   }
 

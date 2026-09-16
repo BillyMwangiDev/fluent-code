@@ -1,9 +1,10 @@
 import {dirname, join} from 'node:path';
 import type {ProviderId, ProviderQuota, QuotaWindow, UsageSnapshot} from './daemon-protocol.js';
+import type {CostSource, ModelRate} from './spend-tracker.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 type Point = {capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number};
-type SessionUsage = {sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Point[]};
+type SessionUsage = {sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; costSource?: CostSource; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Point[]};
 
 const object = (value: unknown) => value && typeof value === 'object' ? value as Record<string, unknown> : {};
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -36,7 +37,12 @@ export function mergeQuota(previous: ProviderQuota | undefined, update: Partial<
 export class UsageMonitor {
   private sessions = new Map<string, SessionUsage>();
   private stateFile: string;
-  constructor(stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent')) { this.stateFile = join(stateDirectory, 'usage.json'); }
+  /** Same override-then-LiteLLM-table lookup the spend page prices a transcript against, so a
+   * lane's live cost estimate and its later 30-day summary never disagree about a model's price. */
+  constructor(
+    stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent'),
+    private readonly rateForModel?: (model: string) => ModelRate | undefined
+  ) { this.stateFile = join(stateDirectory, 'usage.json'); }
   async restore() {
     try {
       const stored = await readPrivateJson<SessionUsage[]>(this.stateFile);
@@ -67,7 +73,11 @@ export class UsageMonitor {
     const limits = object(payload.rate_limits); const five = object(limits.five_hour); const seven = object(limits.seven_day);
     const cache = object(payload.prompt_cache); const now = new Date().toISOString();
     const prior = this.sessions.get(sessionId);
-    const point: Point = {capturedAt: now, inputTokens: number(context.total_input_tokens), outputTokens: number(context.total_output_tokens), contextPercent: number(context.used_percentage), costUsd: number(cost.total_cost_usd)};
+    const modelName = typeof model.display_name === 'string' ? model.display_name : prior?.model;
+    const inputTokens = number(context.total_input_tokens);
+    const outputTokens = number(context.total_output_tokens);
+    const {costUsd, costSource} = this.priceUsage(modelName, inputTokens, outputTokens, number(cost.total_cost_usd));
+    const point: Point = {capturedAt: now, inputTokens, outputTokens, contextPercent: number(context.used_percentage), costUsd};
     // Claude Code's five-hour and seven-day windows are the same two windows Codex calls primary
     // and secondary; naming them by duration is what lets one screen show both providers.
     const quota = mergeQuota(prior?.quota, {
@@ -76,12 +86,25 @@ export class UsageMonitor {
       observedAt: now
     });
     this.sessions.set(sessionId, {
-      sessionId, provider: 'claude', model: typeof model.display_name === 'string' ? model.display_name : prior?.model,
-      inputTokens: point.inputTokens, outputTokens: point.outputTokens, contextWindow: number(context.context_window_size), contextPercent: point.contextPercent, costUsd: point.costUsd,
+      sessionId, provider: 'claude', model: modelName,
+      inputTokens: point.inputTokens, outputTokens: point.outputTokens, contextWindow: number(context.context_window_size), contextPercent: point.contextPercent, costUsd: point.costUsd, costSource,
       cacheHitRatio: number(cache.hit_ratio), quota, updatedAt: now,
       history: [...(prior?.history ?? []), point].slice(-60)
     });
     await this.persist();
+  }
+
+  /** Reported cost wins when Claude Code sends one. Otherwise, with tokens and a known rate, the
+   * cost is estimated from them; with tokens but no rate it is unpriced rather than guessed at
+   * zero. Codex has no equivalent live figure to price here: its app-server reports rate-limit
+   * windows only (see codex-app-server.ts), never a per-turn token count, so a Codex lane's cost
+   * stays unset until the app-server documents one — never invented from nothing. */
+  private priceUsage(model: string | undefined, inputTokens: number | undefined, outputTokens: number | undefined, reportedCostUsd: number | undefined): {costUsd?: number; costSource?: CostSource} {
+    if (reportedCostUsd !== undefined) return {costUsd: reportedCostUsd, costSource: 'providerReported'};
+    if (inputTokens === undefined && outputTokens === undefined) return {};
+    const rate = model ? this.rateForModel?.(model) : undefined;
+    if (!rate) return {costSource: 'unpriced'};
+    return {costUsd: (inputTokens ?? 0) * rate.inputCostPerToken + (outputTokens ?? 0) * rate.outputCostPerToken, costSource: 'modelPriced'};
   }
 
   private async persist() { await writePrivateJson(this.stateFile, [...this.sessions.values()]); }

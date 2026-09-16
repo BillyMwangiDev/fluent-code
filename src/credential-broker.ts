@@ -410,6 +410,13 @@ export class CredentialBroker extends EventEmitter {
       };
     }
 
+    // A subscription's 1-hour prompt cache is the concrete cost of the switch this recommendation
+    // is about to suggest — worth saying plainly rather than leaving it implied by cacheHitRatio.
+    const limitedAccountMode = state.accounts.find(account => account.id === limitedId)?.mode;
+    if (next && limitedAccountMode === 'subscription') {
+      parts.push('Switching drops this lane\'s 1-hour prompt cache; its next turn re-reads context at full price.');
+    }
+
     return {
       recommendation: next ? 'switch' : 'wait',
       resetsInMs,
@@ -445,7 +452,7 @@ export class CredentialBroker extends EventEmitter {
     // 'always-switch' is an instruction, not a suggestion: honour it even when waiting would cost
     // less, and say what it cost rather than quietly substituting our own judgement.
     this.applyFallback(state, limitedId, options.resetAt);
-    this.emit('switched', provider, state.activeAccountId, 'fallback');
+    this.emit('switched', provider, state.activeAccountId, 'fallback', limitedId, options.resetAt);
     if (guidance.recommendation === 'wait') this.emit('notice', provider, `Switched away from ${limitedId} as configured. ${guidance.detail}`, options.resetAt, guidance);
     await this.persist();
     return this.publicState(state);
@@ -460,7 +467,7 @@ export class CredentialBroker extends EventEmitter {
     const limitedId = options.accountId ?? state.activeAccountId ?? state.chain[0];
     if (!limitedId) return this.publicState(state);
     this.applyFallback(state, limitedId, options.resetAt);
-    this.emit('switched', provider, state.activeAccountId, 'manual');
+    this.emit('switched', provider, state.activeAccountId, 'manual', limitedId, options.resetAt);
     await this.persist();
     return this.publicState(state);
   }
@@ -482,11 +489,13 @@ export class CredentialBroker extends EventEmitter {
 
   private async revert(provider: ProviderId) {
     const state = this.ensure(provider);
+    // The fallback account this reverts away from, captured before recomputeActive replaces it.
+    const from = state.activeAccountId;
     state.limitedAccountId = undefined;
     state.revertAt = undefined;
     state.revertTimer = undefined;
     this.recomputeActive(state);
-    this.emit('switched', provider, state.activeAccountId, 'revert');
+    this.emit('switched', provider, state.activeAccountId, 'revert', from);
     await this.persist();
   }
 

@@ -262,6 +262,10 @@ export class CodexAppServer extends EventEmitter {
       return;
     }
     if (method === 'turn/completed') {
+      // `usage` here is read only for its rate-limit windows, the same shape as the two branches
+      // above. A per-turn token count is not part of the documented `turn/completed` payload, so
+      // there is nothing here for usage-monitor.ts to price a Codex lane's cost from — it stays
+      // unpriced rather than guessed at (see UsageMonitor.priceUsage).
       const quota = quotaFrom((message.params as Record<string, unknown> | undefined)?.usage);
       if (quota) this.emit('quota', quota);
     }

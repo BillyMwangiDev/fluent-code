@@ -78,6 +78,10 @@ export type SessionSummary = {
   lead?: LeadGrant;
   /** The lead session that started this lane, when a lead did. */
   parentSessionId?: string;
+  /** Dollar cap the user set for this lane; fluentd stops the lane when its cost reaches it. */
+  budgetUsd?: number;
+  /** Set when fluentd stopped the lane itself rather than the user. */
+  stoppedBy?: 'budget';
 };
 
 export type SessionSnapshot = SessionSummary & {
@@ -127,7 +131,7 @@ export type QuotaWindow = {usedPercent?: number; windowMinutes?: number; resetsA
  */
 export type ProviderQuota = {primary?: QuotaWindow; secondary?: QuotaWindow; observedAt: string};
 
-export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
+export type UsageSnapshot = {sessions: Array<{sessionId: string; provider: ProviderId; model?: string; inputTokens?: number; outputTokens?: number; contextWindow?: number; contextPercent?: number; costUsd?: number; /** Where costUsd came from: the provider's own figure, fluentd's price table, or nowhere. */ costSource?: 'providerReported' | 'modelPriced' | 'unpriced'; cacheHitRatio?: number; quota?: ProviderQuota; updatedAt: string; history: Array<{capturedAt: string; inputTokens?: number; outputTokens?: number; contextPercent?: number; costUsd?: number}>}>};
 export type ResourceSnapshot = {sequence: number; sampledAtUnixMs: number; scannedProcessCount: number; retainedProcessCount: number; inaccessibleProcessCount: number; processes: Array<{pid: number; ppid: number; name: string; command: string; status: string; cpuPercent: number; residentBytes: number; virtualBytes: number; ioReadBytes: number; ioWriteBytes: number}>};
 
 export type ProviderHealth = {
@@ -382,13 +386,14 @@ export type LaneOperation =
 export type RpcRequest =
   | {id: string; method: 'ping'}
   | {id: string; method: 'sessions.list'; params?: {includeArchived?: boolean}}
-  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes?: number; pool?: LeadPool}; leadApprovalId?: string; model?: string; permissionMode?: string; permissionApprovalId?: string}}
+  | {id: string; method: 'sessions.create'; params: {provider: ProviderId; directory: string; task?: string; accountId?: string; isolate?: boolean; approvalId?: string; lead?: {maxLanes?: number; pool?: LeadPool}; leadApprovalId?: string; model?: string; permissionMode?: string; permissionApprovalId?: string; budgetUsd?: number}}
   | {id: string; method: 'sessions.get'; params: {sessionId: string}}
   | {id: string; method: 'sessions.send'; params: {sessionId: string; input: string}}
   /** Pastes context into a running lane and, unless `submit` is false, presses Enter after it. */
   | {id: string; method: 'sessions.inject'; params: {sessionId: string; text: string; submit?: boolean}}
   | {id: string; method: 'sessions.stop'; params: {sessionId: string}}
-  | {id: string; method: 'sessions.resume'; params: {sessionId: string; approvalId?: string; permissionApprovalId?: string}}
+  /** A lane stopped by budget resumes with a new cap; without one it keeps its existing cap. */
+  | {id: string; method: 'sessions.resume'; params: {sessionId: string; approvalId?: string; permissionApprovalId?: string; budgetUsd?: number}}
   | {id: string; method: 'sessions.archive'; params: {sessionId: string}}
   | {id: string; method: 'sessions.restore'; params: {sessionId: string}}
   | {id: string; method: 'sessions.delete'; params: {sessionId: string; approvalId?: string}}
@@ -507,8 +512,8 @@ export type RpcResponse =
 export type RpcEvent =
   | {event: 'sessions.output'; sessionId: string; chunk: string}
   | {event: 'sessions.status'; sessionId: string; summary: SessionSummary}
-  /** A lane that finished, failed, or is waiting on the user — worth a notification, once. */
-  | {event: 'sessions.attention'; sessionId: string; reason: 'finished' | 'failed' | 'needs-input'; summary: SessionSummary; detail?: string}
+  /** A lane that finished, failed, is waiting on the user, or hit its budget — worth a notification, once. */
+  | {event: 'sessions.attention'; sessionId: string; reason: 'finished' | 'failed' | 'needs-input' | 'budget'; summary: SessionSummary; detail?: string}
   | {event: 'credential.switched'; provider: ProviderId; accountId: string; reason: 'fallback' | 'revert' | 'manual'}
   | {event: 'credential.notice'; provider: ProviderId; message: string; resetAt?: string; guidance?: FallbackGuidance}
   /** A claim disappeared because its lane stopped renewing it — pushed so a claim never vanishes
@@ -589,6 +594,10 @@ export type FallbackGuidance = {
   activeSessions: number;
   detail: string;
 };
+
+/** One durable record of a credential switch, appended to `credential-events.jsonl` — the trail
+ * `spend.summary` reads back so the spend page can say how many fallbacks kept lanes running. */
+export type CredentialEvent = {at: string; provider: ProviderId; fromAccountId?: string; toAccountId: string; reason: 'fallback' | 'revert' | 'manual'; resetAt?: string};
 
 export type CredentialChainState = {
   provider: ProviderId;

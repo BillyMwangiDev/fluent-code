@@ -1,7 +1,7 @@
 import {readFile, readdir, stat} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
-import type {ProviderId} from './daemon-protocol.js';
+import type {CredentialEvent, ProviderId} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 
 /**
@@ -456,6 +456,8 @@ export type SpendSummary = {
   priceOverrides: Record<string, PriceOverride>;
   ratesUpdatedAt?: string;
   ratesError?: string;
+  /** Filled by daemon.ts from the credential event log for the same range. */
+  credentialEvents?: CredentialEvent[];
 };
 
 function dayKey(timestampMs: number): string {
@@ -517,6 +519,15 @@ export class SpendTracker {
   async clearPriceOverride(model: string) {
     delete this.overrides[model.trim()];
     await this.persistOverrides();
+  }
+
+  /** The rate a live lane's cost estimate is priced against — the same override-then-LiteLLM-table
+   * lookup a spend summary uses, so a running lane's estimate and the 30-day summary never disagree
+   * about a model's price. Undefined when neither an override nor the table knows the model. */
+  rateForModel(model: string): ModelRate | undefined {
+    const overrideConfig = this.overrides[model.trim()];
+    if (overrideConfig) return overrideToRate(overrideConfig);
+    return lookupRate(this.rateTable, model) ?? undefined;
   }
 
   private async persistOverrides() {
