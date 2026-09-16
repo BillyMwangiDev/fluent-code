@@ -14,12 +14,13 @@ import {ptyRuntime} from './pty-runtime.js';
 import type {CredentialEnvironment, ProviderId, SessionSnapshot, SessionStatus, SessionSummary} from './daemon-protocol.js';
 import {readPrivateJson, writePrivateJson} from './security/secure-state.js';
 import {RunStore} from './execution/run-store.js';
+import {OutputBuffer} from './output-buffer.js';
 
 const run = promisify(execFile);
 
 type LiveSession = {
   terminal?: import('node-pty').IPty;
-  output: string;
+  output: OutputBuffer;
   summary: SessionSummary;
   directory: string;
   /** Whether the CLI has turned on bracketed paste, read from its own terminal output. */
@@ -150,7 +151,7 @@ export class SessionManager extends EventEmitter {
         const wasLive = item.summary.status === 'running' || item.summary.status === 'starting';
         this.sessions.set(item.summary.id, {
           ...item,
-          output: '', // terminal text is intentionally memory-only, including legacy restore.
+          output: new OutputBuffer(maxOutputBytes), // terminal text is intentionally memory-only, including legacy restore.
           summary: item.summary.status === 'running' || item.summary.status === 'starting'
             ? {...item.summary, status: 'stopped', updatedAt: new Date().toISOString()}
             : item.summary
@@ -176,7 +177,7 @@ export class SessionManager extends EventEmitter {
   get(sessionId: string): SessionSnapshot {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    return {...session.summary, output: session.output};
+    return {...session.summary, output: session.output.text()};
   }
 
   async create({provider, directory, task, env, accountId, isolate, lead, parentSessionId, model: requestedModel, permissionMode}: {provider: ProviderId; directory: string; task?: string; env?: CredentialEnvironment; accountId?: string; isolate?: boolean; lead?: {maxLanes: number}; parentSessionId?: string; model?: string; permissionMode?: string}) {
@@ -224,7 +225,7 @@ export class SessionManager extends EventEmitter {
       // Claude Code accepts a conversation id at launch; recording it is what makes resume exact.
       ...(provider === 'claude' ? {nativeSessionId: id} : {})
     };
-    const session: LiveSession = {summary, output: '', directory: sessionDirectory};
+    const session: LiveSession = {summary, output: new OutputBuffer(maxOutputBytes), directory: sessionDirectory};
     this.sessions.set(summary.id, session);
     if (worktree) await this.runStore.setWorkspace(id, {path: worktree.path, projectDirectory: worktree.projectDirectory});
     await this.persist();
@@ -599,7 +600,7 @@ export class SessionManager extends EventEmitter {
   private append(session: LiveSession, chunk: string) {
     session.bracketedPaste = bracketedPasteMode(session.bracketedPaste ?? false, (session.modeTail ?? '') + chunk);
     session.modeTail = chunk.slice(-32);
-    session.output = (session.output + chunk).slice(-maxOutputBytes);
+    session.output.append(chunk);
     session.summary.updatedAt = new Date().toISOString();
     this.schedulePersist();
     this.emit('output', session.summary.id, chunk);
