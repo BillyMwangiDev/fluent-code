@@ -15,6 +15,8 @@ function resetsCountdown(resetsAt: string | undefined, now: Date): string | unde
   const totalMinutes = Math.round(diffMs / 60_000);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
+  // A weekly or monthly window resets days out; "614h53m" reads as a bug, "25d 14h" as a date.
+  if (hours >= 48) return `${Math.floor(hours / 24)}d ${hours % 24}h`;
   return hours > 0 ? `${hours}h${minutes}m` : `${minutes}m`;
 }
 

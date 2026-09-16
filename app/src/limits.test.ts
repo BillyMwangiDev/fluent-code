@@ -6,6 +6,8 @@ test('windowLabel formats percent with a duration prefix and a reset countdown',
   const now = new Date('2026-09-17T12:00:00Z');
   assert.equal(windowLabel({usedPercent: 41, windowMinutes: 300, resetsAt: '2026-09-17T14:12:00Z'}, now), '5h 41% · resets 2h12m');
   assert.equal(windowLabel({usedPercent: 12, windowMinutes: 10080}, now), '7d 12%');
+  // A monthly window resets weeks out: days, not hundreds of hours.
+  assert.equal(windowLabel({usedPercent: 100, windowMinutes: 43200, resetsAt: '2026-10-13T02:53:00Z'}, now), '30d 100% · resets 25d 14h');
 });
 
 test('windowLabel omits the duration prefix when windowMinutes is unknown', () => {
