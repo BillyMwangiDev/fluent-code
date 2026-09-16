@@ -65,9 +65,41 @@
           current: {capturedAt: now, cpuPercent: 28.4, loadAverage: [2.1, 2.4, 2.2], memoryUsedBytes: 17e9, memoryTotalBytes: 32e9, processRssBytes: 190e6, diskUsedBytes: 211e9, diskTotalBytes: 512e9, uptimeSeconds: 86400, platform: 'darwin', arch: 'arm64'},
           history: [14, 19, 24, 18, 31, 28].map((cpuPercent, index) => ({capturedAt: new Date(Date.now() - (5 - index) * 60000).toISOString(), cpuPercent, memoryUsedBytes: (15 + index * .4) * 1e9}))
         };
+        const laneCount = Number(new URLSearchParams(location.search).get('lanes') ?? '3');
+        const laneProviders = ['claude', 'codex', 'glm', 'claude', 'codex', 'claude', 'codex', 'glm', 'claude', 'codex', 'claude', 'codex', 'qwen', 'claude', 'codex'];
+        const laneTasks = ['Refactor the auth middleware to use RS256 and rotate keys', 'Write integration tests for token expiry', 'Update the API docs for /accounts', 'Lint and type-check the workspace', 'Optimize the users join query', 'Add the settings screen', 'Migrate the session store', 'Review the credential fallback', 'Package the Windows build', 'Profile the daemon under ten lanes', 'Fix the webhook retry loop', 'Document the coord CLI', 'Translate the onboarding copy', 'Add rate-limit headers', 'Verify the merge queue'];
+        const esc = '\u001b[';
+        const screens = {
+          claude: id => `${esc}1m› ${laneTasks[id % laneTasks.length]}${esc}0m\r\n\r\nI'll start by reading the middleware and its tests.\r\n\r\n${esc}2m⏺${esc}0m ${esc}1mRead${esc}0m(src/middleware/auth.ts)\r\n  ${esc}2m⎿  Read 142 lines${esc}0m\r\n\r\n${esc}2m⏺${esc}0m ${esc}1mBash${esc}0m(pnpm test -- auth)\r\n  ${esc}2m⎿  ✓ 18 passed${esc}0m\r\n\r\n${esc}2m⏺${esc}0m Switching the signer to RS256 keeps the existing token shape; I'll add key rotation next.\r\n\r\n${esc}2m───────────────────────────────────────────────${esc}0m\r\n${esc}1m>${esc}0m ${esc}2mwaiting for input${esc}0m\r\n`,
+          codex: id => `${esc}36m╭─ codex ─╮${esc}0m\r\n${esc}1muser${esc}0m\r\n${laneTasks[id % laneTasks.length]}\r\n\r\n${esc}1mcodex${esc}0m\r\nScanning endpoint signatures...\r\n\r\n${esc}33m•${esc}0m exec ${esc}2mgrep -rn '@route' src/${esc}0m\r\n${esc}33m•${esc}0m edit ${esc}2mdocs/api/auth.md${esc}0m\r\n\r\n## Authentication\r\n\r\nAll endpoints require a valid JWT bearer token in the\r\nAuthorization header.\r\n\r\n${esc}32m✓${esc}0m tokens used: 3.1k\r\n\r\n${esc}2m› type a message${esc}0m\r\n`,
+          glm: id => `${esc}35m◆ opencode${esc}0m ${esc}2mGLM-4.7${esc}0m\r\n\r\n${esc}1m>${esc}0m ${laneTasks[id % laneTasks.length]}\r\n\r\nAnalyzing query execution plans...\r\n\r\nSELECT u.*, COUNT(s.id)\r\nFROM users u\r\nLEFT JOIN sessions s ON s.user_id = u.id\r\nWHERE u.active = true\r\nGROUP BY u.id ${esc}2m— 340ms → 12ms${esc}0m\r\n\r\n${esc}2m› ${esc}0m`,
+          qwen: id => `${esc}35m◆ opencode${esc}0m ${esc}2mqwen3-coder${esc}0m\r\n\r\n${esc}1m>${esc}0m ${laneTasks[id % laneTasks.length]}\r\n\r\nReading locale files...\r\n${esc}2m› ${esc}0m`
+        };
+        const generatedLanes = Array.from({length: laneCount}, (_, index) => {
+          const provider = laneProviders[index % laneProviders.length];
+          return {
+            ...session, id: `lane-${String(index + 1).padStart(2, '0')}-${provider}`, provider, task: laneTasks[index % laneTasks.length],
+            accountId: provider === 'claude' ? 'claude-subscription' : provider === 'codex' ? 'codex-api' : 'qwen-work',
+            model: provider === 'claude' ? (index % 2 ? 'opus' : 'sonnet') : provider === 'codex' ? 'gpt-6-astra' : undefined,
+            status: index === 3 && laneCount > 4 ? 'exited' : 'running', exitCode: index === 3 && laneCount > 4 ? 0 : undefined,
+            lead: index === 0 ? {maxLanes: 3} : undefined, parentSessionId: index === 1 ? 'lane-01-claude' : undefined,
+            verification: ['passed', 'running', undefined, 'failed'][index % 4],
+            createdAt: new Date(Date.now() - (laneCount - index) * 60000).toISOString(),
+            worktreePath: project + '/.fluent-worktrees/fluent-code/lane-' + (index + 1)
+          };
+        });
+        if (laneCount !== 3 && generatedLanes.length >= 2) {
+          const [first, second] = generatedLanes;
+          state.tasks[0].sessionId = first.id;
+          state.tasks[2].sessionId = second.id;
+          state.claims[0].sessionId = first.id;
+          state.decisions[0].sessionId = first.id;
+          state.messages[0].from = first.id; state.messages[0].to = second.id;
+          state.handoffs[0].fromSessionId = first.id; state.handoffs[0].toSessionId = second.id;
+        }
         const byMethod = {
           'ping': () => ({ok: true, pid: 4242}),
-          'sessions.list': () => [
+          'sessions.list': () => laneCount !== 3 ? [...generatedLanes, {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', lead: undefined, archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}] : [
             session,
             {...session, id: 'lane-codex-02', provider: 'codex', task: 'Review platform-specific IPC', accountId: 'codex-api', status: 'running', verification: 'running', lead: undefined},
             {...session, id: 'lane-stopped-05', provider: 'claude', task: 'Fix payment webhook', status: 'stopped', lead: undefined, directory: project + '/.fluent-worktrees/fluent-code/lane-stopped-05', worktreePath: project + '/.fluent-worktrees/fluent-code/lane-stopped-05'},
@@ -76,7 +108,12 @@
             {...session, id: 'lane-archive-03', provider: 'codex', task: 'Archived packaging audit', accountId: 'codex-api', status: 'stopped', lead: undefined, archivedAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date(Date.now() - 86400000).toISOString()}
           ],
           'sessions.get': () => ({...session, output: '› pnpm check:frontend\n✓ typecheck passed\n'}),
-          'sessions.subscribe': params => ({...(byMethod['sessions.list']().find(item => item.id === params?.sessionId) ?? session), output: '› inspect the current desktop shell\n\nI am reviewing the session chrome and the credential surface before making changes.\n\n$ pnpm run check:frontend\n✓ typecheck passed\n'}),
+          'sessions.subscribe': params => {
+            const found = byMethod['sessions.list']().find(item => item.id === params?.sessionId) ?? session;
+            const index = byMethod['sessions.list']().indexOf(found);
+            return {...found, output: (screens[found.provider] ?? screens.claude)(Math.max(index, 0))};
+          },
+          'sessions.inject': () => ({injected: true, submitted: true, bracketedPaste: true}),
           'sessions.create': params => ({...session, provider: params.provider || session.provider, directory: params.directory || session.directory, task: params.task || session.task, accountId: params.accountId || session.accountId}),
           'sessions.resize': () => ({resized: true}),
           'sessions.send': () => ({sent: true}),
@@ -115,7 +152,7 @@
           'admission.assess': () => ({provider: 'claude', decision: 'clear', recommendedLanes: 3, runningLanes: 2, freeBytes: 15e9, reserveBytes: 4e9, perLaneBytes: 1e9, estimateSource: 'observed', reasons: ['CPU and memory remain below the advisory threshold.']}),
           'hardware.snapshot': () => hardware,
           'software.snapshot': () => ({capturedAt: now, hostname: 'studio', kernel: 'Darwin 25.1', nodeVersion: '24.16.0', daemonPid: 4242, git: 'main · clean', providers: byMethod['providers.list']()}),
-          'usage.snapshot': () => ({sessions: [{sessionId: session.id, provider: 'claude', model: 'claude-sonnet-4-5', inputTokens: 241000, outputTokens: 86000, contextPercent: 36, cacheHitRatio: .81, costUsd: 12.48, updatedAt: now, history: [21, 25, 29, 33, 36].map(contextPercent => ({capturedAt: now, contextPercent})), quota: {primary: {usedPercent: 41, windowMinutes: 300}, secondary: {usedPercent: 12, windowMinutes: 10080}}}]}),
+          'usage.snapshot': () => ({sessions: [...generatedLanes.slice(0, 8).map((lane, index) => ({sessionId: lane.id, provider: lane.provider, model: lane.model, inputTokens: 12000 * (index + 1), outputTokens: 3000 * (index + 1), contextPercent: 12 + index * 9, updatedAt: now, history: []})), {sessionId: session.id, provider: 'claude', model: 'claude-sonnet-4-5', inputTokens: 241000, outputTokens: 86000, contextPercent: 36, cacheHitRatio: .81, costUsd: 12.48, updatedAt: now, history: [21, 25, 29, 33, 36].map(contextPercent => ({capturedAt: now, contextPercent})), quota: {primary: {usedPercent: 41, windowMinutes: 300}, secondary: {usedPercent: 12, windowMinutes: 10080}}}]}),
           'resources.snapshot': () => ({sequence: 18, sampledAtUnixMs: Date.now(), scannedProcessCount: 127, retainedProcessCount: 2, inaccessibleProcessCount: 0, processes: [{pid: 4242, ppid: 1, name: 'fluentd', command: 'fluentd', status: 'running', cpuPercent: 4.2, residentBytes: 190e6, virtualBytes: 1e9, ioReadBytes: 1e8, ioWriteBytes: 2e7}]}),
           'spend.summary': ({rangeDays = 30} = {}) => ({rangeDays, totalCostUsd: 18, totalCacheSavingsUsd: 8.2, totals, priceOverrides: {}, ratesUpdatedAt: now, days: ['2026-09-10', '2026-09-11', '2026-09-12', '2026-09-13', '2026-09-14'].map((day, index) => ({day, costUsd: 1.6 + index, totals, models: [{...model, costUsd: 1.6 + index}]}))}),
           'spend.setPriceOverride': () => ({saved: true}),
@@ -124,10 +161,11 @@
           'sourceControl.assignedIssues': () => [{number: 17, title: 'Verify Windows native package', repo: 'fluent/fluent-code', url: 'https://example.test/issues/17'}],
           'sourceControl.myOpenPullRequests': () => [{number: 42, title: 'Desktop polish', repo: 'fluent/fluent-code', url: 'https://example.test/pull/42', isDraft: false}],
           'catalog.plugins': () => [
-            {id: 'review', name: 'Review helper', marketplace: 'Anthropic', target: 'claude', description: 'Structured implementation review', installed: true, officialSource: true, version: '1.2.0'},
-            {id: 'worktree', name: 'Worktree tools', marketplace: 'Community', target: 'codex', description: 'Git worktree workflow', installed: false, officialSource: false}
+            {id: 'review', name: 'Review helper', marketplace: 'Anthropic', target: 'claude', description: 'Structured implementation review', installed: true, version: '1.2.0', source: 'anthropics/claude-plugins', trust: {level: 'provider-owned', source: 'anthropics/claude-plugins', reviewRequired: false, disclosures: ['Published by the provider.']}},
+            {id: 'worktree', name: 'Worktree tools', marketplace: 'Community', target: 'codex', description: 'Git worktree workflow', installed: false, source: 'community/plugins', trust: {level: 'third-party', source: 'community/plugins', reviewRequired: true, disclosures: ['Third-party source; review before installing.']}}
           ],
-          'catalog.mcpServers': () => [{name: 'OpenDesign', target: 'claude', transport: 'http', url: 'http://127.0.0.1:7456', connected: true}],
+          'catalog.mcpServers': () => [{name: 'OpenDesign', target: 'claude', transport: 'http', displayUrl: 'http://127.0.0.1:7456', connected: true, trust: {level: 'local', source: 'http://127.0.0.1:7456', reviewRequired: false, disclosures: ['Local loopback endpoint.']}}],
+          'catalog.sourcePolicy.get': () => ({mode: 'review-each', sources: []}),
           'catalog.marketplaces': () => [],
           'catalog.installPlugin': () => ({installed: true}),
           'catalog.addMarketplace': () => ({added: true}),

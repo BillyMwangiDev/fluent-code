@@ -58,3 +58,14 @@ out of scope; see the spec's Non-goals section.
 - [`src/`](./src/) — `daemon.ts` / `daemon-protocol.ts` / `daemon-client.ts` / `session-manager.ts`
   are the real `fluentd`, keep building on them. `index.tsx` / `theme.ts` are the superseded Ink
   prototype (spec §7.4) — port their RPC wiring to the Tauri frontend, not their JSX.
+- [`app/src/`](./app/src/) — the desktop frontend (vanilla TS, no framework). `workspace.ts` is
+  the main screen: the lane grid, focus mode, composer, and `coordination-panel.ts` sidebar,
+  patched in place from `store.ts` (never rebuilt per action — terminals stay mounted).
+  `launch.ts` is the one launch form (empty state, `+ lanes` sheet, New Session page);
+  `launch-plan.ts` and `lane-layout.ts` are its pure, tested parts. `shell.ts` holds the rail,
+  top bar, and ⌘K palette; `router.ts` the route; `pages/` the document-style routes. Design
+  rationale: [`docs/superpowers/plans/2026-09-16-orchestration-workspace.md`](./docs/superpowers/plans/2026-09-16-orchestration-workspace.md).
+- [`scripts/qa/`](./scripts/qa/) — `shoot.mjs` screenshots every route through the fixture in
+  `scripts/ui-qa-harness.html` (`?lanes=N`); `live.mts` drives the real bundle against a real
+  fluentd with stand-in CLIs (`node --import tsx scripts/qa/live.mts`). Typecheck and unit tests
+  do not catch layout or terminal bugs — run these before calling frontend work done.

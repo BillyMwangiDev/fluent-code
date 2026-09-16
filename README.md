@@ -139,6 +139,10 @@ won't fire until that build exists.
   (two independent TS projects; the frontend has no Node-only dependencies).
 - `pnpm run build:frontend` — rebuild `app/dist/{main.js,main.css}` from `app/src/`; `tauri dev`
   and `tauri build` already do this via `beforeDevCommand`/`beforeBuildCommand`.
+- `pnpm test:frontend` — the frontend's pure logic (launch plan, grid shape, ticket prompts).
+- `node scripts/qa/shoot.mjs [outDir]` — screenshots of every route from the visual fixture;
+  `node --import tsx scripts/qa/live.mts [outDir]` — the real bundle against a real, private
+  fluentd with stand-in provider CLIs (launch, broadcast, focus, stop, session view).
 
 ## Superseded prototype
 
