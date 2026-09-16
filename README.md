@@ -3,8 +3,9 @@
 Fluent runs your real Claude Code, Codex, Gemini CLI, and OpenCode-linked (Qwen, GLM, NVIDIA)
 CLIs as unmodified processes, and adds what none of them do alone:
 
-- **Falls back on limits.** When a credential hits its usage limit, Fluent switches the lane to
-  the next credential in your chain automatically, with notice and an auto-revert timer.
+- **Falls back on limits.** When a credential hits its usage limit, Fluent moves to the next
+  credential in your chain for the lanes you start next (a running CLI keeps the login it started
+  with), tells you, and reverts when the window resets.
 - **Stops at a budget.** Set a dollar cap on a lane and Fluent stops it the moment its cost
   reaches that figure.
 - **Shows limits and cost.** A limits strip reports each credential's 5-hour and 7-day usage
