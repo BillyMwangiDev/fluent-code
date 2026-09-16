@@ -5,7 +5,7 @@ import {isExplorerScope} from './coordination-explorer';
 
 export type Appearance = 'system' | 'dark' | 'light';
 export type ThemeMode = 'dark' | 'light';
-export type LaneLayout = 'grid' | 'focus';
+export type LaneLayout = 'grid' | 'rows' | 'focus';
 
 const keys = {
   appearance: 'fluent.appearance',
@@ -47,7 +47,7 @@ export const prefs = {
   set explorerScope(value: ExplorerScope) { write(keys.explorerScope, value); },
   get sidebarOpen(): boolean { return read(keys.sidebar) !== 'closed'; },
   set sidebarOpen(value: boolean) { write(keys.sidebar, value ? 'open' : 'closed'); },
-  get laneLayout(): LaneLayout { return read(keys.laneLayout) === 'focus' ? 'focus' : 'grid'; },
+  get laneLayout(): LaneLayout { const saved = read(keys.laneLayout); return saved === 'focus' || saved === 'rows' ? saved : 'grid'; },
   set laneLayout(value: LaneLayout) { write(keys.laneLayout, value); },
   get launchCounts(): Record<string, number> { return readJson(keys.launchCounts, {}); },
   set launchCounts(value: Record<string, number>) { write(keys.launchCounts, JSON.stringify(value)); },

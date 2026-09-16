@@ -7,7 +7,7 @@ export type Route =
   | {name: 'onboarding'}
   | {name: 'sessions'}
   | {name: 'new-session'}
-  | {name: 'active-session'; sessionId: string}
+  | {name: 'active-session'; sessionId: string; review?: 'diff'}
   | {name: 'credentials'}
   | {name: 'usage'}
   | {name: 'spend'}

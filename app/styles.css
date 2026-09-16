@@ -384,6 +384,9 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .palette-item.active { background: var(--bg-elevated); }
 .palette-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .palette-empty { padding: 12px; margin: 0; }
+.shortcut-list { display: grid; gap: 8px; }
+.shortcut-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; align-items: baseline; font-size: 12px; }
+.shortcut-row .kbd { justify-self: start; font-size: 11px; }
 
 /* --- Workspace ---------------------------------------------------------------------------------- */
 
@@ -407,6 +410,7 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .ws-stats { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; overflow: hidden; font-size: 11px; color: var(--fg-muted); white-space: nowrap; }
 .ws-stat strong { color: var(--fg); font-weight: 600; }
 .ws-stat.warn, .ws-stat.warn strong { color: var(--coral); }
+.btn.link.ws-stat { font-size: 11px; text-decoration-color: color-mix(in srgb, var(--coral) 50%, transparent); }
 .ws-sep { color: var(--fg-faint); }
 .ws-headroom { font-size: 11px; white-space: nowrap; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .ws-headroom.warn { color: var(--coral); }
@@ -431,6 +435,8 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
   min-height: 0;
   min-width: 0;
 }
+.lane-grid.rows .lane-stage { grid-template-columns: minmax(0, 1fr); grid-auto-rows: var(--row-height, 300px); overflow-y: auto; align-content: start; }
+.lane-grid.rows .lane { min-height: var(--row-height, 300px); }
 .lane-strip { display: flex; flex-direction: column; gap: 4px; padding: 6px 0 6px 6px; min-height: 0; overflow: auto; }
 .lane-strip[hidden] { display: none; }
 

@@ -105,7 +105,7 @@ export async function renderSessions(main: HTMLElement) {
       h('td', {}, [tokens]),
       h('td', {}, [verificationPill(session.verification)]),
       h('td', {}, [session.worktreePath ? 'isolated' : 'shared']),
-      h('td', {}, [laneReady(session)]),
+      h('td', {title: laneReady(session)}, [session.prepareMs === undefined ? (session.worktreePath ? '—' : 'shared') : session.prepareMs < 1000 ? `${session.prepareMs}ms` : `${(session.prepareMs / 1000).toFixed(1)}s`]),
       h('td', {}, [relativeTime(session.updatedAt)]),
       h('td', {}, [actions])
     ]);

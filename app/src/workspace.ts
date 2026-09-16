@@ -8,6 +8,7 @@ import {diffById, gridShape, nextFocus} from './lane-layout';
 import {prefs, type LaneLayout} from './prefs';
 import {currentProject} from './project-scope';
 import {navigate, setRouteCleanup} from './router';
+import {setPageCommands, type Command} from './shell';
 import {store, type LaneUsage} from './store';
 import {attachLaneTerminal, type LaneTerminal} from './terminal';
 import {actionErrorText, admissionLabel, askConfirm, button, formatTokens, h, icon, isLive, isMod, kbd, openMenu, providerShort, sessionName, showActionError, showNotice, verificationPill, workspaceFolderName} from './ui';
@@ -72,10 +73,12 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   const progress = h('span', {class: 'ws-progress'});
   const layoutControl = h('div', {class: 'segmented', role: 'group', 'aria-label': 'Lane layout'});
   const gridButton = h('button', {type: 'button', class: 'seg', title: 'grid — every lane at once'}, [icon('grid'), 'grid']);
+  const rowsButton = h('button', {type: 'button', class: 'seg', title: 'rows — full-width lanes, scroll through them'}, [icon('rows'), 'rows']);
   const focusButton = h('button', {type: 'button', class: 'seg', title: 'focus — one lane large (⌘⏎)'}, [icon('focus'), 'focus']);
   gridButton.addEventListener('click', () => setLayout('grid'));
+  rowsButton.addEventListener('click', () => setLayout('rows'));
   focusButton.addEventListener('click', () => setLayout('focus'));
-  layoutControl.append(gridButton, focusButton);
+  layoutControl.append(gridButton, rowsButton, focusButton);
   const sidebarButton = button([icon('panel')], () => setSidebar(!sidebarOpen), {class: 'btn ghost icon-button', title: 'coordination sidebar (⌘J)', 'aria-label': 'toggle coordination sidebar', 'aria-pressed': sidebarOpen ? 'true' : 'false'});
   const stopAll = button('stop all', async () => {
     const live = order.map(id => tiles.get(id)!.summary).filter(isLive);
@@ -156,6 +159,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     updateTile(tile, summary);
     tile.attaching = attachLaneTerminal(summary.id, screen, {
       fontSize: tileFontSize,
+      scaleWithWidth: true,
       onStatus: next => store.patch(next)
     }).then(terminal => {
       if (disposed || !tiles.has(summary.id)) { terminal.dispose(); return; }
@@ -219,7 +223,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     openMenu(anchor, [
       {label: layout === 'focus' && focused === summary.id ? 'back to grid' : 'focus this lane', onSelect: () => { if (layout === 'focus' && focused === summary.id) setLayout('grid'); else { focusLane(summary.id, {stage: true}); setLayout('focus'); } }},
       {label: 'open full view', onSelect: () => navigate({name: 'active-session', sessionId: summary.id})},
-      {label: 'review changes', onSelect: () => navigate({name: 'active-session', sessionId: summary.id})},
+      {label: 'review changes', onSelect: () => navigate({name: 'active-session', sessionId: summary.id, review: 'diff'})},
       'divider',
       {label: tile.pick.checked ? 'exclude from send targets' : 'include in send targets', onSelect: () => { tile.pick.checked = !tile.pick.checked; composer.sync(); }},
       'divider',
@@ -263,7 +267,9 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     composer.el.hidden = showEmpty;
     if (showEmpty) { renderEmptyState(); return; }
     grid.classList.toggle('focus', layout === 'focus');
+    grid.classList.toggle('rows', layout === 'rows');
     gridButton.classList.toggle('active', layout === 'grid');
+    rowsButton.classList.toggle('active', layout === 'rows');
     focusButton.classList.toggle('active', layout === 'focus');
     if (layout === 'focus' && (!focused || !tiles.has(focused))) focused = order[0];
     const staged = layout === 'focus' ? [focused!] : order;
@@ -273,7 +279,7 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     reconcileChildren(stage, staged.map(id => tiles.get(id)!.el));
     reconcileChildren(stripList, stripped.map(id => tiles.get(id)!.el));
     stripList.hidden = layout !== 'focus';
-    const shape = gridShape(staged.length, stage.clientWidth || plane.clientWidth || 1200, stage.clientHeight || plane.clientHeight || 700);
+    const shape = layout === 'rows' ? {columns: 1, rows: staged.length} : gridShape(staged.length, stage.clientWidth || plane.clientWidth || 1200, stage.clientHeight || plane.clientHeight || 700);
     stage.style.setProperty('--cols', String(shape.columns));
     stage.style.setProperty('--rows', String(shape.rows));
     for (const [id, tile] of tiles) {
@@ -324,7 +330,16 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     }
     stats.innerHTML = '';
     parts.forEach(([value, label], index) => {
-      stats.append(h('span', {class: `ws-stat${label.includes('need') || label.includes('overlap') ? ' warn' : ''}`}, [h('strong', {}, [value]), ` ${label}`]));
+      const warn = label.includes('need') || label.includes('overlap');
+      if (label.includes('need')) {
+        const jump = button([h('strong', {}, [value]), ` ${label}`], () => {
+          const waiting = order.find(id => store.attention.get(id)?.reason === 'needs-input');
+          if (waiting) { focusLane(waiting, {stage: true}); if (layout !== 'focus') setLayout('focus'); tiles.get(waiting)?.terminal?.focus(); }
+        }, {class: 'btn link ws-stat warn', title: 'jump to the lane waiting on you'});
+        stats.append(jump);
+      } else {
+        stats.append(h('span', {class: `ws-stat${warn ? ' warn' : ''}`}, [h('strong', {}, [value]), ` ${label}`]));
+      }
       if (index < parts.length - 1) stats.append(h('span', {class: 'ws-sep'}, ['·']));
     });
     stopAll.disabled = running === 0;
@@ -470,6 +485,13 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   }
 
   // --- Keyboard ------------------------------------------------------------------------------------
+  // A handled shortcut is consumed here, in the capture phase, so it never reaches xterm: xterm
+  // would otherwise turn ⌘⏎ into a carriage return typed into the lane.
+  const consume = (event: KeyboardEvent, run: () => void) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    run();
+  };
   const onKey = (event: KeyboardEvent) => {
     if (disposed) return;
     const target = event.target as HTMLElement | null;
@@ -477,16 +499,17 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
     if (isMod(event) && /^[1-9]$/.test(event.key)) {
       const id = order[Number(event.key) - 1];
       if (!id) return;
-      event.preventDefault();
-      focusLane(id, {stage: true});
-      if (layout === 'grid') tiles.get(id)?.el.scrollIntoView({block: 'nearest'});
-      tiles.get(id)?.terminal?.focus();
+      consume(event, () => {
+        focusLane(id, {stage: true});
+        if (layout === 'grid') tiles.get(id)?.el.scrollIntoView({block: 'nearest'});
+        tiles.get(id)?.terminal?.focus();
+      });
       return;
     }
-    // A terminal has no use for ⌘⏎, so the toggle works while typing into a lane too.
-    if (isMod(event) && event.key === 'Enter') { event.preventDefault(); setLayout(layout === 'focus' ? 'grid' : 'focus'); return; }
-    if (isMod(event) && event.key.toLowerCase() === 'j') { event.preventDefault(); setSidebar(!sidebarOpen); return; }
-    if (isMod(event) && event.key === '/') { event.preventDefault(); composer.focus(); return; }
+    if (isMod(event) && event.key === 'Enter') return consume(event, () => setLayout(layout === 'focus' ? 'grid' : 'focus'));
+    if (isMod(event) && event.key.toLowerCase() === 'j') return consume(event, () => setSidebar(!sidebarOpen));
+    if (isMod(event) && event.shiftKey && event.key.toLowerCase() === 'l') return consume(event, () => setLayout(layout === 'grid' ? 'rows' : layout === 'rows' ? 'focus' : 'grid'));
+    if (isMod(event) && event.key === '/') return consume(event, () => composer.focus());
     if (event.key === 'Escape' && !typing && layout === 'focus') { setLayout('grid'); return; }
   };
   // Capture phase: xterm stops propagation of keys it handles, and these are app shortcuts.
@@ -494,9 +517,22 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   const onResize = () => applyLayout();
   window.addEventListener('resize', onResize);
   const unsubscribe = store.subscribe(sync);
+  setPageCommands((): Command[] => [
+    {id: 'ws-layout-grid', label: 'layout: grid', keys: 'mod ⇧L', run: () => setLayout('grid')},
+    {id: 'ws-layout-rows', label: 'layout: rows', run: () => setLayout('rows')},
+    {id: 'ws-layout-focus', label: 'layout: focus', keys: 'mod ⏎', run: () => setLayout('focus')},
+    {id: 'ws-sidebar', label: sidebarOpen ? 'hide coordination sidebar' : 'show coordination sidebar', keys: 'mod J', run: () => setSidebar(!sidebarOpen)},
+    {id: 'ws-compose', label: 'send a message to lanes…', keys: 'mod /', run: () => composer.focus()},
+    {id: 'ws-stop-all', label: 'stop every lane in this project', run: () => stopAll.click()},
+    ...order.map((id, index) => {
+      const tile = tiles.get(id)!;
+      return {id: `ws-focus-${id}`, label: `focus lane ${index + 1}: ${providerShort[tile.summary.provider]} · ${sessionName(tile.summary)}`, keys: index < 9 ? `mod ${index + 1}` : undefined, run: () => { focusLane(id, {stage: true}); setLayout('focus'); tile.terminal?.focus(); }};
+    })
+  ]);
 
   setRouteCleanup(main, () => {
     disposed = true;
+    setPageCommands(() => []);
     unsubscribe();
     document.removeEventListener('keydown', onKey, true);
     window.removeEventListener('resize', onResize);
@@ -510,5 +546,5 @@ export async function renderWorkspace(main: HTMLElement, options: {focus?: strin
   sync();
   void refreshHeadroom();
   // Shortcut help lives in the strip's title text rather than a legend; the palette lists them.
-  strip.title = `⌘1–9 focus a lane · ⌘⏎ grid/focus · ⌘J sidebar · ⌘/ composer · ⌘N start lanes · ${kbd('mod K').textContent} palette`;
+  strip.title = `⌘1–9 focus a lane · ⌘⏎ grid/focus · ⌘⇧L cycle layouts · ⌘J sidebar · ⌘/ composer · ⌘N start lanes · ${kbd('mod K').textContent} palette`;
 }

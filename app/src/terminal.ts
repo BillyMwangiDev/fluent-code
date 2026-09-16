@@ -53,7 +53,15 @@ export type LaneTerminal = {
  * stale answers would be typed into the lane as if the user had typed them, so input is muted
  * until the replay is done.
  */
-export async function attachLaneTerminal(sessionId: string, container: HTMLElement, options: {fontSize?: number; onStatus?: (summary: SessionSummary) => void; onOutput?: () => void} = {}): Promise<LaneTerminal> {
+/** Tile type steps down with the tile: 12px above 520px wide, 11px above 400px, 10px below, so a
+ * lane in a dense grid keeps close to eighty columns instead of wrapping every line. */
+export function fontSizeForWidth(width: number, base: number): number {
+  if (width >= 520) return base;
+  if (width >= 400) return Math.max(10, base - 1);
+  return Math.max(9, base - 2);
+}
+
+export async function attachLaneTerminal(sessionId: string, container: HTMLElement, options: {fontSize?: number; scaleWithWidth?: boolean; onStatus?: (summary: SessionSummary) => void; onOutput?: () => void} = {}): Promise<LaneTerminal> {
   const terminal = new Terminal({
     fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
     fontSize: options.fontSize ?? terminalFontSize(),
@@ -88,8 +96,13 @@ export async function attachLaneTerminal(sessionId: string, container: HTMLEleme
   // grid tile is much smaller than the single-lane view — keep the PTY at whatever is rendered, or
   // the CLI draws (and wraps) for a grid that doesn't match the screen. A hidden container has no
   // size; fitting it would collapse the PTY to nothing, so those calls are skipped.
+  const baseFontSize = options.fontSize ?? terminalFontSize();
   const fit = () => {
     if (disposed || !container.isConnected || container.clientWidth < 40 || container.clientHeight < 20) return;
+    if (options.scaleWithWidth) {
+      const next = fontSizeForWidth(container.clientWidth, baseFontSize);
+      if (terminal.options.fontSize !== next) terminal.options.fontSize = next;
+    }
     fitAddon.fit();
     const size = `${terminal.cols}x${terminal.rows}`;
     if (size === lastSize) return;

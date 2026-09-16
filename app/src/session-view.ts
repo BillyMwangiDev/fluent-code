@@ -8,7 +8,7 @@ import {store} from './store';
 import {attachLaneTerminal} from './terminal';
 import {accountLabel, actionErrorText, askConfirm, button, h, icon, isLive, openMenu, providerLabel, providerShort, sessionName, showActionError, verificationPill} from './ui';
 
-export async function renderActiveSession(main: HTMLElement, sessionId: string) {
+export async function renderActiveSession(main: HTMLElement, sessionId: string, options: {review?: 'diff'} = {}) {
   const chains = await api.listCredentials().catch(() => []);
   const header = h('header', {class: 'session-head'});
   const banner = h('div', {class: 'session-banner'});
@@ -44,6 +44,12 @@ export async function renderActiveSession(main: HTMLElement, sessionId: string) 
   }
 
   function closeReview() { review.innerHTML = ''; }
+  async function showDiff() {
+    try {
+      const diff = await api.sessionDiff(sessionId);
+      reviewCard('Git change review', diff.status, [diff.patch ? h('pre', {class: 'diff'}, [diff.patch + (diff.truncated ? '\n\n… diff truncated' : '')]) : h('p', {class: 'muted'}, ['No tracked-file diff. Untracked files, if any, are listed above.'])]);
+    } catch (error) { showActionError(error); }
+  }
   function reviewCard(title: string, subtitle: string | undefined, body: HTMLElement[], actions: HTMLElement[] = []) {
     review.innerHTML = '';
     review.append(h('div', {class: 'review-card'}, [
@@ -107,12 +113,7 @@ export async function renderActiveSession(main: HTMLElement, sessionId: string) 
     }, {class: 'btn primary'});
     resume.hidden = live || Boolean(summary.archivedAt) || (summary.provider !== 'claude' && summary.provider !== 'codex');
     const more = button([icon('more'), 'actions'], () => openMenu(more, [
-      {label: 'review changes (diff)', onSelect: async () => {
-        try {
-          const diff = await api.sessionDiff(sessionId);
-          reviewCard('Git change review', diff.status, [diff.patch ? h('pre', {class: 'diff'}, [diff.patch + (diff.truncated ? '\n\n… diff truncated' : '')]) : h('p', {class: 'muted'}, ['No tracked-file diff. Untracked files, if any, are listed above.'])]);
-        } catch (error) { showActionError(error); }
-      }},
+      {label: 'review changes (diff)', onSelect: () => void showDiff()},
       {label: 'run checks', onSelect: async () => { try { showVerification(await api.verifySession(sessionId)); } catch (error) { showActionError(error); } }},
       {label: 'merge lane…', disabled: !summary.worktreePath, onSelect: async () => { try { showMergePlan(await api.mergePlan(sessionId)); } catch (error) { showActionError(error); } }},
       {label: 'record checkpoint', disabled: !currentRun, onSelect: async () => {
@@ -172,6 +173,7 @@ export async function renderActiveSession(main: HTMLElement, sessionId: string) 
   currentRun = await api.getRun(sessionId).catch(() => undefined);
   renderHeader(initial);
   store.clearAttention(sessionId);
+  if (options.review === 'diff') void showDiff();
   const unsubscribeStore = store.subscribe(() => { const latest = store.get(sessionId); if (latest?.lead) refreshLanes(latest); });
 
   const unlistenNotice = await onCredentialNotice(event => {

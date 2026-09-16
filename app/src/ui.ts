@@ -35,7 +35,7 @@ export function button(label: Child | Child[], onClick: (event: MouseEvent) => v
 }
 
 /** Inline SVG icons, 16px grid, stroke-based so they inherit `currentColor`. */
-export function icon(name: 'plus' | 'stop' | 'play' | 'grid' | 'focus' | 'panel' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh'): SVGSVGElement {
+export function icon(name: 'plus' | 'stop' | 'play' | 'grid' | 'rows' | 'focus' | 'panel' | 'search' | 'x' | 'more' | 'chevron' | 'check' | 'alert' | 'send' | 'expand' | 'folder' | 'lead' | 'arrow-right' | 'minus' | 'refresh'): SVGSVGElement {
   const paths: Record<string, string[]> = {
     plus: ['M8 3v10', 'M3 8h10'],
     minus: ['M3 8h10'],
@@ -43,6 +43,7 @@ export function icon(name: 'plus' | 'stop' | 'play' | 'grid' | 'focus' | 'panel'
     play: ['M5 3l8 5-8 5z'],
     grid: ['M2.5 2.5h4.5v4.5H2.5z', 'M9 2.5h4.5v4.5H9z', 'M2.5 9h4.5v4.5H2.5z', 'M9 9h4.5v4.5H9z'],
     focus: ['M2.5 2.5h11v11h-11z', 'M2.5 6h11'],
+    rows: ['M2.5 2.5h11v3.5h-11z', 'M2.5 8.5h11v3.5h-11z'],
     panel: ['M2.5 2.5h11v11h-11z', 'M10 2.5v11'],
     search: ['M7 11.5a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9z', 'M10.5 10.5L14 14'],
     x: ['M4 4l8 8', 'M12 4l-8 8'],

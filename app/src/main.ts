@@ -88,7 +88,7 @@ async function render(current: Route) {
       case 'onboarding': await renderOnboarding(page); break;
       case 'sessions': await renderSessions(page); break;
       case 'new-session': await renderNewSession(page); break;
-      case 'active-session': await renderActiveSession(page, current.sessionId); break;
+      case 'active-session': await renderActiveSession(page, current.sessionId, {review: current.review}); break;
       case 'credentials': await renderCredentials(page); break;
       case 'usage': await renderUsage(page); break;
       case 'spend': await renderSpend(page); break;

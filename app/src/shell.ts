@@ -5,7 +5,7 @@ import {openLaunchSheet} from './launch';
 import {prefs} from './prefs';
 import {navigate, onRouteChange, route, type Route, type RouteName} from './router';
 import {store} from './store';
-import {button, h, icon, isLive, isMod, kbd, markEl, pickDirectory, providerShort, sessionName, workspaceFolderName} from './ui';
+import {button, h, icon, isLive, isMod, kbd, markEl, openSheet, pickDirectory, providerShort, sessionName, workspaceFolderName} from './ui';
 
 export type Command = {id: string; label: string; hint?: string; keys?: string; run: () => void};
 
@@ -144,12 +144,15 @@ export function openPalette() {
     {id: 'launch', label: 'start lanes…', hint: 'open the launch sheet', keys: 'mod N', run: startLanes},
     ...navItems.map(item => ({id: `go-${item.name}`, label: `go to ${item.label}`, run: () => navigate({name: item.name} as Route)})),
     ...pageCommands(),
-    ...store.sessions.filter(session => isLive(session)).map(session => ({
+    // The workspace lists its own lanes with their positions; elsewhere the palette is the way to
+    // reach any running lane.
+    ...(route().name === 'orchestration' ? [] : store.sessions.filter(session => isLive(session))).map(session => ({
       id: `lane-${session.id}`,
       label: `focus ${providerShort[session.provider]} · ${sessionName(session)}`,
       hint: session.directory,
       run: () => { prefs.workspacePath = session.projectDirectory ?? session.directory; navigate({name: 'orchestration', focus: session.id}); }
     })),
+    {id: 'shortcuts', label: 'keyboard shortcuts', hint: 'everything the keyboard can do here', run: showShortcuts},
     {id: 'workspace', label: 'choose workspace folder…', run: async () => {
       const selected = await pickDirectory('Choose workspace folder', prefs.workspacePath);
       if (selected) { prefs.workspacePath = selected; navigate({name: 'orchestration'}); }
@@ -191,11 +194,35 @@ export function openPalette() {
   input.focus();
 }
 
+export function showShortcuts() {
+  const rows: Array<[string, string]> = [
+    ['mod K', 'command palette — screens, lanes, and every workspace action'],
+    ['mod N', 'start lanes'],
+    ['mod 1 … 9', 'focus a lane by its position'],
+    ['mod ⏎', 'switch between grid and focus'],
+    ['mod ⇧L', 'cycle grid → rows → focus'],
+    ['mod J', 'show or hide the coordination sidebar'],
+    ['mod /', 'jump to the composer'],
+    ['⏎ in the composer', 'send to the selected lanes (⇧⏎ adds a line)'],
+    ['Esc', 'leave focus mode'],
+    ['click a terminal', 'type straight into that lane']
+  ];
+  openSheet({
+    title: 'keyboard shortcuts',
+    subtitle: 'the workspace is built to be driven without the mouse',
+    body: h('div', {class: 'shortcut-list'}, rows.map(([keys, what]) => h('div', {class: 'shortcut-row'}, [kbd(keys), h('span', {}, [what])])))
+  });
+}
+
 /** Global shortcuts that work on every route. Page-specific ones are registered by the page. */
 export function installGlobalShortcuts() {
   document.addEventListener('keydown', event => {
     if (!isMod(event)) return;
-    if (event.key.toLowerCase() === 'k') { event.preventDefault(); openPalette(); }
-    else if (event.key.toLowerCase() === 'n' && !event.shiftKey) { event.preventDefault(); startLanes(); }
+    const key = event.key.toLowerCase();
+    if (key !== 'k' && !(key === 'n' && !event.shiftKey)) return;
+    // Consumed in the capture phase so a focused terminal never sees the keystroke.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (key === 'k') openPalette(); else startLanes();
   }, true);
 }

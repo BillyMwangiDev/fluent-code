@@ -195,6 +195,6 @@ export async function renderOnboarding(main: HTMLElement) {
   );
 
   const skip = h('button', {class: 'btn'}, ['skip for now']);
-  skip.addEventListener('click', () => navigate({name: 'sessions'}));
+  skip.addEventListener('click', () => navigate({name: 'orchestration'}));
   main.append(h('div', {class: 'toolbar'}, [h('span', {}, []), skip]));
 }
