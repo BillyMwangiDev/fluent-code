@@ -901,8 +901,9 @@ select.btn, .override-form select, .marketplace-form select, .mcp-form select { 
 .table-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 0 6px; }
 /* .lane-stage, not .lane-grid: that ancestor is shared with the compact focus-mode strip list
    (.lane-strip), which must keep its own row height, not a 200px floor. */
-.lane-stage { overflow-y: auto; }
-.lane-stage .lane { min-height: 200px; }
+/* The floor belongs on the grid rows, not the tiles: a tile taller than its 1fr row overflows into
+   the row below and hides that row's headers. Rows at least 200px tall make the stage scroll instead. */
+.lane-stage { overflow-y: auto; grid-auto-rows: minmax(200px, 1fr); }
 .rail-scroll {
   mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
