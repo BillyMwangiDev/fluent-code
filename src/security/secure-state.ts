@@ -37,6 +37,10 @@ async function existingRegularFile(path: string) {
 }
 
 async function syncDirectory(directory: string) {
+  // Windows has no directory fsync: flushing a directory handle fails with EPERM, which stopped a
+  // packaged fluentd on its first state write. There the rename's durability rests on NTFS's
+  // metadata journal instead.
+  if (process.platform === 'win32') return;
   const handle = await open(directory, 'r');
   try {
     await handle.sync();
