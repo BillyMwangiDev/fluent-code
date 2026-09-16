@@ -157,7 +157,9 @@ manager.on('status', (sessionId: string, summary) => {
   for (const socket of sessionSubscribers.get(sessionId) ?? []) pushEvent(socket, {event: 'sessions.status', sessionId, summary});
   // A lane that ended on its own is worth telling the user about, once per ending. A resumed lane
   // is running again, so its next ending is announced too.
-  const reason = attentionForStatus(summary, announcedStatus.get(sessionId));
+  // A stop fluentd itself ordered for budget is announced by enforceBudget, with the figures; the
+  // exit it causes must not also read as "finished".
+  const reason = budgetStopped.has(sessionId) ? undefined : attentionForStatus(summary, announcedStatus.get(sessionId));
   if (reason) announce(sessionId, reason, summary);
   if (summary.status === 'running' || summary.status === 'starting') announcedStatus.delete(sessionId);
   else announcedStatus.set(sessionId, summary.status);
