@@ -195,7 +195,10 @@ describe('fallback guidance', () => {
     const instance = await broker();
     const resetAt = new Date(Date.now() + 47 * 60_000).toISOString();
 
-    assert.equal(instance.guidance('claude', {accountId: 'work-sub', resetAt}).recommendation, 'switch');
+    const guidance = instance.guidance('claude', {accountId: 'work-sub', resetAt});
+    assert.equal(guidance.recommendation, 'switch');
+    // A switch away from a subscription is never silent about what it costs (spec 2026-09-17 §2.6).
+    assert.match(guidance.detail, /1-hour prompt cache/);
   });
 
   it('recommends waiting when there is nothing to switch to', async () => {
