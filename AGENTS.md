@@ -26,8 +26,12 @@ Primary product goals:
   it is not a model-agnostic third provider.
 - **Account**: the subscription, platform-credits, or API-key identity used by a provider.
 - **Credential chain**: a provider's ordered precedence across subscription / platform API credits / API key, with automatic fallback and revert on a usage-limit hit.
+- **Limit window**: a provider's rolling usage cap on a credential — a 5-hour window and a
+  separate 7-day window — reported as percent used and time to reset.
 - **Session / thread**: an in-progress agent conversation and its terminal context.
 - **Agent lane**: one concurrent terminal session in the orchestration view.
+- **Budget**: a dollar cap set on an agent lane; fluentd stops the lane once its cost reaches it,
+  and it can be resumed with a higher cap.
 - **File claim**: a non-destructive reservation that signals an agent intends to edit a file.
 - **Coordination**: shared task board, project memory, decisions, handoffs, advisory file claims,
   observed-path conflicts, verification, and user-requested merge planning across agent lanes.
@@ -72,12 +76,13 @@ The current Pen design covers:
 4. Session list: multiple threads with provider, account, status, tokens, and timestamps.
 5. Remote server: connected hosts, embedded terminal, model usage, hardware, and software observability.
 6. Parallel orchestration: five simultaneous terminal lanes, shared task board, file claims, conflict resolution, project memory, agent handoffs, per-lane burn traces, and shared main-plus-subagent budget context.
-7. Design workspace: repo-native design tasks, component/token specs, live preview, source mappings, file claims, and design-to-build handoff.
-8. Preview & visual check: docked localhost preview, DOM/source mapping, console and network state, visual comparison, mismatch-to-agent actions, and approval/task actions.
+7. Design workspace: pen.dev and OpenDesign connector status, CLI discovery and install for both, an in-app-confirmed MCP installer for OpenDesign (Claude Code/Codex — pen.dev's own MCP toggle stays in the pen.dev app), and handoff task fields (source mapping, component/token notes, loopback preview link, intended implementation paths, reviewer handoff). The repo-native task board, live preview, and file-claim screen in the Pen artboards remain the target.
+8. Preview & visual check: a URL field that opens a guarded native preview window — loopback-only, the exact origin the user saved, no redirects or other local ports. The docked localhost preview with DOM/source mapping, console and network state, visual comparison, and mismatch-to-agent actions in the Pen artboards remain the target.
 9. New session: provider/account picker, explicit credential default, working directory, optional starting task, and keyboard-first launch.
 10. Claude Code credentials: ordered credential chain and fallback behavior.
 11. Usage observatory: local-first token, cache, spend, burn-rate, quota, model/agent, and active-session analysis that explicitly includes subagents.
 12. Themes & appearance: independent System, Light, and Dark modes; mode-filtered theme bundles; terminal ANSI/syntax/density settings.
+13. Limits & inbox: a limits strip in the workspace (per-credential 5-hour and 7-day windows), per-lane cost and budget on each tile, a top-bar inbox of lanes and credential notices that need the user, and limit/lane/fallback history on the spend page.
 
 ## Remote observability UI
 

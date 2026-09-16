@@ -1,8 +1,21 @@
 # Fluent Code
 
-Desktop orchestration for Claude Code, Codex, Gemini CLI, and linked Qwen, GLM, and NVIDIA models — `fluentd`
-owns real PTY sessions and a credential broker; `fluent` is a Tauri app that renders and
-coordinates them. See [`docs/superpowers/specs/2026-09-13-fluent-code-design.md`](docs/superpowers/specs/2026-09-13-fluent-code-design.md)
+Fluent runs your real Claude Code, Codex, Gemini CLI, and OpenCode-linked (Qwen, GLM, NVIDIA)
+CLIs as unmodified processes, and adds what none of them do alone:
+
+- **Falls back on limits.** When a credential hits its usage limit, Fluent switches the lane to
+  the next credential in your chain automatically, with notice and an auto-revert timer.
+- **Stops at a budget.** Set a dollar cap on a lane and Fluent stops it the moment its cost
+  reaches that figure.
+- **Shows limits and cost.** A limits strip reports each credential's 5-hour and 7-day usage
+  window; every lane tile shows its running cost.
+
+On top of that: parallel lanes on the same project, git-worktree isolation per lane, and
+cross-agent coordination — a shared task board, file claims, handoffs — so agents working the
+same project don't collide.
+
+`fluentd` owns the real PTY sessions and the credential broker; `fluent` is a Tauri app that
+renders and coordinates them. See [`docs/superpowers/specs/2026-09-13-fluent-code-design.md`](docs/superpowers/specs/2026-09-13-fluent-code-design.md)
 for the full design; this file covers the desktop implementation that exists today and calls out
 the remaining product gaps explicitly.
 
@@ -83,6 +96,23 @@ CLI's own flow (Fluent never reimplements login); "API key" saves a credential s
   collaboration skill can be installed at user scope across Claude Code, Codex, and Gemini CLI
   with one explicit approval. The daemon validates executable/argument/URL structure and can
   enforce a trusted-source policy for third-party extension sources.
+
+## What it costs to run
+
+Running agents in parallel costs more raw tokens than running one agent in one terminal, not
+less. Anthropic's own multi-agent research post reports subagent runs at roughly 4x the tokens of
+a single chat turn, and a full orchestrator-plus-parallel-workers run at roughly 15x (sourced,
+with Claude Code's own Agent Teams figure, in
+[`docs/research/2026-09-17-token-economics.md`](docs/research/2026-09-17-token-economics.md)).
+Fluent doesn't hide that trade-off. The honest measure of an orchestrator is cost per completed
+task, not cost per session — five lanes run in parallel can cost more in tokens than the same
+work done serially and still be the cheaper way to get it done, or not, depending on how much
+rework, merge conflict, and idle time it avoids. What Fluent reports today: a reported or
+estimated dollar cost on every lane tile and on the spend page, a per-credential 5-hour/7-day
+limit window so you can see what parallel lanes are spending against, and a per-lane dollar
+budget that stops a lane before it runs away. It does not yet compute a cost-per-completed-task
+figure or a serial-vs-parallel counterfactual — that needs attributing spend to task-board
+outcomes, which isn't built.
 
 ## Desktop packaging
 
