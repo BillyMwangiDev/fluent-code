@@ -33,7 +33,7 @@ export async function renderSplash(main: HTMLElement) {
     return;
   }
 
-  const chains = await api.listCredentials().catch(() => [] as CredentialChainState[]);
+  const [chains, installed] = await Promise.all([api.listCredentials().catch(() => [] as CredentialChainState[]), api.listProviders().catch(() => [])]);
   const providers: Array<{id: ProviderId; label: string}> = [
     {id: 'claude', label: 'anthropic claude'},
     {id: 'codex', label: 'openai codex'},
@@ -55,8 +55,10 @@ export async function renderSplash(main: HTMLElement) {
     h('p', {class: 'prompt'}, ['press ', h('kbd', {}, ['enter']), ' to continue'])
   );
 
-  const hasConnectedAccount = chains.some(chain => chain.accounts.length > 0);
-  const advance = () => navigate(hasConnectedAccount ? {name: 'orchestration'} : {name: 'onboarding'});
+  // A CLI that is installed can already log in on its own, so the workspace is the right landing;
+  // onboarding is for a machine with nothing to run yet.
+  const canStart = chains.some(chain => chain.accounts.length > 0) || installed.some(provider => provider.installed);
+  const advance = () => navigate(canStart ? {name: 'orchestration'} : {name: 'onboarding'});
   container.addEventListener('click', advance);
   const onKey = (event: KeyboardEvent) => {
     if (event.key === 'Enter') {
