@@ -87,9 +87,26 @@ compile rather than silently shipping host-native code. Build macOS on macOS and
 Windows. The **desktop package checks** workflow runs both native builds and retains the test
 installers as downloadable Actions artifacts for 30 days; it can also be started manually.
 
-The local and CI artifacts are unsigned test installers. A public release still requires an Apple
-Developer signing identity and notarization for macOS, a Windows code-signing certificate, clean
-machine installation checks, and the provider-credential and multi-lane smoke matrix.
+The local and CI artifacts are unsigned test installers: Gatekeeper refuses them on any other Mac
+until they are signed and notarized. The build is wired for that — `src-tauri/Entitlements.plist`
+carries the hardened-runtime entitlements the pkg-built `fluentd` needs (JIT, unsigned executable
+memory, unsigned native addons) — so a signed, notarized dmg needs only a Developer ID Application
+certificate in the login keychain and these variables set for `pnpm package:mac`:
+
+```sh
+APPLE_SIGNING_IDENTITY="Developer ID Application: <name> (<TEAMID>)" \
+APPLE_ID=<apple id> APPLE_PASSWORD=<app-specific password> APPLE_TEAM_ID=<TEAMID> \
+pnpm package:mac
+```
+
+Check the result with `codesign -dv --verbose=2 "/Applications/Fluent Code.app"` (expect the
+Developer ID authority and `runtime` among the flags) and `spctl -a -vv "/Applications/Fluent Code.app"`
+(expect `accepted`, source `Notarized Developer ID`). A public release still also requires a Windows
+code-signing certificate, clean-machine installation checks, and the provider-credential and
+multi-lane smoke matrix.
+
+The packaged app writes its logs to `~/Library/Logs/codes.fluent.desktop/`: `fluentd.log` is the
+daemon's own output (rolled to `fluentd.log.1` past 5 MB) and `Fluent Code.log` the desktop shell's.
 
 ## Security and local data
 

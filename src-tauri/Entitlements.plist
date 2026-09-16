@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- fluentd is a pkg-built Node binary: V8 needs JIT and writable-executable memory, and its
+       native addons (node-pty, @napi-rs/keyring) are not signed with the app's Team ID. Without
+       these three a hardened-runtime signature kills the sidecar at launch, which only shows up
+       on a signed build. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

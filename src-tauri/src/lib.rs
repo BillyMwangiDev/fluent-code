@@ -3,7 +3,7 @@ mod daemon_client;
 use daemon_client::Subscriptions;
 use std::collections::HashMap;
 #[cfg(not(debug_assertions))]
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -28,9 +28,29 @@ fn start_bundled_daemon(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
     // Windows), so it fails before ever opening its socket. Point it at the app's real data dir.
     let state_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&state_dir)?;
-    let mut child = Command::new(&daemon_path)
-        .env("FLUENT_STATE_DIR", &state_dir)
+    // A GUI process launched by LaunchServices has /dev/null on all three standard streams, so a
+    // bare spawn discarded every line fluentd wrote and a packaged daemon failure left no trace.
+    // Its output goes to the app's log directory instead, appended across launches and rolled
+    // once when it passes a few megabytes.
+    let log_dir = app.path().app_log_dir()?;
+    std::fs::create_dir_all(&log_dir)?;
+    let log_path = log_dir.join("fluentd.log");
+    if std::fs::metadata(&log_path).map(|meta| meta.len() > 5 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&log_path, log_dir.join("fluentd.log.1"));
+    }
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let mut command = Command::new(&daemon_path);
+    // An explicit FLUENT_STATE_DIR (a private one, to try a packaged build beside a live daemon)
+    // wins, as FLUENT_SOCKET already does by inheritance.
+    if std::env::var_os("FLUENT_STATE_DIR").is_none() {
+        command.env("FLUENT_STATE_DIR", &state_dir);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
         .spawn()?;
+    log::info!("fluentd sidecar pid {} · output in {}", child.id(), log_path.display());
     // The daemon intentionally survives a window close. Keep its handle in a detached watcher so
     // an unexpected exit is observable without granting the webview generic shell privileges.
     std::thread::spawn(move || {
@@ -196,15 +216,16 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![daemon_request, sessions_subscribe, sessions_unsubscribe, open_embedded_content])
         .setup(|app| {
+            // Release builds log too, to the app log directory: that is where "fluentd sidecar
+            // exited" lands, next to fluentd.log, when a packaged app misbehaves. Registered
+            // before the sidecar starts so its own startup line is not dropped.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build()
+            )?;
             #[cfg(not(debug_assertions))]
             start_bundled_daemon(app.handle())?;
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build()
-                )?;
-            }
             daemon_client::spawn_global_event_stream(app.handle().clone());
             Ok(())
         })

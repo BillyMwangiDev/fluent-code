@@ -5,6 +5,18 @@ import type {HardwareSample, HardwareSnapshot} from './daemon-protocol.js';
 
 const run = promisify(execFile);
 
+/**
+ * macOS counts file cache and compressor-backed pages as used, so `os.freemem()` is a few hundred
+ * megabytes on any Mac that has been up for a while — which made every capacity verdict "no
+ * headroom". `kern.memorystatus_level` is the kernel's own memory-free percentage (the figure
+ * `memory_pressure` prints), the number that actually says whether another process fits.
+ */
+export function availableMemoryFromStatusLevel(level: string, memoryTotalBytes: number): number | undefined {
+  const percent = Number(level.trim());
+  if (level.trim() === '' || !Number.isFinite(percent) || percent < 0 || percent > 100) return undefined;
+  return Math.round(memoryTotalBytes * percent / 100);
+}
+
 /** Some sandboxed or containerized Node runtimes deny uv_uptime(). Observability must remain
  * advisory: losing one host metric must never prevent fluentd from starting. */
 function safeUptime(): number {
@@ -17,6 +29,8 @@ export class HardwareMonitor {
   private lastCpu = process.cpuUsage();
   private lastAt = process.hrtime.bigint();
   private timer?: NodeJS.Timeout;
+  /** Bytes another process could use, from the platform's own figure when Node's is misleading. */
+  private availableBytes?: number;
 
   start() {
     void this.capture();
@@ -44,7 +58,7 @@ export class HardwareMonitor {
       capturedAt: new Date().toISOString(),
       cpuPercent,
       loadAverage: loadavg(),
-      memoryUsedBytes: totalmem() - freemem(),
+      memoryUsedBytes: totalmem() - (this.availableBytes ?? freemem()),
       memoryTotalBytes: totalmem(),
       processRssBytes: process.memoryUsage().rss,
       uptimeSeconds: safeUptime(),
@@ -54,6 +68,14 @@ export class HardwareMonitor {
   }
 
   private async capture() {
+    if (platform() === 'darwin') {
+      try {
+        const {stdout} = await run('sysctl', ['-n', 'kern.memorystatus_level'], {timeout: 2_000});
+        this.availableBytes = availableMemoryFromStatusLevel(stdout, totalmem());
+      } catch {
+        this.availableBytes = undefined; // fall back to freemem() rather than lose the sample
+      }
+    }
     const sample = this.sample();
     try {
       const {stdout} = await run('df', ['-k', process.cwd()]);
