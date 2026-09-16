@@ -37,8 +37,12 @@ import {assertTicketReady, isLiveLane, laneReadiness, renderLanes, renderWait, s
 import {coordCommand} from './agent-briefing.js';
 import {isRiskyPermission, sessionOptionArgs} from './session-options.js';
 import {attentionDetail, attentionForStatus, type AttentionReason} from './attention.js';
+import {shouldAutoVerify} from './auto-verify.js';
 
 const socketPath = daemonSocketPath();
+/** Lanes whose exit has already started an automatic verification, so recording that verification's
+ * own result cannot start another one. See auto-verify.ts. */
+const autoVerified = new Set<string>();
 const stateDirectory = process.env.FLUENT_STATE_DIR ?? join(process.cwd(), '.fluent');
 const manager = new SessionManager();
 const broker = new CredentialBroker();
@@ -150,10 +154,10 @@ manager.on('status', (sessionId: string, summary) => {
     broker.forgetSession(summary.provider, sessionId);
   }
   // An isolated lane that exited is done, and its worktree is the thing being judged — so gate it
-  // on the project's own checks without waiting to be asked. A session sharing the user's own
-  // checkout is deliberately left alone: running their suite unprompted in their working tree is
-  // intrusive in a way it is not in a lane opened for one task.
-  if (summary.status === 'exited' && summary.worktreePath && summary.verification !== 'running') {
+  // on the project's own checks without waiting to be asked. At most once per exit: recording the
+  // result emits another status change, and treating that as a fresh exit made verification
+  // re-enter itself until the daemon ran out of heap.
+  if (shouldAutoVerify(summary, autoVerified)) {
     void verifySession(sessionId, false, undefined, true).catch(error => console.error(`fluentd could not verify ${sessionId}: ${error.message}`));
   }
 });
@@ -162,6 +166,7 @@ manager.on('status', (sessionId: string, summary) => {
 // subscriber to receive. The provider was already stopped by the lifecycle guard in SessionManager.
 manager.on('deleted', (sessionId: string) => {
   sessionSubscribers.delete(sessionId);
+  autoVerified.delete(sessionId);
 });
 manager.runStore.on('event', event => runEvents.publish(event));
 broker.on('switched', (provider, accountId, reason) => {
